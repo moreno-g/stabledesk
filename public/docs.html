@@ -57,7 +57,11 @@
   h2{font-size:13px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-2); margin:34px 0 12px; font-weight:650}
   p{color:var(--ink-2)}
   code{font-family:var(--mono); font-size:.9em; background:var(--inset); padding:1px 6px; border-radius:5px; border:1px solid var(--line); color:var(--ink)}
-  pre{background:var(--inset); border:1px solid var(--line); border-radius:10px; padding:14px 16px; overflow-x:auto; font-family:var(--mono); font-size:12.5px; color:var(--ink); margin:0 0 12px}
+  pre{background:var(--inset); border:1px solid var(--line); border-radius:10px; padding:14px 16px; overflow-x:auto; font-family:var(--mono); font-size:12.5px; color:var(--ink); margin:0 0 12px; scrollbar-width:thin; scrollbar-color:var(--line-2) transparent}
+  pre::-webkit-scrollbar{height:7px}
+  pre::-webkit-scrollbar-track{background:transparent}
+  pre::-webkit-scrollbar-thumb{background:var(--line-2); border-radius:4px}
+  pre::-webkit-scrollbar-thumb:hover{background:var(--ink-3)}
   .card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; margin-bottom:14px}
   .btn{font-family:var(--sans); font-size:14px; font-weight:650; color:#04110f; background:var(--accent); border:0; border-radius:9px; padding:10px 18px; cursor:pointer}
   .btn:hover{filter:brightness(1.06)}
@@ -102,6 +106,26 @@
     </div>
   </div>
 
+  <div class="card">
+    <h2 style="margin-top:0">Upgrade to Pro — $29/mo, paid in USDC</h2>
+    <p>600 req/min, 20 webhook alerts. No card, no signup — pay once from any wallet on <b>Base</b>, auto-renews only if you send again. Paste your key (or use the one you just generated above).</p>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:4px">
+      <input id="upKey" type="text" placeholder="sbd_…" style="flex:1; min-width:220px; font-family:var(--mono); font-size:13px; background:var(--inset); border:1px solid var(--line); border-radius:9px; color:var(--ink); padding:9px 12px">
+      <button class="btn" id="orderBtn">Get payment address</button>
+    </div>
+    <div id="orderOut" style="display:none; margin-top:14px">
+      <table style="margin-bottom:10px">
+        <tbody>
+          <tr><td>Send exactly</td><td><code id="orderAmount" style="font-size:1.1em"></code> USDC</td></tr>
+          <tr><td>On</td><td>Base (chain id 8453)</td></tr>
+          <tr><td>To</td><td><code id="orderAddr" style="word-break:break-all"></code></td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:12.5px">The exact amount is unique to this order — it's how we match your payment on-chain. Upgrades automatically, usually in under a minute. This page checks status every few seconds.</p>
+      <p id="orderStatus" style="font-family:var(--mono); font-size:13px; color:var(--warn)">Waiting for payment…</p>
+    </div>
+  </div>
+
   <h2>Authentication</h2>
   <pre>curl https://stabledesk.xyz/v1/network \
   -H "X-API-Key: sbd_demo"</pre>
@@ -118,6 +142,8 @@
     <div class="ep"><span class="m">GET</span><span>/v1/transfers/largest</span><span class="d"><code>?limit=20</code> biggest transfers</span></div>
     <div class="ep"><span class="m">GET</span><span>/v1/address/{addr}</span><span class="d">Stats + recent transfers for an address</span></div>
     <div class="ep"><span class="m post">POST</span><span>/v1/keys</span><span class="d">Mint a free key</span></div>
+    <div class="ep"><span class="m post">POST</span><span>/v1/billing/order</span><span class="d">Get a USDC-on-Base payment address <span class="pill">pro</span></span></div>
+    <div class="ep"><span class="m">GET</span><span>/v1/billing/order</span><span class="d">Check your latest order / tier status</span></div>
     <div class="ep"><span class="m">GET</span><span>/v1/alerts</span><span class="d">List your alerts</span></div>
     <div class="ep"><span class="m post">POST</span><span>/v1/alerts</span><span class="d">Create a webhook alert</span></div>
     <div class="ep"><span class="m post">DELETE</span><span>/v1/alerts/{id}</span><span class="d">Remove an alert</span></div>
@@ -128,7 +154,7 @@
     <thead><tr><th>Tier</th><th>Rate limit</th><th>Alerts</th><th>Price</th></tr></thead>
     <tbody>
       <tr><td>Free</td><td>60 req/min</td><td>1 webhook</td><td>$0</td></tr>
-      <tr><td>Pro</td><td>600 req/min</td><td>20 webhooks</td><td><i>coming soon</i></td></tr>
+      <tr><td>Pro</td><td>600 req/min</td><td>20 webhooks</td><td>$29/mo · USDC on Base</td></tr>
     </tbody>
   </table>
 
@@ -165,6 +191,7 @@ curl -X DELETE https://stabledesk.xyz/v1/alerts/1 \
       const r = await fetch('/v1/keys', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ label: 'web' }) });
       const j = await r.json();
       document.getElementById('keyval').textContent = j.key;
+      document.getElementById('upKey').value = j.key;
       out.classList.add('show');
       genBtn.textContent = 'Generate another';
     } catch (e) { genBtn.textContent = 'Failed — retry'; }
@@ -173,6 +200,56 @@ curl -X DELETE https://stabledesk.xyz/v1/alerts/1 \
   document.getElementById('copyBtn').addEventListener('click', () => {
     navigator.clipboard.writeText(document.getElementById('keyval').textContent);
     document.getElementById('copyBtn').textContent = 'Copied';
+  });
+
+  // --- Upgrade to Pro: create a USDC-on-Base order, then poll until it's paid ---
+  const orderBtn = document.getElementById('orderBtn');
+  const orderOut = document.getElementById('orderOut');
+  const orderStatus = document.getElementById('orderStatus');
+  let pollTimer = null;
+
+  function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+  async function pollOrder(key) {
+    try {
+      const r = await fetch('/v1/billing/order', { headers: { 'X-API-Key': key } });
+      const j = await r.json();
+      if (j.tier === 'pro') {
+        stopPolling();
+        orderStatus.style.color = 'var(--good)';
+        orderStatus.textContent = '✓ Paid — you are Pro until ' + new Date(j.expiresAt).toLocaleDateString();
+      }
+    } catch (e) { /* transient — next poll retries */ }
+  }
+
+  orderBtn.addEventListener('click', async () => {
+    const key = document.getElementById('upKey').value.trim();
+    if (!key) { orderBtn.textContent = 'Paste your key first'; setTimeout(() => orderBtn.textContent = 'Get payment address', 1800); return; }
+    orderBtn.disabled = true; orderBtn.textContent = 'Requesting…';
+    try {
+      const r = await fetch('/v1/billing/order', { method: 'POST', headers: { 'X-API-Key': key } });
+      const j = await r.json();
+      if (r.status === 409) {
+        orderOut.style.display = 'block';
+        orderStatus.style.color = 'var(--good)';
+        orderStatus.textContent = '✓ This key is already Pro (until ' + new Date(j.expiresAt).toLocaleDateString() + ')';
+        document.getElementById('orderAmount').textContent = '—';
+        document.getElementById('orderAddr').textContent = '—';
+      } else if (r.ok) {
+        document.getElementById('orderAmount').textContent = j.amount;
+        document.getElementById('orderAddr').textContent = j.payTo;
+        orderStatus.style.color = 'var(--warn)';
+        orderStatus.textContent = 'Waiting for payment…';
+        orderOut.style.display = 'block';
+        stopPolling();
+        pollTimer = setInterval(() => pollOrder(key), 5000);
+      } else {
+        orderStatus.style.color = 'var(--warn)';
+        orderStatus.textContent = j.error || 'Something went wrong — check your key.';
+        orderOut.style.display = 'block';
+      }
+    } catch (e) { orderBtn.textContent = 'Failed — retry'; }
+    orderBtn.disabled = false; orderBtn.textContent = 'Get payment address';
   });
 </script>
 </body>

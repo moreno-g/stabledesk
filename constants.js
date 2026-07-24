@@ -23,3 +23,19 @@ export const SIZE_BRACKETS = [
   { label: '100K–1M', min: 1e5, max: 1e6 },
   { label: '1M+', min: 1e6, max: Infinity },
 ];
+
+// Crypto billing (Pro tier) — paid in native USDC on Base, since Arc is still testnet
+// (its USDC has no real value). Verified live against Base mainnet: chainId 8453,
+// USDC contract responds symbol()="USDC", decimals()=6.
+export const BASE_CHAIN_ID = 8453;
+export const BASE_RPC_ENDPOINTS = [
+  'https://mainnet.base.org',
+  'https://base.llamarpc.com',
+  'https://base-rpc.publicnode.com',
+];
+export const BASE_USDC = { address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', decimals: 6 };
+// Receiving address — self-custodied by the operator; this server only ever reads its balance/logs.
+export const PAYMENT_RECEIVE_ADDRESS = '0x06ed94D5Fd3392989C8A3dEE30196e1D1beabb05';
+export const PRO_PRICE_USD = 29;
+export const PRO_DURATION_DAYS = 30;
+export const ORDER_EXPIRY_MS = 2 * 60 * 60 * 1000; // unpaid orders (and their unique amount) expire after 2h
