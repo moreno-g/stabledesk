@@ -106,7 +106,7 @@
     </div>
   </div>
 
-  <div class="card">
+  <div class="card" id="upgradeCard" style="display:none">
     <h2 style="margin-top:0">Upgrade to Pro — $29/mo, paid in USDC</h2>
     <p>600 req/min, 20 webhook alerts. No card, no signup — pay once from any wallet on <b>Base</b>, auto-renews only if you send again. Paste your key (or use the one you just generated above).</p>
     <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:4px">
@@ -154,7 +154,7 @@
     <thead><tr><th>Tier</th><th>Rate limit</th><th>Alerts</th><th>Price</th></tr></thead>
     <tbody>
       <tr><td>Free</td><td>60 req/min</td><td>1 webhook</td><td>$0</td></tr>
-      <tr><td>Pro</td><td>600 req/min</td><td>20 webhooks</td><td>$29/mo · USDC on Base</td></tr>
+      <tr><td>Pro</td><td>600 req/min</td><td>20 webhooks</td><td id="proPrice"><i>coming soon</i></td></tr>
     </tbody>
   </table>
 
@@ -183,6 +183,14 @@ curl -X DELETE https://stabledesk.xyz/v1/alerts/1 \
 </div>
 
 <script>
+  // Pro billing is built but not announced yet — only show the upgrade flow once the
+  // server flag is on (checked live, not hardcoded, so this flips on the moment it's ready).
+  fetch('/v1/status').then((r) => r.json()).then((j) => {
+    if (!j.billingEnabled) return;
+    document.getElementById('upgradeCard').style.display = '';
+    document.getElementById('proPrice').innerHTML = '$29/mo · USDC on Base';
+  }).catch(() => {});
+
   const out = document.getElementById('keyout');
   const genBtn = document.getElementById('genBtn');
   genBtn.addEventListener('click', async () => {

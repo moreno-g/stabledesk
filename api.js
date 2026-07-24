@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import * as db from './db.js';
 import { live } from './indexer.js';
 import { getLabel } from './labels.js';
-import { RANGES, TIERS, TOKEN_SYMBOLS, ADDR_RE, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
+import { RANGES, TIERS, TOKEN_SYMBOLS, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
 import { validateWebhook } from './validate.js';
 
 // fixed-window in-memory rate limiter, per key per minute
@@ -76,6 +76,7 @@ export async function handleV1(req, res, u) {
       block: live.snapshot.network?.block ?? null,
       indexLag: live.snapshot.indexLag ?? null,
       updatedAt: live.snapshot.updatedAt ?? null,
+      billingEnabled: BILLING_ENABLED,
     });
   }
   if (path === '/v1/keys' && method === 'POST') {
@@ -152,6 +153,7 @@ export async function handleV1(req, res, u) {
 
   // --- billing: pay in USDC on Base, no card, no account ---
   if (path === '/v1/billing/order' && method === 'POST') {
+    if (!BILLING_ENABLED) return json(res, { error: 'billing_disabled', hint: 'Pro billing is not open yet — check back soon.' }, 403, H);
     if (rec.tier === 'pro') return json(res, { error: 'already_pro', expiresAt: rec.expires_at }, 409, H);
     const { id, amount } = db.createProOrder(key, PRO_PRICE_USD);
     return json(res, {
