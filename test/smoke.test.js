@@ -86,6 +86,53 @@ test('db round-trips keys, buckets, addresses', async () => {
   assert.equal(db.largestByToken('USDC', 3)[0].amount, 5000000);
   assert.ok(db.recentByToken('USDC', 5).length >= 5);
   assert.equal(db.sizeDistribution('EURC').total, 0);
+});
 
-  db.close();
+// ---- crypto billing (Pro tier, paid in USDC on Base) ----
+test('crypto billing: order matching, idempotency, renewal, expiry', async () => {
+  // Reuses the DB module + temp file from the previous test (db.js is an ESM singleton — one
+  // connection per process, closed once at the end of this, the final test in the file).
+  // Distinct key prefixes keep the two tests' data from colliding.
+  const db = await import('../db.js');
+  const { processLogs } = await import('../payments.js');
+
+  db.createKey('sbd_pay1', 'unit', 'free');
+  const { id, amount } = db.createProOrder('sbd_pay1', 29);
+  assert.ok(amount >= 29 && amount < 30, 'order amount is base price plus a sub-dollar offset');
+  assert.ok(db.pendingOrders().some((o) => o.id === id));
+
+  // Amounts are matched as integer micro-USDC — build the same kind of hex log a real
+  // Transfer event carries (log.data = the raw uint256 value, no 0x-padding assumptions).
+  const microHex = (usdc) => '0x' + BigInt(Math.round(usdc * 1e6)).toString(16);
+  const paidLog = { data: microHex(amount), transactionHash: '0xTEST1' };
+
+  processLogs([paidLog]);
+  let rec = db.getKey('sbd_pay1');
+  assert.equal(rec.tier, 'pro');
+  assert.ok(rec.expires_at > Date.now() + 29 * 86400000, 'expiry is ~30 days out');
+
+  // Replaying the same tx (e.g. a re-scanned block range) must not extend expiry again.
+  const expiresAfterFirstPay = rec.expires_at;
+  processLogs([paidLog]);
+  assert.equal(db.getKey('sbd_pay1').expires_at, expiresAfterFirstPay, 'paying twice for one order is idempotent');
+
+  // Renewing while still active stacks on top of the current expiry, not from "now".
+  const { amount: amount2 } = db.createProOrder('sbd_pay1', 29);
+  processLogs([{ data: microHex(amount2), transactionHash: '0xTEST2' }]);
+  assert.equal(db.getKey('sbd_pay1').expires_at, expiresAfterFirstPay + 30 * 86400000);
+
+  // A transfer that doesn't match any pending order's exact amount upgrades nothing.
+  db.createKey('sbd_pay2', 'unit', 'free');
+  db.createProOrder('sbd_pay2', 29);
+  processLogs([{ data: microHex(1.23), transactionHash: '0xTEST3' }]);
+  assert.equal(db.getKey('sbd_pay2').tier, 'free');
+
+  // Expired Pro reverts to free (the check api.js runs inline on every authenticated request).
+  db.createKey('sbd_pay3', 'unit', 'free');
+  db.upgradeToPro('sbd_pay3', -1); // negative days == already expired, test-only
+  assert.ok(db.getKey('sbd_pay3').expires_at < Date.now());
+  db.downgradeKey('sbd_pay3');
+  assert.equal(db.getKey('sbd_pay3').tier, 'free');
+
+  db.close(); // last test in the file — safe to close the shared connection here
 });

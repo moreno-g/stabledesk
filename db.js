@@ -62,12 +62,23 @@ db.exec(`
     min_amount REAL NOT NULL DEFAULT 0, webhook TEXT, created INTEGER,
     last_fired INTEGER NOT NULL DEFAULT 0, fires INTEGER NOT NULL DEFAULT 0
   );
+
+  CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL,
+    amount REAL NOT NULL,               -- exact USDC amount expected, e.g. 29.417231 (uniquified)
+    status TEXT NOT NULL DEFAULT 'pending', -- pending | paid | expired
+    created INTEGER NOT NULL, paid_at INTEGER, tx_hash TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+  CREATE INDEX IF NOT EXISTS idx_orders_amount ON orders(amount) WHERE status = 'pending';
 `);
 
 // Migrations: "real" (noise-filtered) volume columns — safe on existing DBs.
 for (const col of ['rvolume REAL NOT NULL DEFAULT 0', 'rcnt INTEGER NOT NULL DEFAULT 0']) {
   try { db.exec(`ALTER TABLE buckets ADD COLUMN ${col}`); } catch { /* already present */ }
 }
+// Migration: Pro-tier expiry, so a lapsed subscription reverts to free automatically.
+try { db.exec('ALTER TABLE api_keys ADD COLUMN expires_at INTEGER'); } catch { /* already present */ }
 
 const RECENT_KEEP = 1200;
 
@@ -163,6 +174,50 @@ const kstmt = {
 export function createKey(key, label, tier) { kstmt.ins.run(key, label || null, tier || 'free', Date.now()); return kstmt.get.get(key); }
 export const getKey = (key) => kstmt.get.get(key);
 export const bumpKey = (key) => kstmt.bump.run(Date.now(), key);
+
+const tierstmt = {
+  toPro: db.prepare("UPDATE api_keys SET tier = 'pro', expires_at = ? WHERE key = ?"),
+  toFree: db.prepare("UPDATE api_keys SET tier = 'free', expires_at = NULL WHERE key = ?"),
+};
+// Extends from the current expiry if still active (renewal), otherwise from now (lapsed or first purchase).
+export function upgradeToPro(key, days) {
+  const rec = getKey(key);
+  const base = rec?.expires_at && rec.expires_at > Date.now() ? rec.expires_at : Date.now();
+  const expiresAt = base + days * 86400000;
+  tierstmt.toPro.run(expiresAt, key);
+  return expiresAt;
+}
+export const downgradeKey = (key) => tierstmt.toFree.run(key);
+
+// ---- crypto orders (Pro tier billing) ----
+const ostmt = {
+  ins: db.prepare("INSERT INTO orders(key, amount, status, created) VALUES(?, ?, 'pending', ?)"),
+  pending: db.prepare("SELECT * FROM orders WHERE status = 'pending'"),
+  latestByKey: db.prepare('SELECT * FROM orders WHERE key = ? ORDER BY id DESC LIMIT 1'),
+  markPaid: db.prepare("UPDATE orders SET status = 'paid', paid_at = ?, tx_hash = ? WHERE id = ? AND status = 'pending'"),
+  expireStale: db.prepare("UPDATE orders SET status = 'expired' WHERE status = 'pending' AND created < ?"),
+  amountTaken: db.prepare("SELECT 1 FROM orders WHERE amount = ? AND status = 'pending'"),
+};
+// Generates a base-price order with a random 6-decimal offset so simultaneous orders never
+// collide on the exact USDC amount — that amount is how an incoming payment gets matched.
+export function createProOrder(key, basePrice) {
+  let amount;
+  for (let i = 0; i < 25; i++) {
+    const micro = Math.round(basePrice * 1e6) + 1 + Math.floor(Math.random() * 999999);
+    amount = micro / 1e6;
+    if (!ostmt.amountTaken.get(amount)) break;
+  }
+  const id = ostmt.ins.run(key, amount, Date.now()).lastInsertRowid;
+  return { id, amount };
+}
+export const pendingOrders = () => ostmt.pending.all();
+export const latestOrderByKey = (key) => ostmt.latestByKey.get(key);
+export const markOrderPaid = (id, txHash) => ostmt.markPaid.run(Date.now(), txHash, id).changes > 0;
+export const expireStaleOrders = (beforeTs) => ostmt.expireStale.run(beforeTs);
+
+// generic meta get/set, used by payments.js for its own block checkpoint
+export const getMetaValue = (k) => stmt.getMeta.get(k)?.v ?? null;
+export const setMetaValue = (k, v) => stmt.setMeta.run(k, String(v));
 
 // ---- alerts ----
 const astmt = {

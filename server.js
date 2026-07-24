@@ -10,6 +10,7 @@ import { gzipSync } from 'node:zlib';
 
 import * as db from './db.js';
 import { live, alertFeed, start, stop } from './indexer.js';
+import * as payments from './payments.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
 import { RANGES, ADDR_RE, TOKEN_SYMBOLS } from './constants.js';
@@ -141,6 +142,7 @@ server.listen(PORT, () => {
   console.log(`Stabledesk → http://localhost:${PORT}`);
   if (!db.getKey('sbd_demo')) db.createKey('sbd_demo', 'Public demo key', 'free');
   start();
+  payments.start();
 });
 
 let shuttingDown = false;
@@ -149,6 +151,7 @@ function shutdown() {
   shuttingDown = true;
   console.log('\nShutting down…');
   stop();                          // stop the live poll loop
+  payments.stop();                 // stop the payment poller
   server.close(() => { try { db.close(); } catch {} process.exit(0); });
   setTimeout(() => { try { db.close(); } catch {} process.exit(1); }, 10000).unref();
 }

@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import * as db from './db.js';
 import { live } from './indexer.js';
 import { getLabel } from './labels.js';
-import { RANGES, TIERS, TOKEN_SYMBOLS, ADDR_RE } from './constants.js';
+import { RANGES, TIERS, TOKEN_SYMBOLS, ADDR_RE, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
 import { validateWebhook } from './validate.js';
 
 // fixed-window in-memory rate limiter, per key per minute
@@ -95,6 +95,12 @@ export async function handleV1(req, res, u) {
   const rec = db.getKey(key);
   if (!rec) return json(res, { error: 'invalid_api_key' }, 401);
 
+  // A lapsed Pro subscription reverts to free right here, on next use — no cron needed.
+  if (rec.tier === 'pro' && rec.expires_at && rec.expires_at < Date.now()) {
+    db.downgradeKey(key);
+    rec.tier = 'free'; rec.expires_at = null;
+  }
+
   const tier = TIERS[rec.tier] || TIERS.free;
   const lim = rateLimit(key, tier.rpm);
   const H = { 'x-ratelimit-limit': String(tier.rpm), 'x-ratelimit-remaining': String(lim.remaining) };
@@ -142,6 +148,22 @@ export async function handleV1(req, res, u) {
     if (!ADDR_RE.test(addr)) return json(res, { error: 'bad_address' }, 400, H);
     const stats = db.addressStats(addr) || { address: addr, transfers: 0, volume: 0, last_block: 0 };
     return json(res, { ...stats, label: getLabel(addr)?.name || null, recent: db.addressRecent(addr, 25) }, 200, H);
+  }
+
+  // --- billing: pay in USDC on Base, no card, no account ---
+  if (path === '/v1/billing/order' && method === 'POST') {
+    if (rec.tier === 'pro') return json(res, { error: 'already_pro', expiresAt: rec.expires_at }, 409, H);
+    const { id, amount } = db.createProOrder(key, PRO_PRICE_USD);
+    return json(res, {
+      id, amount: amount.toFixed(6), currency: 'USDC', chain: 'base', chainId: BASE_CHAIN_ID,
+      tokenAddress: BASE_USDC.address, payTo: PAYMENT_RECEIVE_ADDRESS,
+      expiresInMinutes: Math.round(ORDER_EXPIRY_MS / 60000),
+      note: 'Send exactly this amount of USDC on Base to payTo. Your key upgrades to Pro automatically once the payment is detected (usually under a minute) — no confirmation step needed.',
+    }, 201, H);
+  }
+  if (path === '/v1/billing/order' && method === 'GET') {
+    const order = db.latestOrderByKey(key);
+    return json(res, { order: order ? { id: order.id, amount: order.amount, status: order.status, created: order.created, paidAt: order.paid_at } : null, tier: rec.tier, expiresAt: rec.expires_at }, 200, H);
   }
 
   if (path === '/v1/alerts' && method === 'GET') return json(res, { tier: rec.tier, max: tier.maxAlerts, alerts: db.alertsByKey(key) }, 200, H);
