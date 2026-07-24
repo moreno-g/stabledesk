@@ -20,7 +20,8 @@ const PORT = Number(process.env.PORT) || 4317;
 
 const SEC = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY' };
 // CSP tuned to the app: inline styles/scripts + a data: favicon, everything else same-origin only.
-const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+// Umami analytics is loaded from and reports to cloud.umami.is, so it's allowlisted explicitly.
+const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cloud.umami.is; connect-src 'self' https://cloud.umami.is; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 function json(res, body, code = 200) {
   res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-store', 'x-robots-tag': 'noindex', ...SEC });
