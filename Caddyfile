@@ -1,0 +1,6 @@
+# Automatic HTTPS via Let's Encrypt. Replace the domain if yours differs.
+# DNS for stabledesk.xyz must point to this server's IP before TLS can be issued.
+stabledesk.xyz, www.stabledesk.xyz {
+	encode gzip
+	reverse_proxy app:4317
+}

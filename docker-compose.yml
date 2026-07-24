@@ -1,0 +1,32 @@
+# Stabledesk — app + Caddy reverse proxy (automatic HTTPS).
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      - PORT=4317
+      - DB_PATH=/app/data/arc.db
+    volumes:
+      - dbdata:/app/data          # persistent SQLite (survives redeploys)
+    ports:
+      - "4317:4317"               # optional: lets you smoke-test via http://SERVER_IP:4317
+    expose:
+      - "4317"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data          # stores the TLS certificates
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  dbdata:
+  caddy_data:
+  caddy_config:
