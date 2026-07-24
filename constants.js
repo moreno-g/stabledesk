@@ -27,6 +27,11 @@ export const SIZE_BRACKETS = [
 // Crypto billing (Pro tier) — paid in native USDC on Base, since Arc is still testnet
 // (its USDC has no real value). Verified live against Base mainnet: chainId 8453,
 // USDC contract responds symbol()="USDC", decimals()=6.
+//
+// Off by default (opt-in via env var) — the flow is fully built and proven, but not
+// announced yet. The payment poller itself keeps running regardless (so anything already
+// sent still gets credited); this flag only gates *creating new* orders and the public UI.
+export const BILLING_ENABLED = process.env.BILLING_ENABLED === 'true';
 export const BASE_CHAIN_ID = 8453;
 export const BASE_RPC_ENDPOINTS = [
   'https://mainnet.base.org',
