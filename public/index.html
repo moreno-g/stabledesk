@@ -266,6 +266,7 @@
 const $ = (s) => document.querySelector(s);
 const nf = new Intl.NumberFormat('en-US');
 const short = (a) => a ? a.slice(0,6)+'…'+a.slice(-4) : '—';
+const esc = (s) => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money = (n,d=0)=> (n==null||isNaN(n))?'—':nf.format(Number(n.toFixed(d)));
 function compact(n){
   if(n==null||isNaN(n)) return '—';
@@ -331,7 +332,7 @@ function renderState(d){
   $('#strip').innerHTML=d.liveBlocks.map(b=>`<div class="blk" style="height:${Math.max(4,b.tx/maxTx*100)}%" title="block #${b.n} · ${b.tx} tx"></div>`).join('');
   $('#striplab').innerHTML=`<span>#${nf.format(d.liveBlocks[0].n)}</span><span>transactions / block</span><span>#${nf.format(d.liveBlocks.at(-1).n)}</span>`;
 
-  const acell=(addr,label)=> label? `<span class="lblchip">${label}</span>` : `<span class="addr">${short(addr)}</span>`;
+  const acell=(addr,label)=> label? `<span class="lblchip">${esc(label)}</span>` : `<span class="addr">${short(addr)}</span>`;
   $('#largest').innerHTML = (d.largest&&d.largest.length)? d.largest.map(x=>`<tr>
       <td><span class="chip ${x.token.toLowerCase()}">${x.token}</span></td>
       <td>${acell(x.frm,x.fromLabel)}</td><td>${acell(x.too,x.toLabel)}</td>
@@ -340,7 +341,7 @@ function renderState(d){
 
   $('#top').innerHTML = (d.top&&d.top.length)? d.top.map((x,i)=>`<tr class="${isWatched(x.address)?'watched':''}">
       <td class="rank">${i+1}</td>
-      <td><button class="star ${isWatched(x.address)?'on':''}" onclick="toggleWatch('${x.address}')" title="Watch address">${isWatched(x.address)?'★':'☆'}</button> ${x.label? `<span class="lblchip">${x.label}</span>`:`<span class="addr">${short(x.address)}</span>`}${x.contract?'<span class="tag">contract</span>':''}</td>
+      <td><button class="star ${isWatched(x.address)?'on':''}" onclick="toggleWatch('${x.address}')" title="Watch address">${isWatched(x.address)?'★':'☆'}</button> ${x.label? `<span class="lblchip">${esc(x.label)}</span>`:`<span class="addr">${short(x.address)}</span>`}${x.contract?'<span class="tag">contract</span>':''}</td>
       <td class="r">${nf.format(x.transfers)}</td><td class="r amt">${compact(x.volume)}</td></tr>`).join('')
     : '<tr><td colspan="4" style="color:var(--ink-3);padding:14px 0">Building rankings…</td></tr>';
 }
@@ -402,7 +403,7 @@ async function renderWatch(){
   const rows=await Promise.all(w.slice(0,12).map(async a=>{
     try{ const d=await (await fetch('/api/address?addr='+a,{cache:'no-store'})).json();
       return `<div class="watchrow"><button class="star on" onclick="toggleWatch('${a}')" title="Unwatch">★</button>
-        <span class="waddr">${d.label||short(a)}</span>
+        <span class="waddr">${d.label?esc(d.label):short(a)}</span>
         <span class="wstat">${nf.format(d.transfers||0)} tx · ${compact(d.volume||0)}</span></div>`;
     }catch(e){ return `<div class="watchrow"><button class="star on" onclick="toggleWatch('${a}')">★</button><span class="waddr">${short(a)}</span></div>`; }
   }));

@@ -1,0 +1,68 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  html,body{margin:0;padding:0;width:1500px;height:500px;overflow:hidden}
+  .wrap{
+    position:relative;width:1500px;height:500px;background:#0B0F14;overflow:hidden;
+    font-family:system-ui,-apple-system,"SF Pro Display",Helvetica,Arial,sans-serif;
+  }
+  /* dot grid, like the terminal canvas */
+  .grid{
+    position:absolute;inset:0;
+    background-image:radial-gradient(rgba(255,255,255,.08) 1.4px, transparent 1.4px);
+    background-size:26px 26px;
+  }
+  /* brand glow */
+  .glow{
+    position:absolute;width:1100px;height:1100px;border-radius:50%;
+    right:-260px;top:-430px;
+    background:radial-gradient(circle,rgba(37,196,182,.30) 0%,rgba(155,126,222,.16) 42%,transparent 68%);
+  }
+  .content{position:absolute;left:110px;top:126px}
+  .logo{
+    width:74px;height:74px;border-radius:19px;
+    background:linear-gradient(135deg,#0FA79E,#25C4B8 45%,#9B7EDE);
+    position:relative;margin-bottom:30px;
+  }
+  .logo::after{
+    content:"";position:absolute;inset:17px;
+    border:5px solid rgba(255,255,255,.95);border-right-color:transparent;
+    border-radius:9px;transform:rotate(-45deg);
+  }
+  h1{
+    margin:0;font-size:82px;font-weight:700;letter-spacing:-.035em;
+    color:#E9EEF4;line-height:1;
+  }
+  .tag{
+    margin-top:20px;
+    font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;
+    font-size:20px;letter-spacing:.17em;text-transform:uppercase;color:#8FA0AE;
+  }
+  .tag b{color:#25C4B8;font-weight:600}
+  /* live chart motif, bottom right */
+  svg.chart{position:absolute;right:0;bottom:0;width:820px;height:290px}
+</style></head>
+<body>
+<div class="wrap">
+  <div class="grid"></div>
+  <div class="glow"></div>
+
+  <svg class="chart" viewBox="0 0 820 290" preserveAspectRatio="none">
+    <defs>
+      <linearGradient id="f" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#25C4B8" stop-opacity=".34"/>
+        <stop offset="100%" stop-color="#25C4B8" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <path d="M0,250 L70,232 L140,238 L210,176 L280,196 L350,120 L420,150 L490,88 L560,116 L630,52 L700,84 L770,34 L820,58 L820,290 L0,290 Z" fill="url(#f)"/>
+    <path d="M0,250 L70,232 L140,238 L210,176 L280,196 L350,120 L420,150 L490,88 L560,116 L630,52 L700,84 L770,34 L820,58"
+          fill="none" stroke="#25C4B8" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
+  </svg>
+
+  <div class="content">
+    <div class="logo"></div>
+    <h1>Stabledesk</h1>
+    <div class="tag">The stablecoin terminal &nbsp;·&nbsp; <b>stabledesk.xyz</b></div>
+  </div>
+</div>
+</body></html>

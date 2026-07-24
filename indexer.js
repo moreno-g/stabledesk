@@ -54,6 +54,7 @@ async function fireWebhook(rule, ev) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ source: 'stabledesk', event: ev, rule: rule.id, at: Date.now() }),
       signal: AbortSignal.timeout(5000),
+      redirect: 'error', // don't let a 3xx redirect bypass the SSRF allow-list (e.g. → 169.254.169.254)
     });
   } catch { /* user webhook down — ignore */ }
 }
@@ -285,6 +286,8 @@ async function tick() {
   }
 }
 
+let timer = null;
+
 export async function start() {
   // Anchor first so backfilled timestamps are sane, then seed history.
   try {
@@ -297,5 +300,8 @@ export async function start() {
     console.error('[start] backfill skipped:', e.message);
   }
   await tick();
-  setInterval(tick, POLL_MS);
+  timer = setInterval(tick, POLL_MS);
 }
+
+// Stop the live poll loop (used for a clean shutdown).
+export function stop() { if (timer) { clearInterval(timer); timer = null; } }

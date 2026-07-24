@@ -114,14 +114,23 @@ export function applyBatch(buckets, addrs, recents) {
 }
 
 // Time series, grouped into buckets of `groupSec`, since unix second `since`.
+// Statements are cached per (filter, groupSec); groupSec is coerced to a positive
+// integer before interpolation so it can never carry untrusted SQL.
+const histStmts = new Map();
 export function getHistory(token, since, groupSec) {
   const filter = token && token !== 'ALL';
-  const sql = `SELECT (minute / ${groupSec}) * ${groupSec} AS t,
-      SUM(volume) AS volume, SUM(cnt) AS cnt, SUM(mint) AS mint, SUM(burn) AS burn,
-      SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt
-    FROM buckets WHERE minute >= ? ${filter ? 'AND token = ?' : ''}
-    GROUP BY t ORDER BY t`;
-  const rows = filter ? db.prepare(sql).all(since, token) : db.prepare(sql).all(since);
+  const g = Math.max(1, Math.floor(Number(groupSec) || 60));
+  const ck = (filter ? 'f' : 'a') + g;
+  let ps = histStmts.get(ck);
+  if (!ps) {
+    ps = db.prepare(`SELECT (minute / ${g}) * ${g} AS t,
+        SUM(volume) AS volume, SUM(cnt) AS cnt, SUM(mint) AS mint, SUM(burn) AS burn,
+        SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt
+      FROM buckets WHERE minute >= ? ${filter ? 'AND token = ?' : ''}
+      GROUP BY t ORDER BY t`);
+    histStmts.set(ck, ps);
+  }
+  const rows = filter ? ps.all(since, token) : ps.all(since);
   return rows.map((r) => ({ t: r.t, volume: r.volume, cnt: r.cnt, mint: r.mint, burn: r.burn, rvolume: r.rvolume, rcnt: r.rcnt }));
 }
 
@@ -183,3 +192,6 @@ export function prune(nowSec, latestBlock, blockMs) {
   stmt.pruneBuckets.run(nowSec - 7 * 86400);
   stmt.pruneAddrs.run(latestBlock - weekBlocks);
 }
+
+// Close the database (WAL checkpoint) for a clean shutdown.
+export const close = () => { try { db.close(); } catch { /* already closed */ } };

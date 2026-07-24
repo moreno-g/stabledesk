@@ -1,0 +1,5 @@
+node_modules/
+arc.db
+arc.db-wal
+arc.db-shm
+.DS_Store

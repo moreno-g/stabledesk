@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  html,body{margin:0;padding:0;width:400px;height:400px;overflow:hidden;background:#000}
+  .wrap{
+    width:400px;height:400px;
+    background:linear-gradient(135deg,#0FA79E 0%,#25C4B8 42%,#7FA8D8 72%,#9B7EDE 100%);
+    display:grid;place-items:center;
+  }
+  /* same motif as the site logo: rounded square outline, one side removed, rotated */
+  .mark{
+    width:186px;height:186px;
+    border:26px solid rgba(255,255,255,.96);
+    border-right-color:transparent;
+    border-radius:40px;
+    transform:rotate(-45deg);
+  }
+</style></head>
+<body><div class="wrap"><div class="mark"></div></div></body></html>
