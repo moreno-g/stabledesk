@@ -133,6 +133,32 @@ test('crypto billing: order matching, idempotency, renewal, expiry', async () =>
   assert.ok(db.getKey('sbd_pay3').expires_at < Date.now());
   db.downgradeKey('sbd_pay3');
   assert.equal(db.getKey('sbd_pay3').tier, 'free');
+});
+
+// ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----
+test('whalewatch: threshold filtering, drafting, and dedupe', async () => {
+  const db = await import('../db.js');
+  const { evaluate, draftText, TWEET_WORTHY_MIN } = await import('../whalewatch.js');
+
+  const small = { kind: 'transfer', token: 'USDC', amount: 500, from: '0x' + '5'.repeat(40), to: '0x' + '6'.repeat(40), block: 1 };
+  const big = { kind: 'transfer', token: 'USDC', amount: 300000, from: '0x' + '5'.repeat(40), to: '0x' + '6'.repeat(40), block: 2 };
+  const mint = { kind: 'mint', token: 'EURC', amount: 400000, from: '0x'.padEnd(42, '0'), to: '0x' + '7'.repeat(40), block: 3 };
+
+  const drafts = evaluate([small, big, mint]);
+  assert.equal(drafts.length, 2, 'only events at/above the threshold become drafts');
+  assert.ok(drafts.every((d) => d.amount >= TWEET_WORTHY_MIN));
+
+  assert.match(draftText(big), /testnet/i, 'drafted text always flags testnet — never implies real value');
+  assert.match(draftText(mint), /minted/);
+  assert.doesNotMatch(draftText(big), /\$/, 'no dollar sign — these are token units, not USD');
+
+  // Persist + dedupe: the same on-chain event must never produce two stored drafts.
+  const d = drafts[0];
+  const first = db.createTweetDraft({ kind: d.kind, token: d.token, amount: d.amount, frm: d.from, too: d.to, block: d.block, dedupeKey: d.dedupeKey, text: d.text });
+  const second = db.createTweetDraft({ kind: d.kind, token: d.token, amount: d.amount, frm: d.from, too: d.to, block: d.block, dedupeKey: d.dedupeKey, text: d.text });
+  assert.equal(first, true, 'first insert is new');
+  assert.equal(second, false, 'replaying the same event is a no-op, not a duplicate draft');
+  assert.equal(db.pendingTweetDrafts().filter((r) => r.dedupe_key === d.dedupeKey).length, 1);
 
   db.close(); // last test in the file — safe to close the shared connection here
 });

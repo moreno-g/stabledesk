@@ -71,6 +71,17 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
   CREATE INDEX IF NOT EXISTS idx_orders_amount ON orders(amount) WHERE status = 'pending';
+
+  -- Draft social posts for notable ("whale") transfers — held in reserve until Arc
+  -- mainnet (see whalewatch.js). Nothing delivers these anywhere yet; they just
+  -- accumulate here so the detection logic can be built and proven ahead of time.
+  CREATE TABLE IF NOT EXISTS tweet_drafts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL, token TEXT NOT NULL, amount REAL NOT NULL,
+    frm TEXT, too TEXT, block INTEGER, dedupe_key TEXT NOT NULL UNIQUE,
+    text TEXT NOT NULL, created INTEGER NOT NULL, delivered INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_drafts_delivered ON tweet_drafts(delivered);
 `);
 
 // Migrations: "real" (noise-filtered) volume columns — safe on existing DBs.
@@ -218,6 +229,21 @@ export const expireStaleOrders = (beforeTs) => ostmt.expireStale.run(beforeTs);
 // generic meta get/set, used by payments.js for its own block checkpoint
 export const getMetaValue = (k) => stmt.getMeta.get(k)?.v ?? null;
 export const setMetaValue = (k, v) => stmt.setMeta.run(k, String(v));
+
+// ---- tweet drafts (whale-transfer content, held in reserve — see whalewatch.js) ----
+const tdstmt = {
+  ins: db.prepare(`INSERT OR IGNORE INTO tweet_drafts(kind, token, amount, frm, too, block, dedupe_key, text, created)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  pending: db.prepare('SELECT * FROM tweet_drafts WHERE delivered = 0 ORDER BY id'),
+  markDelivered: db.prepare('UPDATE tweet_drafts SET delivered = 1 WHERE id = ?'),
+};
+// Returns true if this is a new draft, false if dedupe_key already existed (INSERT OR IGNORE).
+export function createTweetDraft(d) {
+  const info = tdstmt.ins.run(d.kind, d.token, d.amount, d.frm || null, d.too || null, d.block || null, d.dedupeKey, d.text, Date.now());
+  return info.changes > 0;
+}
+export const pendingTweetDrafts = () => tdstmt.pending.all();
+export const markDraftDelivered = (id) => tdstmt.markDelivered.run(id);
 
 // ---- alerts ----
 const astmt = {
