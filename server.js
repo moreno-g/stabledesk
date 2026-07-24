@@ -134,6 +134,7 @@ const server = http.createServer(async (req, res) => {
   if (path === '/docs' || path === '/docs.html') return serveFile(req, res, 'docs.html');
   if (path === '/token' || path === '/token.html') return serveFile(req, res, 'token.html');
   if (path === '/methodology' || path === '/methodology.html') return serveFile(req, res, 'methodology.html');
+  if (path === '/status' || path === '/status.html') return serveFile(req, res, 'status.html');
   if (path === '/' || path === '/index.html') return serveFile(req, res, 'index.html');
   return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404); // unknown → real 404
 });
