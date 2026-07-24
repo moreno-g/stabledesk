@@ -1,0 +1,148 @@
+// Public data API (/v1) — API keys, tiers, rate limiting. The monetization layer.
+
+import { randomBytes } from 'node:crypto';
+import * as db from './db.js';
+import { live } from './indexer.js';
+import { getLabel } from './labels.js';
+import { RANGES, TIERS, TOKEN_SYMBOLS, ADDR_RE } from './constants.js';
+import { validateWebhook } from './validate.js';
+
+// fixed-window in-memory rate limiter, per key per minute
+const rl = new Map();
+function rateLimit(key, rpm) {
+  const win = Math.floor(Date.now() / 60000);
+  let e = rl.get(key);
+  if (!e || e.win !== win) { e = { win, count: 0 }; rl.set(key, e); }
+  e.count += 1;
+  return { ok: e.count <= rpm, remaining: Math.max(0, rpm - e.count) };
+}
+
+// key minting — per IP, max 5/hour
+const keyRl = new Map();
+const KEY_LIMIT = 5;
+function rateLimitKeys(ip) {
+  const win = Math.floor(Date.now() / 3600000);
+  let e = keyRl.get(ip);
+  if (!e || e.win !== win) { e = { win, count: 0 }; keyRl.set(ip, e); }
+  e.count += 1;
+  return e.count <= KEY_LIMIT;
+}
+
+function clientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (typeof fwd === 'string' && fwd) return fwd.split(',')[0].trim();
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+function json(res, body, code = 200, headers = {}) {
+  res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-store', ...headers });
+  res.end(JSON.stringify(body));
+}
+function readBody(req) {
+  return new Promise((resolve) => {
+    let d = ''; req.on('data', (c) => { d += c; if (d.length > 1e5) req.destroy(); });
+    req.on('end', () => { try { resolve(JSON.parse(d || '{}')); } catch { resolve({}); } });
+  });
+}
+
+export async function handleV1(req, res, u) {
+  const path = u.pathname;
+  const method = req.method;
+
+  // --- public (no key) ---
+  if (path === '/v1/status') {
+    return json(res, {
+      ok: live.snapshot.ok,
+      chainId: 5042002,
+      block: live.snapshot.network?.block ?? null,
+      indexLag: live.snapshot.indexLag ?? null,
+      updatedAt: live.snapshot.updatedAt ?? null,
+    });
+  }
+  if (path === '/v1/keys' && method === 'POST') {
+    const ip = clientIp(req);
+    if (!rateLimitKeys(ip)) {
+      return json(res, { error: 'key_limit_reached', hint: 'Max 5 free keys per hour per IP. Reuse an existing key.' }, 429, { 'retry-after': '3600' });
+    }
+    const body = await readBody(req);
+    const key = 'sbd_' + randomBytes(16).toString('hex');
+    const rec = db.createKey(key, String(body.label || '').slice(0, 60), 'free');
+    return json(res, { key, tier: rec.tier, rpm: TIERS.free.rpm, docs: '/docs', note: 'Send this as the X-API-Key header on /v1 requests.' }, 201);
+  }
+
+  // --- authenticated ---
+  const key = req.headers['x-api-key'] || u.searchParams.get('key');
+  if (!key) return json(res, { error: 'missing_api_key', hint: 'Send an X-API-Key header. Get a free key with POST /v1/keys.' }, 401);
+  const rec = db.getKey(key);
+  if (!rec) return json(res, { error: 'invalid_api_key' }, 401);
+
+  const tier = TIERS[rec.tier] || TIERS.free;
+  const lim = rateLimit(key, tier.rpm);
+  const H = { 'x-ratelimit-limit': String(tier.rpm), 'x-ratelimit-remaining': String(lim.remaining) };
+  if (!lim.ok) return json(res, { error: 'rate_limited', tier: rec.tier, limit_per_min: tier.rpm }, 429, { ...H, 'retry-after': '60' });
+  db.bumpKey(key);
+
+  const s = live.snapshot;
+  if (!s.ok) return json(res, { error: 'indexing', hint: 'Data warming up, retry shortly.' }, 503, H);
+
+  if (path === '/v1/network') return json(res, { ...s.network, indexLag: s.indexLag ?? null, updatedAt: s.updatedAt }, 200, H);
+
+  if (path === '/v1/stablecoins') return json(res, { supply: s.supply, totalSupply: s.totalSupply, summary24h: s.summary24h, updatedAt: s.updatedAt }, 200, H);
+
+  if (path === '/v1/stablecoins/history') {
+    const token = (u.searchParams.get('token') || 'ALL').toUpperCase();
+    const r = RANGES[u.searchParams.get('range')] || RANGES['24h'];
+    const since = Math.floor(Date.now() / 1000) - r.span;
+    return json(res, { token, group: r.group, series: db.getHistory(token, since, r.group) }, 200, H);
+  }
+
+  if (path === '/v1/addresses/top') {
+    const limit = Math.min(100, Number(u.searchParams.get('limit')) || 20);
+    return json(res, { top: db.getTop(limit).map((x) => ({ ...x, label: getLabel(x.address)?.name || null })) }, 200, H);
+  }
+
+  if (path === '/v1/transfers/largest') {
+    const limit = Math.min(100, Number(u.searchParams.get('limit')) || 20);
+    return json(res, { transfers: db.getLargest(limit) }, 200, H);
+  }
+
+  if (path.startsWith('/v1/address/')) {
+    const addr = path.slice('/v1/address/'.length).toLowerCase();
+    if (!ADDR_RE.test(addr)) return json(res, { error: 'bad_address' }, 400, H);
+    const stats = db.addressStats(addr) || { address: addr, transfers: 0, volume: 0, last_block: 0 };
+    return json(res, { ...stats, label: getLabel(addr)?.name || null, recent: db.addressRecent(addr, 25) }, 200, H);
+  }
+
+  if (path === '/v1/alerts' && method === 'GET') return json(res, { tier: rec.tier, max: tier.maxAlerts, alerts: db.alertsByKey(key) }, 200, H);
+
+  if (path.startsWith('/v1/alerts/') && method === 'DELETE') {
+    const id = Number(path.slice('/v1/alerts/'.length));
+    if (!Number.isInteger(id) || id < 1) return json(res, { error: 'bad_id' }, 400, H);
+    if (!db.deleteAlert(id, key)) return json(res, { error: 'not_found' }, 404, H);
+    return json(res, { deleted: id }, 200, H);
+  }
+
+  if (path === '/v1/alerts' && method === 'POST') {
+    const body = await readBody(req);
+    if (db.alertCount(key) >= tier.maxAlerts) {
+      return json(res, { error: 'alert_limit_reached', tier: rec.tier, max: tier.maxAlerts, upgrade: `Pro tier allows ${TIERS.pro.maxAlerts} alerts.` }, 402, H);
+    }
+    const whErr = validateWebhook(body.webhook);
+    if (whErr === 'invalid_url') return json(res, { error: 'webhook_required', hint: 'Provide a valid https webhook URL (Discord/Slack/Telegram).' }, 400, H);
+    if (whErr) return json(res, { error: 'webhook_blocked', hint: 'Webhook must be a public https URL (no localhost or private IPs).' }, 400, H);
+
+    const token = body.token ? String(body.token).toUpperCase() : null;
+    if (token && !TOKEN_SYMBOLS.has(token)) return json(res, { error: 'bad_token', hint: 'token must be USDC, EURC, or USYC.' }, 400, H);
+
+    const address = body.address ? String(body.address).toLowerCase() : null;
+    if (address && !ADDR_RE.test(address)) return json(res, { error: 'bad_address' }, 400, H);
+
+    const minAmount = body.minAmount != null ? Number(body.minAmount) : 0;
+    if (Number.isNaN(minAmount) || minAmount < 0) return json(res, { error: 'bad_min_amount' }, 400, H);
+
+    const id = db.createAlert({ key, address, token, minAmount, webhook: body.webhook });
+    return json(res, { id, message: 'Alert created. Fires (max 1×/min) when a matching transfer is indexed.' }, 201, H);
+  }
+
+  return json(res, { error: 'not_found', see: '/docs' }, 404, H);
+}

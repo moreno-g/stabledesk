@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stabledesk · Stablecoin Terminal</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230FA79E'/%3E%3Ctext x='16' y='21' font-family='system-ui,Arial' font-size='17' font-weight='700' fill='white' text-anchor='middle'%3ES%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0B0F14; --panel:#121820; --panel-2:#161D26; --inset:#0E141B;
+    --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583;
+    --line:#212B36; --line-2:#2B3742;
+    --accent:#25C4B8; --accent-2:#3AD7CB;
+    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE;
+    --good:#37C98A; --warn:#E7A93A; --bad:#E5686A;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --shadow:0 1px 2px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.28);
+    --radius:14px;
+  }
+  @media (prefers-color-scheme:light){
+    :root{
+      --bg:#EEF1F5; --panel:#FFFFFF; --panel-2:#F4F7FA; --inset:#EAEEF3;
+      --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2;
+      --line:#E1E6EC; --line-2:#D2DAE2;
+      --accent:#0FA79E; --accent-2:#0B7E77;
+      --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0;
+      --good:#128A5B; --warn:#B4791A; --bad:#D2494B;
+      --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08);
+    }
+  }
+  /* explicit manual overrides — win over the media query in both directions */
+  :root[data-theme="dark"]{
+    --bg:#0B0F14; --panel:#121820; --panel-2:#161D26; --inset:#0E141B;
+    --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583;
+    --line:#212B36; --line-2:#2B3742;
+    --accent:#25C4B8; --accent-2:#3AD7CB;
+    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE;
+    --good:#37C98A; --warn:#E7A93A; --bad:#E5686A;
+    --shadow:0 1px 2px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.28);
+  }
+  :root[data-theme="light"]{
+    --bg:#EEF1F5; --panel:#FFFFFF; --panel-2:#F4F7FA; --inset:#EAEEF3;
+    --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2;
+    --line:#E1E6EC; --line-2:#D2DAE2;
+    --accent:#0FA79E; --accent-2:#0B7E77;
+    --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0;
+    --good:#128A5B; --warn:#B4791A; --bad:#D2494B;
+    --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{font-family:var(--sans); background:var(--bg); color:var(--ink); -webkit-font-smoothing:antialiased; line-height:1.5; padding:clamp(14px,3vw,30px)}
+  .shell{max-width:1180px; margin:0 auto}
+
+  .top{display:flex; flex-wrap:wrap; align-items:center; gap:12px 18px; margin-bottom:20px}
+  .brand{display:flex; align-items:center; gap:11px; margin-right:auto}
+  .logo{width:34px; height:34px; border-radius:9px; background:linear-gradient(135deg,var(--accent),var(--usyc)); position:relative; flex:none; box-shadow:0 0 0 1px rgba(255,255,255,.06) inset}
+  .logo::after{content:""; position:absolute; inset:8px; border-radius:4px; border:2px solid rgba(255,255,255,.85); border-right-color:transparent; transform:rotate(-45deg)}
+  .brand .t1{font-weight:700; letter-spacing:.02em; font-size:15px; line-height:1.1}
+  .brand .t2{font-size:11px; color:var(--ink-3); letter-spacing:.14em; text-transform:uppercase}
+  .badge{font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; font-weight:650; padding:4px 9px; border-radius:999px; border:1px solid var(--line-2); color:var(--ink-2)}
+  .live{display:inline-flex; align-items:center; gap:7px; font-size:12px; color:var(--ink-2); font-variant-numeric:tabular-nums}
+  .dot{width:8px; height:8px; border-radius:50%; background:var(--good); box-shadow:0 0 0 0 var(--good); animation:pulse 2s infinite}
+  .dot.stale{background:var(--warn); animation:none}
+  .dot.down{background:var(--bad); animation:none}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(55,201,138,.45)}70%{box-shadow:0 0 0 7px rgba(55,201,138,0)}100%{box-shadow:0 0 0 0 rgba(55,201,138,0)}}
+  .meta{font-family:var(--mono); font-size:11px; color:var(--ink-3); font-variant-numeric:tabular-nums}
+  .iconbtn{display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:8px; border:1px solid var(--line-2); background:var(--panel); color:var(--ink-2); cursor:pointer; padding:0; transition:color .15s,border-color .15s}
+  .iconbtn:hover{color:var(--ink); border-color:var(--ink-3)}
+  .iconbtn:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  .iconbtn svg{width:16px; height:16px; display:block}
+
+  .kpis{display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:14px}
+  .kpi{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:13px 14px; box-shadow:var(--shadow)}
+  .kpi .lab{font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:600; margin-bottom:7px; white-space:nowrap}
+  .kpi .val{font-family:var(--mono); font-size:20px; font-weight:600; letter-spacing:-.01em; font-variant-numeric:tabular-nums}
+  .kpi .unit{font-size:11px; color:var(--ink-3); margin-left:3px; font-weight:500}
+
+  .grid{display:grid; grid-template-columns:1.5fr 1fr; gap:14px; margin-bottom:14px}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:16px 17px}
+  .cardhead{display:flex; align-items:center; gap:10px 14px; flex-wrap:wrap; margin-bottom:4px}
+  .card h2{font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-2); margin:0; font-weight:650}
+  .card h2.mt{margin-top:18px}
+  .card .cap{font-size:11.5px; color:var(--ink-3); margin:3px 0 14px}
+
+  /* segmented toggles */
+  .seg{display:inline-flex; background:var(--inset); border:1px solid var(--line); border-radius:9px; padding:3px; gap:2px}
+  .seg button{font-family:var(--sans); font-size:11px; font-weight:600; color:var(--ink-3); border:0; background:transparent; padding:4px 9px; border-radius:6px; cursor:pointer; transition:.14s; letter-spacing:.02em}
+  .seg button:hover{color:var(--ink)}
+  .seg button.on{background:var(--panel); color:var(--ink); box-shadow:0 1px 2px rgba(0,0,0,.2)}
+  .toggles{display:flex; gap:8px; margin-left:auto; flex-wrap:wrap}
+
+  .chartwrap{position:relative; height:210px; margin-top:8px}
+  .chartwrap svg{width:100%; height:100%; display:block}
+  .chart-empty{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--ink-3); font-family:var(--mono); font-size:12px}
+  .peak{position:absolute; top:2px; left:0; font-family:var(--mono); font-size:10.5px; color:var(--ink-3)}
+  .peak b{color:var(--ink-2); font-weight:600}
+  .chartaxis{display:flex; justify-content:space-between; font-family:var(--mono); font-size:10px; color:var(--ink-3); margin-top:6px}
+
+  .strip{display:flex; align-items:flex-end; gap:3px; height:56px; margin-top:6px}
+  .blk{flex:1; background:linear-gradient(var(--accent),color-mix(in srgb,var(--accent) 55%,transparent)); border-radius:2px 2px 0 0; min-height:2px; opacity:.85; transition:height .4s ease}
+  .blk:last-child{opacity:1}
+  .striplab{display:flex; justify-content:space-between; font-family:var(--mono); font-size:10px; color:var(--ink-3); margin-top:6px}
+
+  /* 24h flows rows */
+  .flowrow{display:flex; align-items:center; gap:12px; padding:11px 0; border-top:1px solid var(--line)}
+  .flowrow:first-child{border-top:0}
+  .flowrow .sy{display:flex; align-items:center; gap:8px; font-weight:700; font-size:13px; width:74px; flex:none}
+  .flowrow .sy i{width:9px; height:9px; border-radius:3px; background:var(--c)}
+  .flowrow.usdc{--c:var(--usdc)} .flowrow.eurc{--c:var(--eurc)} .flowrow.usyc{--c:var(--usyc)}
+  .flowrow .big{font-family:var(--mono); font-size:17px; font-weight:600; font-variant-numeric:tabular-nums}
+  .flowrow .sub{font-size:10.5px; color:var(--ink-3); font-family:var(--mono); margin-top:1px}
+  .flowrow .rt{margin-left:auto; text-align:right}
+  .cov{font-size:10.5px; color:var(--ink-3); font-family:var(--mono); margin-top:14px; border-top:1px dashed var(--line-2); padding-top:12px}
+
+  table{width:100%; border-collapse:collapse; font-size:12px}
+  th{text-align:left; font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3); font-weight:600; padding:0 0 9px}
+  th.r,td.r{text-align:right}
+  td{padding:8px 0; border-top:1px solid var(--line); font-variant-numeric:tabular-nums}
+  .chip{font-family:var(--mono); font-size:10.5px; font-weight:700; padding:2px 7px; border-radius:5px; background:color-mix(in srgb,var(--c) 16%,transparent); color:var(--c)}
+  .chip.usdc{--c:var(--usdc)} .chip.eurc{--c:var(--eurc)} .chip.usyc{--c:var(--usyc)}
+  .addr{font-family:var(--mono); color:var(--ink-2)}
+  .amt{font-family:var(--mono); font-weight:600}
+  .rank{font-family:var(--mono); color:var(--ink-3); width:20px}
+
+  .stbl{width:100%; border-collapse:collapse; font-size:11.5px}
+  .stbl th{text-align:right; font-size:9.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-3); font-weight:600; padding:0 0 8px}
+  .stbl th:first-child{text-align:left}
+  .stbl td{padding:10px 0; border-top:1px solid var(--line); font-variant-numeric:tabular-nums; font-family:var(--mono); text-align:right}
+  .stbl td:first-child{text-align:left}
+  .stbl .sy{display:inline-flex; align-items:center; gap:6px; font-weight:700; font-family:var(--sans)}
+  .stbl .sy i{width:8px; height:8px; border-radius:2px; background:var(--c)}
+  .stbl tr.usdc{--c:var(--usdc)} .stbl tr.eurc{--c:var(--eurc)} .stbl tr.usyc{--c:var(--usyc)}
+  .sharecell{min-width:52px}
+  .sharebar{height:5px; border-radius:3px; background:var(--inset); overflow:hidden; margin-top:4px}
+  .sharebar span{display:block; height:100%; background:var(--c); border-radius:3px; transition:width .4s ease}
+  .lblchip{font-family:var(--sans); font-size:10.5px; font-weight:600; color:var(--ink-2)}
+  .tag{font-family:var(--sans); font-size:8.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; padding:1px 5px; border-radius:4px; margin-left:6px; color:var(--ink-3); border:1px solid var(--line-2); vertical-align:middle}
+
+  .headlink{font-size:12px; color:var(--ink-2); text-decoration:none; border:1px solid var(--line-2); padding:6px 11px; border-radius:8px; font-weight:600}
+  .headlink:hover{color:var(--ink); border-color:var(--ink-3)}
+  .alertfeed,.watchlist{display:flex; flex-direction:column; max-height:290px; overflow-y:auto}
+  .alertrow{display:flex; align-items:center; gap:9px; padding:8px 0; border-top:1px solid var(--line); font-size:11.5px; font-family:var(--mono)}
+  .alertrow:first-child{border-top:0}
+  .akind{font-family:var(--sans); font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; padding:1px 6px; border-radius:4px; color:var(--ink-3); border:1px solid var(--line-2)}
+  .alertrow.mint .akind{color:var(--good); border-color:color-mix(in srgb,var(--good) 45%,var(--line-2))}
+  .alertrow.burn .akind{color:var(--bad); border-color:color-mix(in srgb,var(--bad) 45%,var(--line-2))}
+  .aamt{font-weight:600}
+  .aad{color:var(--ink-3)}
+  .atime{margin-left:auto; color:var(--ink-3)}
+  .watchrow{display:flex; align-items:center; gap:9px; padding:9px 0; border-top:1px solid var(--line); font-size:12px}
+  .watchrow:first-child{border-top:0}
+  .waddr{font-family:var(--mono); color:var(--ink-2)}
+  .wstat{margin-left:auto; font-family:var(--mono); font-size:11px; color:var(--ink-3)}
+  .star{background:none; border:0; cursor:pointer; color:var(--ink-3); font-size:14px; padding:0 2px; line-height:1}
+  .star.on,.star:hover{color:var(--warn)}
+  tr.watched td{background:color-mix(in srgb,var(--warn) 8%,transparent)}
+  .empty{color:var(--ink-3); font-size:12px; font-family:var(--mono); padding:18px 0}
+
+  .foot{margin-top:6px; font-size:11px; color:var(--ink-3); line-height:1.6; font-family:var(--mono)}
+  .foot code{color:var(--ink-2)}
+
+  @media (max-width:900px){ .kpis{grid-template-columns:repeat(3,1fr)} .grid{grid-template-columns:1fr} }
+  @media (max-width:520px){ .kpis{grid-template-columns:repeat(2,1fr)} }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
+</style>
+<script src="/theme.js"></script>
+</head>
+<body>
+<div class="shell">
+  <div class="top">
+    <div class="brand">
+      <div class="logo"></div>
+      <div><div class="t1">Stabledesk</div><div class="t2">Stablecoin terminal · Arc testnet</div></div>
+    </div>
+    <span class="badge" id="chainBadge">chain 5042002</span>
+    <span class="live"><span class="dot down" id="statusDot"></span><span id="statusText">connecting…</span></span>
+    <span class="meta" id="metaLine"></span>
+    <a class="headlink" href="/docs">API ↗</a>
+    <button class="iconbtn" id="themeBtn" type="button" title="Toggle theme" aria-label="Toggle light / dark theme"></button>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="cardhead">
+        <h2 id="chartTitle">Transfer volume</h2>
+        <div class="toggles">
+          <div class="seg" id="metricSeg" title="Real = one largest transfer per tx (routing / bot noise removed)">
+            <button data-m="real" class="on">Real</button>
+            <button data-m="raw">Raw</button>
+          </div>
+          <div class="seg" id="tokenSeg">
+            <button data-tok="ALL" class="on">All</button>
+            <button data-tok="USDC">USDC</button>
+            <button data-tok="EURC">EURC</button>
+            <button data-tok="USYC">USYC</button>
+          </div>
+          <div class="seg" id="rangeSeg">
+            <button data-rng="1h">1h</button>
+            <button data-rng="24h" class="on">24h</button>
+            <button data-rng="7d">7d</button>
+          </div>
+        </div>
+      </div>
+      <p class="cap" id="chartCap">Real volume = one largest transfer per transaction — routing hops &amp; bot noise filtered out (Visa / Allium method).</p>
+      <div class="chartwrap">
+        <div class="peak" id="chartPeak"></div>
+        <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <div class="chart-empty" id="chartEmpty">collecting data…</div>
+      </div>
+      <div class="chartaxis" id="chartAxis"></div>
+
+      <h2 class="mt">Per-block activity</h2>
+      <div class="strip" id="strip"></div>
+      <div class="striplab" id="striplab"></div>
+    </div>
+
+    <div class="card">
+      <h2>Stablecoins</h2>
+      <p class="cap">Supply, 24h real volume, share &amp; velocity. Testnet supply is inflated by faucet mints.</p>
+      <table class="stbl"><thead><tr><th>Asset</th><th>Supply</th><th>24h vol</th><th>Share</th><th>Vel.</th></tr></thead>
+        <tbody id="stbl"></tbody></table>
+      <div class="cov" id="coverage"></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Largest transfers</h2>
+      <p class="cap">Biggest recent stablecoin transfers indexed.</p>
+      <table><thead><tr><th>Asset</th><th>From</th><th>To</th><th class="r">Amount</th></tr></thead>
+        <tbody id="largest"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Top addresses</h2>
+      <p class="cap">By transfer volume moved (in + out), across indexed history.</p>
+      <table><thead><tr><th>#</th><th>Address</th><th class="r">Transfers</th><th class="r">Volume</th></tr></thead>
+        <tbody id="top"></tbody></table>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Live alerts</h2>
+      <p class="cap">Notable stablecoin transfers, mints &amp; burns as they're indexed (≥ 1K).</p>
+      <div class="alertfeed" id="alertfeed"><div class="empty">Watching the chain…</div></div>
+    </div>
+    <div class="card">
+      <h2>Watchlist</h2>
+      <p class="cap">Star an address to track it — saved in your browser. <a href="/docs" style="color:var(--accent)">Webhook alerts →</a></p>
+      <div class="watchlist" id="watchlist"></div>
+    </div>
+  </div>
+
+  <div class="foot">
+    Live Arc testnet data · public RPC <span id="epLine">rpc.testnet.arc.io</span> · historical indexer (SQLite) ·
+    stablecoin volumes from <code>Transfer</code> events (USDC / EURC / USYC). Prototype v0 — read-only ·
+    <a href="https://x.com/getStabledesk" style="color:var(--ink-2)">@getStabledesk</a>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const nf = new Intl.NumberFormat('en-US');
+const short = (a) => a ? a.slice(0,6)+'…'+a.slice(-4) : '—';
+const money = (n,d=0)=> (n==null||isNaN(n))?'—':nf.format(Number(n.toFixed(d)));
+function compact(n){
+  if(n==null||isNaN(n)) return '—';
+  const a=Math.abs(n);
+  if(a>=1e9) return (n/1e9).toFixed(2)+'B';
+  if(a>=1e6) return (n/1e6).toFixed(2)+'M';
+  if(a>=1e3) return (n/1e3).toFixed(1)+'K';
+  return money(n, a<10?2:0);
+}
+const ago = (ts)=>{ const s=Math.max(0,Math.round((Date.now()-ts)/1000)); return s<2?'just now':s+'s ago'; };
+const tAgo = (sec)=>{ const s=Math.max(0,Math.floor(Date.now()/1000-sec)); return s<60?s+'s':(s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'); };
+// watchlist — browser-local
+const WKEY='arc-watch';
+const getWatch=()=>{ try{return JSON.parse(localStorage.getItem(WKEY)||'[]')}catch{return[]} };
+const isWatched=(a)=> a? getWatch().includes(a.toLowerCase()) : false;
+function toggleWatch(a){ a=a.toLowerCase(); let w=getWatch(); w=w.includes(a)?w.filter(x=>x!==a):[...w,a]; localStorage.setItem(WKEY,JSON.stringify(w)); renderWatch(); poll(); }
+const TOK=['USDC','EURC','USYC'];
+const TCOLOR={ALL:'--accent',USDC:'--usdc',EURC:'--eurc',USYC:'--usyc'};
+
+let chart = { token:'ALL', range:'24h', metric:'real' };
+
+// ---- live state (KPIs, flows, tables) ----
+function renderState(d){
+  const dot=$('#statusDot'), txt=$('#statusText');
+  if(!d.ok){ dot.className='dot down'; txt.textContent = d.booting?'indexing…':'offline'; return; }
+  dot.className = d.stale ? 'dot stale' : 'dot';
+  txt.textContent = d.stale ? 'slightly delayed' : 'live';
+  $('#chainBadge').textContent='chain '+d.chainId;
+  $('#metaLine').textContent='block #'+nf.format(d.network.block)+' · upd. '+ago(d.updatedAt);
+  $('#epLine').textContent=(d.endpoint||'').replace('https://','');
+
+  const n=d.network, s=d.summary24h||{byToken:{},volume:0,transfers:0};
+  const kpis=[
+    ['Current block','#'+nf.format(n.block),''],
+    ['Block time',money(n.blockTimeMs,0),'ms'],
+    ['Throughput',money(n.tps,1),'tx/s'],
+    ['Cost / transfer','$'+n.costPerTransferUsdc.toFixed(5),''],
+    ['Active addr · 1h',compact(d.activeAddresses1h),''],
+    ['24h volume',compact(s.rvolume),'real'],
+  ].map(([l,v,u])=>`<div class="kpi"><div class="lab">${l}</div><div class="val">${v}<span class="unit">${u}</span></div></div>`).join('');
+  $('#kpis').innerHTML=kpis;
+
+  const sup=d.supply||{};
+  $('#stbl').innerHTML = TOK.map(sym=>{
+    const v=sup[sym]||{supply:0,volShare:0,velocity:0,rvolume24h:0};
+    const share=(v.volShare*100);
+    const vel = v.velocity ? (v.velocity<1? v.velocity.toFixed(3):v.velocity.toFixed(1))+'×' : '—';
+    return `<tr class="${sym.toLowerCase()}">
+      <td><span class="sy"><i></i>${sym}</span></td>
+      <td>${compact(v.supply)}</td>
+      <td>${compact(v.rvolume24h)}</td>
+      <td class="sharecell">${share.toFixed(0)}%<div class="sharebar"><span style="width:${Math.min(100,share).toFixed(0)}%"></span></div></td>
+      <td>${vel}</td>
+    </tr>`;
+  }).join('');
+
+  const cov=d.coverage||{minutes:0};
+  $('#coverage').textContent = cov.minutes
+    ? `History indexed: ${cov.minutes>=120? (cov.minutes/60).toFixed(1)+' h':cov.minutes+' min'} · grows as it runs`
+    : 'History: warming up…';
+
+  const maxTx=Math.max(1,...d.liveBlocks.map(b=>b.tx));
+  $('#strip').innerHTML=d.liveBlocks.map(b=>`<div class="blk" style="height:${Math.max(4,b.tx/maxTx*100)}%" title="block #${b.n} · ${b.tx} tx"></div>`).join('');
+  $('#striplab').innerHTML=`<span>#${nf.format(d.liveBlocks[0].n)}</span><span>transactions / block</span><span>#${nf.format(d.liveBlocks.at(-1).n)}</span>`;
+
+  const acell=(addr,label)=> label? `<span class="lblchip">${label}</span>` : `<span class="addr">${short(addr)}</span>`;
+  $('#largest').innerHTML = (d.largest&&d.largest.length)? d.largest.map(x=>`<tr>
+      <td><span class="chip ${x.token.toLowerCase()}">${x.token}</span></td>
+      <td>${acell(x.frm,x.fromLabel)}</td><td>${acell(x.too,x.toLabel)}</td>
+      <td class="r amt">${compact(x.amount)}</td></tr>`).join('')
+    : '<tr><td colspan="4" style="color:var(--ink-3);padding:14px 0">No transfers indexed yet.</td></tr>';
+
+  $('#top').innerHTML = (d.top&&d.top.length)? d.top.map((x,i)=>`<tr class="${isWatched(x.address)?'watched':''}">
+      <td class="rank">${i+1}</td>
+      <td><button class="star ${isWatched(x.address)?'on':''}" onclick="toggleWatch('${x.address}')" title="Watch address">${isWatched(x.address)?'★':'☆'}</button> ${x.label? `<span class="lblchip">${x.label}</span>`:`<span class="addr">${short(x.address)}</span>`}${x.contract?'<span class="tag">contract</span>':''}</td>
+      <td class="r">${nf.format(x.transfers)}</td><td class="r amt">${compact(x.volume)}</td></tr>`).join('')
+    : '<tr><td colspan="4" style="color:var(--ink-3);padding:14px 0">Building rankings…</td></tr>';
+}
+
+// ---- chart ----
+function renderChart(payload){
+  let series=payload.series||[];
+  // drop the final, still-incomplete bucket so the line doesn't fake a drop-off
+  if(series.length>2 && payload.group && series.at(-1).t + payload.group > Date.now()/1000) series=series.slice(0,-1);
+  const svg=$('#chart'), empty=$('#chartEmpty'), peak=$('#chartPeak'), axis=$('#chartAxis');
+  const color=`var(${TCOLOR[chart.token]})`;
+  if(series.length<2){ svg.innerHTML=''; empty.style.display='flex'; peak.textContent=''; axis.textContent=''; return; }
+  empty.style.display='none';
+  const val=(p)=> chart.metric==='raw' ? (p.volume||0) : (p.rvolume||0);
+  const W=1000,H=260,pad=10;
+  const maxV=Math.max(1,...series.map(val));
+  const X=i=>i/(series.length-1)*W;
+  const Y=v=>H-pad-(v/maxV)*(H-2*pad);
+  const pts=series.map((p,i)=>X(i).toFixed(1)+','+Y(val(p)).toFixed(1));
+  const line='M'+pts.join(' L');
+  const area='M0,'+H+' L'+pts.join(' L')+' L'+W+','+H+' Z';
+  let grid=''; for(let g=1;g<=2;g++){ const y=(H-2*pad)*g/3+pad; grid+=`<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>`; }
+  svg.innerHTML = grid
+    + `<path d="${area}" fill="${color}" opacity="0.12"/>`
+    + `<path d="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
+  peak.innerHTML=`peak <b>${compact(maxV)}</b>`;
+  const fmt=(sec)=>{ const dte=new Date(sec*1000);
+    return chart.range==='7d' ? dte.toLocaleDateString('en-US',{month:'short',day:'numeric'})
+      : dte.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}); };
+  const mid=series[Math.floor(series.length/2)];
+  axis.innerHTML=`<span>${fmt(series[0].t)}</span><span>${fmt(mid.t)}</span><span>${fmt(series.at(-1).t)}</span>`;
+}
+
+async function loadChart(){
+  try{ const r=await fetch(`/api/history?token=${chart.token}&range=${chart.range}`,{cache:'no-store'}); renderChart(await r.json()); }
+  catch(e){}
+}
+async function poll(){
+  try{ const r=await fetch('/api/state',{cache:'no-store'}); renderState(await r.json()); }
+  catch(e){ $('#statusDot').className='dot down'; $('#statusText').textContent='network error'; }
+}
+
+async function loadAlerts(){
+  try{ const j=await (await fetch('/api/alerts',{cache:'no-store'})).json(); renderAlerts(j.feed||[]); }catch(e){}
+}
+function renderAlerts(feed){
+  const el=$('#alertfeed');
+  if(!feed.length){ el.innerHTML='<div class="empty">Watching the chain for notable moves (≥ 1K)…</div>'; return; }
+  el.innerHTML=feed.map(e=>`<div class="alertrow ${e.kind}">
+    <span class="akind">${e.kind}</span>
+    <span class="chip ${e.token.toLowerCase()}">${e.token}</span>
+    <span class="aamt">${compact(e.amount)}</span>
+    <span class="aad">${short(e.from)} → ${short(e.to)}</span>
+    <span class="atime">${tAgo(e.ts)}</span></div>`).join('');
+}
+async function renderWatch(){
+  const w=getWatch(), el=$('#watchlist');
+  if(!w.length){ el.innerHTML='<div class="empty">Star an address in “Top addresses” to track it here.</div>'; return; }
+  const rows=await Promise.all(w.slice(0,12).map(async a=>{
+    try{ const d=await (await fetch('/api/address?addr='+a,{cache:'no-store'})).json();
+      return `<div class="watchrow"><button class="star on" onclick="toggleWatch('${a}')" title="Unwatch">★</button>
+        <span class="waddr">${d.label||short(a)}</span>
+        <span class="wstat">${nf.format(d.transfers||0)} tx · ${compact(d.volume||0)}</span></div>`;
+    }catch(e){ return `<div class="watchrow"><button class="star on" onclick="toggleWatch('${a}')">★</button><span class="waddr">${short(a)}</span></div>`; }
+  }));
+  el.innerHTML=rows.join('');
+}
+
+// toggles
+$('#metricSeg').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
+  chart.metric=b.dataset.m; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b)); loadChart(); });
+$('#tokenSeg').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
+  chart.token=b.dataset.tok; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b));
+  $('#chartTitle').textContent = chart.token==='ALL'?'Transfer volume':chart.token+' transfer volume'; loadChart(); });
+$('#rangeSeg').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
+  chart.range=b.dataset.rng; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b)); loadChart(); });
+
+poll(); loadChart(); loadAlerts(); renderWatch();
+setInterval(poll,5000);
+setInterval(loadChart,20000);
+setInterval(loadAlerts,5000);
+setInterval(renderWatch,20000);
+</script>
+</body>
+</html>
