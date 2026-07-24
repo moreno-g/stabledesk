@@ -6,7 +6,8 @@
   "description": "Stabledesk — live stablecoin analytics terminal + data API (on the Arc testnet, Circle L1).",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20"

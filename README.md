@@ -30,6 +30,10 @@ No install (Node ≥ 20, native `fetch` + native `node:sqlite`). On first run th
 
 State (SQLite) is written to `arc.db` (gitignored). Delete it to re-index from scratch.
 
+```bash
+npm test   # smoke tests (node:test — no network, still zero deps)
+```
+
 ### How it works
 
 - **Modules**: `rpc.js` (RPC + chain constants) · `db.js` (SQLite schema + queries) · `indexer.js` (backfill + live loop + snapshot) · `server.js` (HTTP + API).

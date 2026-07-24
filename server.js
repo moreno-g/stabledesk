@@ -5,27 +5,65 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 
 import * as db from './db.js';
-import { live, alertFeed, start } from './indexer.js';
+import { live, alertFeed, start, stop } from './indexer.js';
 import { getLabel } from './labels.js';
-import { handleV1 } from './api.js';
+import { handleV1, clientIp } from './api.js';
 import { RANGES, ADDR_RE } from './constants.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4317;
 
+const SEC = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY' };
+// CSP tuned to the app: inline styles/scripts + a data: favicon, everything else same-origin only.
+const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 function json(res, body, code = 200) {
-  res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
+  res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-store', ...SEC });
   res.end(JSON.stringify(body));
 }
-async function serveFile(res, name, type = 'text/html; charset=utf-8') {
-  try {
+
+// Static assets are shipped with the app and never change at runtime: cache them in memory
+// (buffer + gzip + content hash) and serve with ETag revalidation + gzip when accepted.
+const assetCache = new Map();
+async function loadAsset(name, type) {
+  let a = assetCache.get(name);
+  if (!a) {
     const buf = await readFile(join(__dirname, 'public', name));
-    res.writeHead(200, { 'content-type': type });
-    res.end(buf);
-  } catch { res.writeHead(404); res.end('not found'); }
+    const etag = '"' + createHash('sha1').update(buf).digest('base64').slice(0, 22) + '"';
+    a = { buf, gz: gzipSync(buf), etag, type };
+    assetCache.set(name, a);
+  }
+  return a;
 }
+async function serveFile(req, res, name, type = 'text/html; charset=utf-8') {
+  try {
+    const a = await loadAsset(name, type);
+    const h = { 'content-type': type, 'cache-control': 'no-cache', etag: a.etag, ...SEC };
+    if (type.startsWith('text/html')) h['content-security-policy'] = CSP;
+    if (req.headers['if-none-match'] === a.etag) { res.writeHead(304, h); return res.end(); }
+    if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+      res.writeHead(200, { ...h, 'content-encoding': 'gzip', vary: 'Accept-Encoding' });
+      return res.end(a.gz);
+    }
+    res.writeHead(200, h); res.end(a.buf);
+  } catch { res.writeHead(404, SEC); res.end('not found'); }
+}
+
+// Coarse per-IP throttle for the keyless internal /api (dashboard needs ~60 req/min; 300 is generous).
+const apiRl = new Map();
+function apiThrottle(req) {
+  const win = Math.floor(Date.now() / 60000);
+  const ip = clientIp(req);
+  let e = apiRl.get(ip);
+  if (!e || e.win !== win) { e = { win, count: 0 }; apiRl.set(ip, e); }
+  e.count += 1;
+  return e.count <= 300;
+}
+setInterval(() => { const win = Math.floor(Date.now() / 60000); for (const [k, e] of apiRl) if (e.win < win) apiRl.delete(k); }, 60000).unref();
 
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://localhost');
@@ -34,7 +72,10 @@ const server = http.createServer(async (req, res) => {
   // public data API (keys + tiers + rate limiting)
   if (path.startsWith('/v1')) return handleV1(req, res, u);
 
-  // internal API for the dashboard (same-origin, no key)
+  // internal API for the dashboard (same-origin, no key) — coarse per-IP throttle to blunt abuse
+  if (path.startsWith('/api/')) {
+    if (!apiThrottle(req)) return json(res, { error: 'rate_limited' }, 429);
+  }
   if (path === '/api/state') return json(res, live.snapshot);
   if (path === '/api/alerts') return json(res, { feed: alertFeed });
   if (path === '/api/history') {
@@ -64,9 +105,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   // static assets + pages
-  if (path === '/theme.js') return serveFile(res, 'theme.js', 'text/javascript');
-  if (path === '/docs' || path === '/docs.html') return serveFile(res, 'docs.html');
-  return serveFile(res, 'index.html');
+  if (path === '/theme.js') return serveFile(req, res, 'theme.js', 'text/javascript; charset=utf-8');
+  if (path === '/docs' || path === '/docs.html') return serveFile(req, res, 'docs.html');
+  return serveFile(req, res, 'index.html');
 });
 
 server.listen(PORT, () => {
@@ -75,10 +116,14 @@ server.listen(PORT, () => {
   start();
 });
 
+let shuttingDown = false;
 function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log('\nShutting down…');
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(1), 10000).unref();
+  stop();                          // stop the live poll loop
+  server.close(() => { try { db.close(); } catch {} process.exit(0); });
+  setTimeout(() => { try { db.close(); } catch {} process.exit(1); }, 10000).unref();
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

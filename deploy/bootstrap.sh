@@ -19,4 +19,4 @@ docker compose up -d --build
 
 echo ""
 echo "==> Done. Follow the logs with:  docker compose logs -f"
-echo "==> Once DNS points here, visit:  https://stabledesk.io"
+echo "==> Once DNS points here, visit:  https://stabledesk.xyz"

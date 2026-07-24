@@ -28,14 +28,30 @@ function rateLimitKeys(ip) {
   return e.count <= KEY_LIMIT;
 }
 
-function clientIp(req) {
+// Sweep expired windows so the limiter Maps don't grow unbounded over time.
+setInterval(() => {
+  const mWin = Math.floor(Date.now() / 60000);
+  for (const [k, e] of rl) if (e.win < mWin) rl.delete(k);
+  const hWin = Math.floor(Date.now() / 3600000);
+  for (const [k, e] of keyRl) if (e.win < hWin) keyRl.delete(k);
+}, 60000).unref();
+
+export function clientIp(req) {
   const fwd = req.headers['x-forwarded-for'];
   if (typeof fwd === 'string' && fwd) return fwd.split(',')[0].trim();
   return req.socket?.remoteAddress || 'unknown';
 }
 
+// CORS so third-party browser apps can call the API (custom X-API-Key header needs a preflight).
+const CORS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
+  'access-control-allow-headers': 'x-api-key, content-type',
+  'access-control-max-age': '86400',
+};
+
 function json(res, body, code = 200, headers = {}) {
-  res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-store', ...headers });
+  res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...CORS, ...headers });
   res.end(JSON.stringify(body));
 }
 function readBody(req) {
@@ -48,6 +64,9 @@ function readBody(req) {
 export async function handleV1(req, res, u) {
   const path = u.pathname;
   const method = req.method;
+
+  // CORS preflight — answer before the auth check so browser clients work.
+  if (method === 'OPTIONS') { res.writeHead(204, CORS); return res.end(); }
 
   // --- public (no key) ---
   if (path === '/v1/status') {

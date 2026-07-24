@@ -1,0 +1,8 @@
+node_modules
+arc.db
+arc.db-wal
+arc.db-shm
+.git
+.claude
+.DS_Store
+scratchpad
