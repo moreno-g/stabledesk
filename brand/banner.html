@@ -18,19 +18,11 @@
     right:-260px;top:-430px;
     background:radial-gradient(circle,rgba(37,196,182,.30) 0%,rgba(155,126,222,.16) 42%,transparent 68%);
   }
-  .content{position:absolute;left:110px;top:126px}
-  .logo{
-    width:74px;height:74px;border-radius:19px;
-    background:linear-gradient(135deg,#0FA79E,#25C4B8 45%,#9B7EDE);
-    position:relative;margin-bottom:30px;
-  }
-  .logo::after{
-    content:"";position:absolute;inset:17px;
-    border:5px solid rgba(255,255,255,.95);border-right-color:transparent;
-    border-radius:9px;transform:rotate(-45deg);
-  }
+  /* wordmark-only — the avatar already carries the logo mark, so no logo here.
+     Content stays in the upper half; the bottom-left is left empty for the X/Twitter avatar. */
+  .content{position:absolute;left:110px;top:132px}
   h1{
-    margin:0;font-size:82px;font-weight:700;letter-spacing:-.035em;
+    margin:0;font-size:86px;font-weight:700;letter-spacing:-.035em;
     color:#E9EEF4;line-height:1;
   }
   .tag{
@@ -60,7 +52,6 @@
   </svg>
 
   <div class="content">
-    <div class="logo"></div>
     <h1>Stabledesk</h1>
     <div class="tag">The stablecoin terminal &nbsp;·&nbsp; <b>stabledesk.xyz</b></div>
   </div>

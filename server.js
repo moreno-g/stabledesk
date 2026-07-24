@@ -12,7 +12,7 @@ import * as db from './db.js';
 import { live, alertFeed, start, stop } from './indexer.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
-import { RANGES, ADDR_RE } from './constants.js';
+import { RANGES, ADDR_RE, TOKEN_SYMBOLS } from './constants.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4317;
@@ -88,6 +88,23 @@ const server = http.createServer(async (req, res) => {
     const limit = Math.min(50, Number(u.searchParams.get('limit')) || 10);
     return json(res, { top: db.getTop(limit) });
   }
+  if (path === '/api/token') {
+    const token = String(u.searchParams.get('token') || '').toUpperCase();
+    if (!TOKEN_SYMBOLS.has(token)) return json(res, { error: 'bad_token' }, 400);
+    const s = live.snapshot;
+    const sm = s.summary24h?.byToken?.[token] || null;
+    const lbl = (a) => getLabel(a)?.name || null;
+    const dress = (x) => ({ ...x, fromLabel: lbl(x.frm), toLabel: lbl(x.too) });
+    return json(res, {
+      token, ok: !!s.ok, updatedAt: s.updatedAt ?? null,
+      supply: s.supply?.[token] || null,
+      summary24h: sm,
+      netIssuance24h: sm ? sm.mint - sm.burn : null,
+      distribution: db.sizeDistribution(token),
+      largest: db.largestByToken(token, 8).map(dress),
+      recent: db.recentByToken(token, 12).map(dress),
+    });
+  }
   if (path === '/api/address') {
     const addr = String(u.searchParams.get('addr') || '').toLowerCase();
     if (!ADDR_RE.test(addr)) return json(res, { error: 'bad_address' }, 400);
@@ -107,6 +124,7 @@ const server = http.createServer(async (req, res) => {
   // static assets + pages
   if (path === '/theme.js') return serveFile(req, res, 'theme.js', 'text/javascript; charset=utf-8');
   if (path === '/docs' || path === '/docs.html') return serveFile(req, res, 'docs.html');
+  if (path === '/token' || path === '/token.html') return serveFile(req, res, 'token.html');
   return serveFile(req, res, 'index.html');
 });
 
