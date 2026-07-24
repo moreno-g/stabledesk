@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { SIZE_BRACKETS } from './constants.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -186,6 +187,28 @@ const adstmt = {
 };
 export function addressStats(a) { return adstmt.stats.get(a.toLowerCase()); }
 export function addressRecent(a, limit = 20) { const x = a.toLowerCase(); return adstmt.recent.all(x, x, limit); }
+
+// ---- per-token detail (drill-down) ----
+const tkstmt = {
+  amountsAll: db.prepare('SELECT amount FROM recent'),
+  amountsTok: db.prepare('SELECT amount FROM recent WHERE token = ?'),
+  largest: db.prepare('SELECT token, frm, too, amount, block, ts FROM recent WHERE token = ? ORDER BY amount DESC LIMIT ?'),
+  recent: db.prepare('SELECT token, frm, too, amount, block, ts FROM recent WHERE token = ? ORDER BY id DESC LIMIT ?'),
+};
+
+// Transfer-size histogram over the indexed `recent` window (rolling). token='ALL' → all tokens.
+export function sizeDistribution(token) {
+  const rows = (token && token !== 'ALL') ? tkstmt.amountsTok.all(token) : tkstmt.amountsAll.all();
+  const brackets = SIZE_BRACKETS.map((b) => ({ label: b.label, min: b.min, max: b.max === Infinity ? null : b.max, count: 0 }));
+  for (const r of rows) {
+    for (let i = 0; i < SIZE_BRACKETS.length; i++) {
+      if (r.amount >= SIZE_BRACKETS[i].min && r.amount < SIZE_BRACKETS[i].max) { brackets[i].count += 1; break; }
+    }
+  }
+  return { total: rows.length, brackets };
+}
+export const largestByToken = (token, limit = 8) => tkstmt.largest.all(token, limit);
+export const recentByToken = (token, limit = 12) => tkstmt.recent.all(token, limit);
 
 export function prune(nowSec, latestBlock, blockMs) {
   const weekBlocks = Math.round((7 * 86400 * 1000) / Math.max(200, blockMs));

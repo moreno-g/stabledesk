@@ -315,7 +315,7 @@ function renderState(d){
     const share=(v.volShare*100);
     const vel = v.velocity ? (v.velocity<1? v.velocity.toFixed(3):v.velocity.toFixed(1))+'×' : '—';
     return `<tr class="${sym.toLowerCase()}">
-      <td><span class="sy"><i></i>${sym}</span></td>
+      <td><a class="sy" href="/token?token=${sym}" style="color:inherit;text-decoration:none" title="${sym} detail →"><i></i>${sym}</a></td>
       <td>${compact(v.supply)}</td>
       <td>${compact(v.rvolume24h)}</td>
       <td class="sharecell">${share.toFixed(0)}%<div class="sharebar"><span style="width:${Math.min(100,share).toFixed(0)}%"></span></div></td>

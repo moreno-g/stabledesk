@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stabledesk · Token</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230FA79E'/%3E%3Ctext x='16' y='21' font-family='system-ui,Arial' font-size='17' font-weight='700' fill='white' text-anchor='middle'%3ES%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0B0F14; --panel:#121820; --panel-2:#161D26; --inset:#0E141B;
+    --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583;
+    --line:#212B36; --line-2:#2B3742; --accent:#25C4B8;
+    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE;
+    --good:#37C98A; --warn:#E7A93A; --bad:#E5686A;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --shadow:0 1px 2px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.28); --radius:14px;
+  }
+  @media (prefers-color-scheme:light){:root{
+    --bg:#EEF1F5; --panel:#FFFFFF; --panel-2:#F4F7FA; --inset:#EAEEF3;
+    --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2; --line:#E1E6EC; --line-2:#D2DAE2;
+    --accent:#0FA79E; --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0;
+    --good:#128A5B; --warn:#B4791A; --bad:#D2494B;
+    --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08);
+  }}
+  :root[data-theme="dark"]{--bg:#0B0F14; --panel:#121820; --panel-2:#161D26; --inset:#0E141B; --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583; --line:#212B36; --line-2:#2B3742; --accent:#25C4B8; --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --good:#37C98A; --warn:#E7A93A; --bad:#E5686A; --shadow:0 1px 2px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.28)}
+  :root[data-theme="light"]{--bg:#EEF1F5; --panel:#FFFFFF; --panel-2:#F4F7FA; --inset:#EAEEF3; --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2; --line:#E1E6EC; --line-2:#D2DAE2; --accent:#0FA79E; --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --good:#128A5B; --warn:#B4791A; --bad:#D2494B; --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08)}
+  *{box-sizing:border-box} html,body{margin:0}
+  body{font-family:var(--sans); background:var(--bg); color:var(--ink); -webkit-font-smoothing:antialiased; line-height:1.5; padding:clamp(14px,3vw,30px)}
+  .shell{max-width:1180px; margin:0 auto}
+  .top{display:flex; flex-wrap:wrap; align-items:center; gap:12px 16px; margin-bottom:20px}
+  .back{font-size:13px; color:var(--ink-2); text-decoration:none; border:1px solid var(--line-2); padding:6px 11px; border-radius:8px; font-weight:600}
+  .back:hover{color:var(--ink); border-color:var(--ink-3)}
+  h1{font-size:22px; margin:0; letter-spacing:-.01em; display:flex; align-items:center; gap:10px}
+  .tokdot{width:13px; height:13px; border-radius:4px; background:var(--c)}
+  .live{display:inline-flex; align-items:center; gap:7px; font-size:12px; color:var(--ink-2); font-variant-numeric:tabular-nums}
+  .dot{width:8px; height:8px; border-radius:50%; background:var(--good)}
+  .dot.down{background:var(--bad)} .dot.stale{background:var(--warn)}
+  .meta{font-family:var(--mono); font-size:11px; color:var(--ink-3); margin-left:auto}
+  .switch{display:inline-flex; background:var(--inset); border:1px solid var(--line); border-radius:9px; padding:3px; gap:2px}
+  .switch a{font-size:11px; font-weight:600; color:var(--ink-3); text-decoration:none; padding:4px 10px; border-radius:6px}
+  .switch a.on{background:var(--panel); color:var(--ink); box-shadow:0 1px 2px rgba(0,0,0,.2)}
+  .kpis{display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:14px}
+  .kpi{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:13px 14px; box-shadow:var(--shadow)}
+  .kpi .lab{font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:600; margin-bottom:7px; white-space:nowrap}
+  .kpi .val{font-family:var(--mono); font-size:20px; font-weight:600; letter-spacing:-.01em; font-variant-numeric:tabular-nums}
+  .kpi .val.pos{color:var(--good)} .kpi .val.neg{color:var(--bad)}
+  .grid{display:grid; grid-template-columns:1.5fr 1fr; gap:14px; margin-bottom:14px}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:16px 17px}
+  .cardhead{display:flex; align-items:center; gap:10px 14px; flex-wrap:wrap; margin-bottom:4px}
+  .card h2{font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-2); margin:0; font-weight:650}
+  .card .cap{font-size:11.5px; color:var(--ink-3); margin:3px 0 10px}
+  .seg{display:inline-flex; background:var(--inset); border:1px solid var(--line); border-radius:9px; padding:3px; gap:2px}
+  .seg button{font-family:var(--sans); font-size:11px; font-weight:600; color:var(--ink-3); border:0; background:transparent; padding:4px 9px; border-radius:6px; cursor:pointer; letter-spacing:.02em}
+  .seg button:hover{color:var(--ink)} .seg button.on{background:var(--panel); color:var(--ink); box-shadow:0 1px 2px rgba(0,0,0,.2)}
+  .toggles{display:flex; gap:8px; margin-left:auto; flex-wrap:wrap}
+  .chartwrap{position:relative; height:230px; margin-top:8px}
+  .chartwrap svg{width:100%; height:100%; display:block}
+  .chart-empty{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--ink-3); font-family:var(--mono); font-size:12px}
+  .peak{position:absolute; top:2px; left:0; font-family:var(--mono); font-size:10.5px; color:var(--ink-3)}
+  .peak b{color:var(--ink-2); font-weight:600}
+  .chartaxis{display:flex; justify-content:space-between; font-family:var(--mono); font-size:10px; color:var(--ink-3); margin-top:6px}
+  .distrow{display:grid; grid-template-columns:70px 1fr 96px; align-items:center; gap:10px; padding:7px 0; border-top:1px solid var(--line); font-size:12px}
+  .distrow:first-child{border-top:0}
+  .distrow .dl{font-family:var(--mono); color:var(--ink-2)}
+  .distbar{height:9px; border-radius:4px; background:var(--inset); overflow:hidden}
+  .distbar span{display:block; height:100%; background:var(--c); border-radius:4px; transition:width .4s ease}
+  .distrow .dc{font-family:var(--mono); text-align:right; color:var(--ink-2); font-variant-numeric:tabular-nums}
+  .distrow .dc b{color:var(--ink)} .disttot{font-size:10.5px; color:var(--ink-3); font-family:var(--mono); margin-top:12px; border-top:1px dashed var(--line-2); padding-top:10px}
+  table{width:100%; border-collapse:collapse; font-size:12px}
+  th{text-align:left; font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3); font-weight:600; padding:0 0 9px}
+  th.r,td.r{text-align:right}
+  td{padding:8px 0; border-top:1px solid var(--line); font-variant-numeric:tabular-nums}
+  .addr{font-family:var(--mono); color:var(--ink-2)} .amt{font-family:var(--mono); font-weight:600}
+  .lblchip{font-family:var(--sans); font-size:10.5px; font-weight:600; color:var(--ink-2)}
+  .foot{margin-top:6px; font-size:11px; color:var(--ink-3); font-family:var(--mono)}
+  @media (max-width:900px){ .kpis{grid-template-columns:repeat(3,1fr)} .grid{grid-template-columns:1fr} }
+  @media (max-width:520px){ .kpis{grid-template-columns:repeat(2,1fr)} }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+<script src="/theme.js"></script>
+</head>
+<body>
+<div class="shell" id="shell">
+  <div class="top">
+    <a class="back" href="/">← Terminal</a>
+    <h1><span class="tokdot"></span><span id="tokName">—</span></h1>
+    <span class="live"><span class="dot down" id="statusDot"></span><span id="statusText">connecting…</span></span>
+    <span class="switch" id="tokSwitch"></span>
+    <span class="meta" id="metaLine"></span>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="cardhead">
+        <h2 id="chartTitle">Volume</h2>
+        <div class="toggles">
+          <div class="seg" id="metricSeg">
+            <button data-m="real" class="on">Real vol</button>
+            <button data-m="raw">Raw vol</button>
+            <button data-m="net">Net issuance</button>
+            <button data-m="cnt">Transfers</button>
+          </div>
+          <div class="seg" id="rangeSeg">
+            <button data-rng="1h">1h</button>
+            <button data-rng="24h" class="on">24h</button>
+            <button data-rng="7d">7d</button>
+          </div>
+        </div>
+      </div>
+      <p class="cap" id="chartCap">Real volume = one largest transfer per transaction (routing/bot noise filtered).</p>
+      <div class="chartwrap">
+        <div class="peak" id="chartPeak"></div>
+        <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <div class="chart-empty" id="chartEmpty">collecting data…</div>
+      </div>
+      <div class="chartaxis" id="chartAxis"></div>
+    </div>
+
+    <div class="card">
+      <h2>Transfer-size distribution</h2>
+      <p class="cap">How transfer amounts break down, over recently indexed transfers.</p>
+      <div id="dist"><div class="chart-empty" style="position:static;height:80px">collecting…</div></div>
+      <div class="disttot" id="distTot"></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Largest transfers</h2>
+      <p class="cap">Biggest recent <span id="lt1">—</span> transfers indexed.</p>
+      <table><thead><tr><th>From</th><th>To</th><th class="r">Amount</th></tr></thead>
+        <tbody id="largest"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Recent transfers</h2>
+      <p class="cap">Latest <span id="lt2">—</span> transfers as indexed.</p>
+      <table><thead><tr><th>From</th><th>To</th><th class="r">Amount</th></tr></thead>
+        <tbody id="recent"></tbody></table>
+    </div>
+  </div>
+
+  <div class="foot">Live Arc testnet data · <a href="/docs" style="color:var(--ink-2)">API</a> · <span id="ep"></span></div>
+</div>
+
+<script>
+const $=(s)=>document.querySelector(s);
+const nf=new Intl.NumberFormat('en-US');
+const TOK=['USDC','EURC','USYC'];
+const TCOLOR={USDC:'--usdc',EURC:'--eurc',USYC:'--usyc'};
+const short=(a)=>a?a.slice(0,6)+'…'+a.slice(-4):'—';
+const esc=(s)=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function compact(n){ if(n==null||isNaN(n))return '—'; const a=Math.abs(n);
+  if(a>=1e9)return (n/1e9).toFixed(2)+'B'; if(a>=1e6)return (n/1e6).toFixed(2)+'M';
+  if(a>=1e3)return (n/1e3).toFixed(1)+'K'; return nf.format(Number(n.toFixed(a<10?2:0))); }
+const tAgo=(sec)=>{const s=Math.max(0,Math.floor(Date.now()/1000-sec));return s<60?s+'s':(s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h');};
+
+const params=new URLSearchParams(location.search);
+let token=(params.get('token')||'USDC').toUpperCase();
+if(!TOK.includes(token)) token='USDC';
+let range='24h', metric='real';
+
+document.documentElement.style.setProperty('--c',`var(${TCOLOR[token]})`);
+$('#shell').style.setProperty('--c',`var(${TCOLOR[token]})`);
+$('#tokName').textContent=token;
+$('#lt1').textContent=token; $('#lt2').textContent=token;
+document.title='Stabledesk · '+token;
+// token switcher
+$('#tokSwitch').innerHTML=TOK.map(t=>`<a href="/token?token=${t}" class="${t===token?'on':''}">${t}</a>`).join('');
+
+const CAP={real:'Real volume = one largest transfer per transaction (routing/bot noise filtered).',
+  raw:'Raw volume = every Transfer event, including routing hops & bot noise.',
+  net:'Net issuance = mint − burn per bucket (new supply created on-chain).',
+  cnt:'Transfer count per bucket.'};
+
+function renderKpis(d){
+  const sup=d.supply||{}, sm=d.summary24h||{};
+  const vel=sup.velocity?(sup.velocity<1?sup.velocity.toFixed(3):sup.velocity.toFixed(1))+'×':'—';
+  const net=d.netIssuance24h;
+  const netCls=net==null?'':(net>0?'pos':(net<0?'neg':''));
+  const netStr=net==null?'—':(net>0?'+':'')+compact(net);
+  const kpis=[
+    ['Supply',compact(sup.supply),''],
+    ['24h real vol',compact(sup.rvolume24h),''],
+    ['Velocity',vel,''],
+    ['Dominance',sup.dominance!=null?(sup.dominance*100).toFixed(1)+'%':'—',''],
+    ['Net issuance · 24h',netStr,'',netCls],
+  ].map(([l,v,u,cls])=>`<div class="kpi"><div class="lab">${l}</div><div class="val ${cls||''}">${v}<span class="unit">${u}</span></div></div>`).join('');
+  $('#kpis').innerHTML=kpis;
+}
+function renderDist(dist){
+  const el=$('#dist'); const bs=(dist&&dist.brackets)||[];
+  const total=dist?dist.total:0;
+  if(!total){ el.innerHTML='<div class="chart-empty" style="position:static;height:80px">no transfers indexed yet</div>'; $('#distTot').textContent=''; return; }
+  const max=Math.max(1,...bs.map(b=>b.count));
+  el.innerHTML=bs.map(b=>{
+    const pct=total?(b.count/total*100):0;
+    return `<div class="distrow"><span class="dl">${esc(b.label)}</span>
+      <div class="distbar"><span style="width:${(b.count/max*100).toFixed(1)}%"></span></div>
+      <span class="dc"><b>${nf.format(b.count)}</b> · ${pct.toFixed(0)}%</span></div>`;
+  }).join('');
+  $('#distTot').textContent=`${nf.format(total)} transfers in window`;
+}
+function txRows(list){
+  return (list&&list.length)? list.map(x=>`<tr>
+    <td>${x.fromLabel?`<span class="lblchip">${esc(x.fromLabel)}</span>`:`<span class="addr">${short(x.frm)}</span>`}</td>
+    <td>${x.toLabel?`<span class="lblchip">${esc(x.toLabel)}</span>`:`<span class="addr">${short(x.too)}</span>`}</td>
+    <td class="r amt">${compact(x.amount)}</td></tr>`).join()
+    : '<tr><td colspan="3" style="color:var(--ink-3);padding:14px 0">None indexed yet.</td></tr>';
+}
+async function loadToken(){
+  try{
+    const d=await (await fetch('/api/token?token='+token,{cache:'no-store'})).json();
+    const dot=$('#statusDot'), txt=$('#statusText');
+    if(d.ok){ dot.className='dot'; txt.textContent='live'; } else { dot.className='dot down'; txt.textContent='indexing…'; }
+    $('#metaLine').textContent=d.updatedAt?('upd. '+Math.max(0,Math.round((Date.now()-d.updatedAt)/1000))+'s ago'):'';
+    renderKpis(d); renderDist(d.distribution);
+    $('#largest').innerHTML=txRows(d.largest); $('#recent').innerHTML=txRows(d.recent);
+  }catch(e){ $('#statusDot').className='dot down'; $('#statusText').textContent='network error'; }
+}
+function valOf(p){ if(metric==='raw')return p.volume||0; if(metric==='net')return (p.mint||0)-(p.burn||0); if(metric==='cnt')return p.cnt||0; return p.rvolume||0; }
+function renderChart(payload){
+  let series=payload.series||[];
+  if(series.length>2 && payload.group && series.at(-1).t+payload.group>Date.now()/1000) series=series.slice(0,-1);
+  const svg=$('#chart'), empty=$('#chartEmpty'), peak=$('#chartPeak'), axis=$('#chartAxis');
+  const color=`var(${TCOLOR[token]})`;
+  if(series.length<2){ svg.innerHTML=''; empty.style.display='flex'; peak.textContent=''; axis.textContent=''; return; }
+  empty.style.display='none';
+  const vals=series.map(valOf);
+  const W=1000,H=260,pad=12;
+  let lo=Math.min(0,...vals), hi=Math.max(1,...vals); if(hi===lo)hi=lo+1;
+  const X=i=>i/(series.length-1)*W;
+  const Y=v=>H-pad-((v-lo)/(hi-lo))*(H-2*pad);
+  const pts=series.map((p,i)=>X(i).toFixed(1)+','+Y(vals[i]).toFixed(1));
+  const zeroY=Y(0);
+  const area='M0,'+H+' L'+pts.join(' L')+' L'+W+','+H+' Z';
+  let grid='';
+  if(lo<0) grid+=`<line x1="0" y1="${zeroY.toFixed(1)}" x2="${W}" y2="${zeroY.toFixed(1)}" stroke="var(--line-2)" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+  for(let g=1;g<=2;g++){ const y=(H-2*pad)*g/3+pad; grid+=`<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>`; }
+  svg.innerHTML=grid+`<path d="${area}" fill="${color}" opacity="0.12"/><path d="M${pts.join(' L')}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
+  peak.innerHTML=`peak <b>${compact(hi)}</b>`;
+  const fmt=(sec)=>{const dte=new Date(sec*1000); return range==='7d'?dte.toLocaleDateString('en-US',{month:'short',day:'numeric'}):dte.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});};
+  const mid=series[Math.floor(series.length/2)];
+  axis.innerHTML=`<span>${fmt(series[0].t)}</span><span>${fmt(mid.t)}</span><span>${fmt(series.at(-1).t)}</span>`;
+}
+async function loadChart(){
+  $('#chartTitle').textContent=({real:'Real volume',raw:'Raw volume',net:'Net issuance',cnt:'Transfers'})[metric];
+  $('#chartCap').textContent=CAP[metric];
+  try{ const r=await fetch(`/api/history?token=${token}&range=${range}`,{cache:'no-store'}); renderChart(await r.json()); }catch(e){}
+}
+$('#metricSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return; metric=b.dataset.m; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b)); loadChart();});
+$('#rangeSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return; range=b.dataset.rng; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b)); loadChart();});
+fetch('/api/state',{cache:'no-store'}).then(r=>r.json()).then(d=>{ $('#ep').textContent=(d.endpoint||'').replace('https://',''); }).catch(()=>{});
+
+loadToken(); loadChart();
+setInterval(loadToken,6000); setInterval(loadChart,20000);
+</script>
+</body>
+</html>

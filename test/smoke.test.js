@@ -74,5 +74,18 @@ test('db round-trips keys, buckets, addresses', async () => {
   assert.equal(db.getLargest(5)[0].amount, 60);
   assert.equal(db.addressStats('0x' + '1'.repeat(40)).transfers, 2);
 
+  // per-token size distribution + drill-down queries
+  const amts = [50, 500, 5000, 50000, 500000, 5000000];
+  const more = amts.map((amt, i) => ({ block: 501 + i, ts: minute, token: 'USDC', frm: '0x' + '3'.repeat(40), too: '0x' + '4'.repeat(40), amount: amt }));
+  db.applyBatch(new Map(), new Map(), more);
+  const dist = db.sizeDistribution('USDC');
+  assert.equal(dist.brackets.length, 6);
+  assert.equal(dist.total, 7);                  // 6 new + the earlier 60
+  assert.equal(dist.brackets[0].count, 2);      // <100: 50 and 60
+  assert.equal(dist.brackets.at(-1).count, 1);  // 1M+: 5,000,000
+  assert.equal(db.largestByToken('USDC', 3)[0].amount, 5000000);
+  assert.ok(db.recentByToken('USDC', 5).length >= 5);
+  assert.equal(db.sizeDistribution('EURC').total, 0);
+
   db.close();
 });

@@ -115,6 +115,18 @@ export async function handleV1(req, res, u) {
     return json(res, { token, group: r.group, series: db.getHistory(token, since, r.group) }, 200, H);
   }
 
+  // per-token detail: supply/velocity + 24h summary + net issuance + size distribution
+  if (path.startsWith('/v1/stablecoins/')) {
+    const token = path.slice('/v1/stablecoins/'.length).toUpperCase();
+    if (!TOKEN_SYMBOLS.has(token)) return json(res, { error: 'bad_token', hint: 'token must be USDC, EURC, or USYC.' }, 400, H);
+    const sm = s.summary24h?.byToken?.[token] || null;
+    return json(res, {
+      token, supply: s.supply?.[token] || null, summary24h: sm,
+      netIssuance24h: sm ? sm.mint - sm.burn : null,
+      distribution: db.sizeDistribution(token), updatedAt: s.updatedAt,
+    }, 200, H);
+  }
+
   if (path === '/v1/addresses/top') {
     const limit = Math.min(100, Number(u.searchParams.get('limit')) || 20);
     return json(res, { top: db.getTop(limit).map((x) => ({ ...x, label: getLabel(x.address)?.name || null })) }, 200, H);

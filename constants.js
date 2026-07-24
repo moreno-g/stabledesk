@@ -13,3 +13,13 @@ export const TIERS = {
 
 export const TOKEN_SYMBOLS = new Set(['USDC', 'EURC', 'USYC']);
 export const ADDR_RE = /^0x[0-9a-f]{40}$/;
+
+// Transfer-size brackets for the "transaction size distribution" (Visa / Allium style).
+export const SIZE_BRACKETS = [
+  { label: '<100', min: 0, max: 100 },
+  { label: '100–1K', min: 100, max: 1e3 },
+  { label: '1K–10K', min: 1e3, max: 1e4 },
+  { label: '10K–100K', min: 1e4, max: 1e5 },
+  { label: '100K–1M', min: 1e5, max: 1e6 },
+  { label: '1M+', min: 1e6, max: Infinity },
+];
