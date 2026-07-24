@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stabledesk · Not found</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%230FA79E'/%3E%3Cstop offset='.5' stop-color='%2325C4B8'/%3E%3Cstop offset='1' stop-color='%239B7EDE'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M22 10L10 10L10 22L22 22' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round' transform='rotate(-45 16 16)'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0B0F14; --panel:#121820; --inset:#0E141B; --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583;
+    --line:#212B36; --line-2:#2B3742; --accent:#25C4B8; --usyc:#9B7EDE;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:light){:root{--bg:#EEF1F5; --panel:#FFFFFF; --inset:#EAEEF3; --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2; --line:#E1E6EC; --line-2:#D2DAE2; --accent:#0FA79E; --usyc:#7E5FD0}}
+  :root[data-theme="dark"]{--bg:#0B0F14; --panel:#121820; --inset:#0E141B; --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583; --line:#212B36; --line-2:#2B3742; --accent:#25C4B8; --usyc:#9B7EDE}
+  :root[data-theme="light"]{--bg:#EEF1F5; --panel:#FFFFFF; --inset:#EAEEF3; --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2; --line:#E1E6EC; --line-2:#D2DAE2; --accent:#0FA79E; --usyc:#7E5FD0}
+  *{box-sizing:border-box} html,body{height:100%}
+  body{margin:0; font-family:var(--sans); background:var(--bg); color:var(--ink); -webkit-font-smoothing:antialiased; display:flex; align-items:center; justify-content:center; padding:24px}
+  .box{max-width:460px; text-align:center}
+  .logo{width:56px;height:56px;border-radius:15px;background:linear-gradient(135deg,var(--accent),var(--usyc));position:relative;margin:0 auto 22px}
+  .logo::after{content:"";position:absolute;inset:14px;border:4px solid #fff;border-right-color:transparent;border-radius:7px;transform:rotate(-45deg)}
+  .code{font-family:var(--mono); font-size:13px; letter-spacing:.18em; text-transform:uppercase; color:var(--accent); font-weight:600}
+  h1{font-size:clamp(24px,5vw,32px); margin:8px 0 6px; letter-spacing:-.02em}
+  p{color:var(--ink-2); margin:0 0 22px; font-size:15px; line-height:1.6}
+  .links{display:flex; flex-wrap:wrap; gap:10px; justify-content:center}
+  .btn{font-size:14px; font-weight:650; text-decoration:none; padding:9px 16px; border-radius:9px}
+  .btn.primary{background:var(--accent); color:#04110f}
+  .btn.primary:hover{filter:brightness(1.06)}
+  .btn.ghost{color:var(--ink-2); border:1px solid var(--line-2)}
+  .btn.ghost:hover{color:var(--ink); border-color:var(--ink-3)}
+</style>
+<script src="/theme.js"></script>
+</head>
+<body>
+  <div class="box">
+    <div class="logo"></div>
+    <div class="code">Error 404</div>
+    <h1>Page not found</h1>
+    <p>That page doesn't exist or has moved. Head back to the terminal, or explore the API.</p>
+    <div class="links">
+      <a class="btn primary" href="/">← Terminal</a>
+      <a class="btn ghost" href="/docs">API docs</a>
+      <a class="btn ghost" href="/methodology">Methodology</a>
+    </div>
+  </div>
+</body>
+</html>
