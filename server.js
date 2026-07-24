@@ -39,17 +39,18 @@ async function loadAsset(name, type) {
   }
   return a;
 }
-async function serveFile(req, res, name, type = 'text/html; charset=utf-8') {
+async function serveFile(req, res, name, type = 'text/html; charset=utf-8', code = 200) {
   try {
     const a = await loadAsset(name, type);
     const h = { 'content-type': type, 'cache-control': 'no-cache', etag: a.etag, ...SEC };
     if (type.startsWith('text/html')) h['content-security-policy'] = CSP;
     if (req.headers['if-none-match'] === a.etag) { res.writeHead(304, h); return res.end(); }
-    if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
-      res.writeHead(200, { ...h, 'content-encoding': 'gzip', vary: 'Accept-Encoding' });
+    const compressible = /text\/|javascript|json|svg/.test(type); // don't gzip already-compressed images
+    if (compressible && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+      res.writeHead(code, { ...h, 'content-encoding': 'gzip', vary: 'Accept-Encoding' });
       return res.end(a.gz);
     }
-    res.writeHead(200, h); res.end(a.buf);
+    res.writeHead(code, h); res.end(a.buf);
   } catch { res.writeHead(404, SEC); res.end('not found'); }
 }
 
@@ -123,9 +124,13 @@ const server = http.createServer(async (req, res) => {
 
   // static assets + pages
   if (path === '/theme.js') return serveFile(req, res, 'theme.js', 'text/javascript; charset=utf-8');
+  if (path === '/og.png') return serveFile(req, res, 'og.png', 'image/png');
+  if (path === '/banner.png') return serveFile(req, res, 'banner.png', 'image/png');
   if (path === '/docs' || path === '/docs.html') return serveFile(req, res, 'docs.html');
   if (path === '/token' || path === '/token.html') return serveFile(req, res, 'token.html');
-  return serveFile(req, res, 'index.html');
+  if (path === '/methodology' || path === '/methodology.html') return serveFile(req, res, 'methodology.html');
+  if (path === '/' || path === '/index.html') return serveFile(req, res, 'index.html');
+  return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404); // unknown → real 404
 });
 
 server.listen(PORT, () => {
