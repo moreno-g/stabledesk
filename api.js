@@ -51,7 +51,7 @@ const CORS = {
 };
 
 function json(res, body, code = 200, headers = {}) {
-  res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...CORS, ...headers });
+  res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-robots-tag': 'noindex', ...CORS, ...headers });
   res.end(JSON.stringify(body));
 }
 function readBody(req) {

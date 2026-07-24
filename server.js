@@ -22,7 +22,7 @@ const SEC = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referr
 const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 function json(res, body, code = 200) {
-  res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-store', ...SEC });
+  res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-store', 'x-robots-tag': 'noindex', ...SEC });
   res.end(JSON.stringify(body));
 }
 
@@ -121,6 +121,10 @@ const server = http.createServer(async (req, res) => {
       lastError: live.snapshot.lastError ?? null,
     });
   }
+
+  // SEO
+  if (path === '/robots.txt') return serveFile(req, res, 'robots.txt', 'text/plain; charset=utf-8');
+  if (path === '/sitemap.xml') return serveFile(req, res, 'sitemap.xml', 'application/xml; charset=utf-8');
 
   // static assets + pages
   if (path === '/theme.js') return serveFile(req, res, 'theme.js', 'text/javascript; charset=utf-8');
