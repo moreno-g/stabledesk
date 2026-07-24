@@ -160,7 +160,11 @@
 
   .headlink{font-size:12px; color:var(--ink-2); text-decoration:none; border:1px solid var(--line-2); padding:6px 11px; border-radius:8px; font-weight:600}
   .headlink:hover{color:var(--ink); border-color:var(--ink-3)}
-  .alertfeed,.watchlist{display:flex; flex-direction:column; max-height:290px; overflow-y:auto}
+  .alertfeed,.watchlist{display:flex; flex-direction:column; max-height:290px; overflow-y:auto; scrollbar-width:thin; scrollbar-color:var(--line-2) transparent}
+  .alertfeed::-webkit-scrollbar,.watchlist::-webkit-scrollbar{width:8px}
+  .alertfeed::-webkit-scrollbar-track,.watchlist::-webkit-scrollbar-track{background:transparent}
+  .alertfeed::-webkit-scrollbar-thumb,.watchlist::-webkit-scrollbar-thumb{background:var(--line-2); border-radius:8px; border:2px solid transparent; background-clip:padding-box}
+  .alertfeed::-webkit-scrollbar-thumb:hover,.watchlist::-webkit-scrollbar-thumb:hover{background:var(--ink-3)}
   .alertrow{display:flex; align-items:center; gap:9px; padding:8px 0; border-top:1px solid var(--line); font-size:11.5px; font-family:var(--mono)}
   .alertrow:first-child{border-top:0}
   .akind{font-family:var(--sans); font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; padding:1px 6px; border-radius:4px; color:var(--ink-3); border:1px solid var(--line-2)}
