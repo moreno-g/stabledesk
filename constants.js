@@ -24,6 +24,25 @@ export const SIZE_BRACKETS = [
   { label: '1M+', min: 1e6, max: Infinity },
 ];
 
+// Address-level noise filter — the second of the two filters described on /methodology.
+// Visa / Allium exclude any address exceeding 1,000 transactions or $10M of volume in a
+// month; these are the same thresholds expressed as a *daily rate*, because our retention
+// window is a rolling ~7 days rather than a calendar month. The indexer multiplies them by
+// however many days of history it actually holds before comparing.
+export const NOISE_FILTER = {
+  txPerDay: 1000 / 30,       // ≈ 33 transfers/day
+  volumePerDay: 10e6 / 30,   // ≈ $333k/day
+};
+
+// Fee accounting. Exact fees only exist in transaction receipts, and fetching receipts for
+// every block (~172k/day at 0.5s blocks) would bury the rate-limited public RPC. Instead we
+// sample a few blocks each tick — exact for the blocks sampled — and report the sample size
+// alongside every derived rate so the extrapolation is never presented as a measured total.
+export const FEE_SAMPLE = {
+  blocksPerTick: 3,
+  lookback: 12,       // sample window sits this many blocks behind the head
+};
+
 // Crypto billing (Pro tier) — paid in native USDC on Base, since Arc is still testnet
 // (its USDC has no real value). Verified live against Base mainnet: chainId 8453,
 // USDC contract responds symbol()="USDC", decimals()=6.

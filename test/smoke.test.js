@@ -135,6 +135,61 @@ test('crypto billing: order matching, idempotency, renewal, expiry', async () =>
   assert.equal(db.getKey('sbd_pay3').tier, 'free');
 });
 
+// ---- network fee economics + address-level noise filter ----
+test('fee sampling and the address noise filter', async () => {
+  const db = await import('../db.js');
+  const { noiseLimits, feeMetrics } = await import('../indexer.js');
+  const { NOISE_FILTER } = await import('../constants.js');
+
+  // Thresholds scale with retained history, but never drop below a full day — otherwise a
+  // freshly-booted indexer holding 25 minutes of backfill would flag ordinary addresses.
+  assert.equal(noiseLimits(0).days, 1, 'window is floored at one day');
+  assert.equal(noiseLimits(3600).days, 1, 'an hour of history still uses the one-day floor');
+  assert.equal(noiseLimits(7 * 86400).days, 7);
+  assert.equal(noiseLimits(7 * 86400).maxTransfers, NOISE_FILTER.txPerDay * 7);
+
+  // Fee metrics are exact per sampled block and extrapolated to the window; the sample size
+  // rides along so a derived rate can't be mistaken for a measured total.
+  assert.equal(feeMetrics({ blocks: 0, fees: 0, txs: 0, gasUsed: 0 }, 100, 1000, 5), null, 'no samples → no numbers');
+  const m = feeMetrics({ blocks: 10, fees: 2, txs: 40, gasUsed: 400000 }, 100, 1000, 1e6);
+  assert.equal(m.perBlock, 0.2);
+  assert.equal(m.perTx, 0.05);
+  assert.equal(m.perDay, 200);            // 0.2/block × 1000 blocks/day
+  assert.equal(m.inWindow, 20);           // 0.2/block × 100 blocks in window
+  assert.equal(m.perMillionMoved, 20);    // $20 of fees per $1M of real volume moved
+  assert.equal(m.sampledBlocks, 10);
+  assert.equal(m.sampleCoverage, 0.1);
+  assert.equal(feeMetrics({ blocks: 1, fees: 1, txs: 0, gasUsed: 0 }, 1, 1, 0).perMillionMoved, null, 'no volume → no ratio');
+
+  // Adjusted volume is stored and summed alongside real volume.
+  const minute = Math.floor(Date.now() / 1000 / 60) * 60 - 300;
+  db.applyBatch(new Map([[`${minute}|EURC`, { minute, token: 'EURC', volume: 900, cnt: 9, mint: 0, burn: 0, rvolume: 500, rcnt: 5, avolume: 200, acnt: 2 }]]), new Map(), []);
+  const sum = db.getSummary(minute - 60);
+  assert.equal(sum.byToken.EURC.rvolume, 500);
+  assert.equal(sum.byToken.EURC.avolume, 200, 'adjusted volume is strictly below real volume here');
+  assert.equal(db.getHistory('EURC', minute - 60, 60).at(-1).avolume, 200);
+
+  // A busy address trips the filter; a quiet one does not.
+  const bot = '0x' + 'b'.repeat(40), human = '0x' + 'c'.repeat(40);
+  db.applyBatch(new Map(), new Map([
+    [bot, { transfers: 5000, volume: 10, lastBlock: 900 }],      // flagged on frequency alone
+    [human, { transfers: 3, volume: 10, lastBlock: 900 }],
+  ]), []);
+  const lim = noiseLimits(86400);
+  const flagged = db.noisyAddresses(lim.maxTransfers, lim.maxVolume).map((r) => r.address);
+  assert.ok(flagged.includes(bot), 'high-frequency address is flagged');
+  assert.ok(!flagged.includes(human), 'a low-activity address is left alone');
+
+  // Fee samples are keyed by block, so re-sampling one can't inflate the totals.
+  db.insertFeeSamples([{ block: 7001, minute, fees: 0.5, txs: 4, gasUsed: 100000 }]);
+  db.insertFeeSamples([{ block: 7001, minute, fees: 0.5, txs: 4, gasUsed: 100000 }]);
+  db.insertFeeSamples([{ block: 7002, minute, fees: 1.5, txs: 6, gasUsed: 200000 }]);
+  const fs = db.feeStats(minute - 60);
+  assert.equal(fs.blocks, 2, 'the replayed block is ignored, not counted twice');
+  assert.equal(fs.fees, 2);
+  assert.equal(fs.txs, 10);
+});
+
 // ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----
 test('whalewatch: threshold filtering, drafting, and dedupe', async () => {
   const db = await import('../db.js');

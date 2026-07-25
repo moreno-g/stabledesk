@@ -50,6 +50,19 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_recent_amount ON recent(amount DESC);
 
+  -- Exact per-block fee accounting, from transaction receipts. Receipts are far too
+  -- many to fetch for every block on a rate-limited public RPC, so the indexer samples
+  -- a few blocks per tick; each row here is exact for its block, and the sample count
+  -- is always reported alongside the derived rates.
+  CREATE TABLE IF NOT EXISTS fee_samples (
+    block    INTEGER PRIMARY KEY,       -- dedupes re-sampled blocks (INSERT OR IGNORE)
+    minute   INTEGER NOT NULL,
+    fees     REAL    NOT NULL,          -- total fees paid in that block, in USDC (gas token on Arc)
+    txs      INTEGER NOT NULL,
+    gas_used INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_fee_minute ON fee_samples(minute);
+
   CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 
   CREATE TABLE IF NOT EXISTS api_keys (
@@ -84,8 +97,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_drafts_delivered ON tweet_drafts(delivered);
 `);
 
-// Migrations: "real" (noise-filtered) volume columns — safe on existing DBs.
-for (const col of ['rvolume REAL NOT NULL DEFAULT 0', 'rcnt INTEGER NOT NULL DEFAULT 0']) {
+// Migrations, safe on existing DBs:
+//   rvolume/rcnt — "real" volume (one transfer per tx per token)
+//   avolume/acnt — "adjusted" volume (real, minus transfers touching a high-frequency address)
+for (const col of ['rvolume REAL NOT NULL DEFAULT 0', 'rcnt INTEGER NOT NULL DEFAULT 0',
+                   'avolume REAL NOT NULL DEFAULT 0', 'acnt INTEGER NOT NULL DEFAULT 0']) {
   try { db.exec(`ALTER TABLE buckets ADD COLUMN ${col}`); } catch { /* already present */ }
 }
 // Migration: Pro-tier expiry, so a lapsed subscription reverts to free automatically.
@@ -96,11 +112,13 @@ const RECENT_KEEP = 1200;
 const stmt = {
   getMeta: db.prepare('SELECT v FROM meta WHERE k = ?'),
   setMeta: db.prepare('INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v'),
-  upBucket: db.prepare(`INSERT INTO buckets(minute, token, volume, cnt, mint, burn, rvolume, rcnt) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+  upBucket: db.prepare(`INSERT INTO buckets(minute, token, volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(minute, token) DO UPDATE SET
       volume = volume + excluded.volume, cnt = cnt + excluded.cnt,
       mint = mint + excluded.mint, burn = burn + excluded.burn,
-      rvolume = rvolume + excluded.rvolume, rcnt = rcnt + excluded.rcnt`),
+      rvolume = rvolume + excluded.rvolume, rcnt = rcnt + excluded.rcnt,
+      avolume = avolume + excluded.avolume, acnt = acnt + excluded.acnt`),
   upAddr: db.prepare(`INSERT INTO addr_stats(address, transfers, volume, last_block) VALUES(?, ?, ?, ?)
     ON CONFLICT(address) DO UPDATE SET
       transfers = transfers + excluded.transfers, volume = volume + excluded.volume,
@@ -113,6 +131,14 @@ const stmt = {
   coverage: db.prepare('SELECT MIN(minute) AS a, MAX(minute) AS b FROM buckets'),
   pruneBuckets: db.prepare('DELETE FROM buckets WHERE minute < ?'),
   pruneAddrs: db.prepare('DELETE FROM addr_stats WHERE last_block < ?'),
+  // Addresses busy enough to be treated as infrastructure rather than economic actors.
+  // Capped so a pathological window can't load an unbounded set into memory.
+  noisy: db.prepare('SELECT address, transfers, volume FROM addr_stats WHERE transfers > ? OR volume > ? ORDER BY volume DESC LIMIT 5000'),
+  zeroAdj: db.prepare('UPDATE buckets SET avolume = 0, acnt = 0 WHERE minute BETWEEN ? AND ?'),
+  setAdj: db.prepare('UPDATE buckets SET avolume = ?, acnt = ? WHERE minute = ? AND token = ?'),
+  insFee: db.prepare('INSERT OR IGNORE INTO fee_samples(block, minute, fees, txs, gas_used) VALUES(?, ?, ?, ?, ?)'),
+  feeStats: db.prepare('SELECT COUNT(*) AS blocks, SUM(fees) AS fees, SUM(txs) AS txs, SUM(gas_used) AS gas FROM fee_samples WHERE minute >= ?'),
+  pruneFees: db.prepare('DELETE FROM fee_samples WHERE minute < ?'),
 };
 
 export const getCheckpoint = () => {
@@ -125,7 +151,10 @@ export const setCheckpoint = (n) => stmt.setMeta.run('checkpoint', String(n));
 export function applyBatch(buckets, addrs, recents) {
   db.exec('BEGIN');
   try {
-    for (const b of buckets.values()) stmt.upBucket.run(b.minute, b.token, b.volume, b.cnt, b.mint, b.burn, b.rvolume, b.rcnt);
+    // Columns added by migration default to 0 for callers that predate them.
+    for (const b of buckets.values()) {
+      stmt.upBucket.run(b.minute, b.token, b.volume, b.cnt, b.mint, b.burn, b.rvolume || 0, b.rcnt || 0, b.avolume || 0, b.acnt || 0);
+    }
     for (const [addr, x] of addrs) stmt.upAddr.run(addr, x.transfers, x.volume, x.lastBlock);
     for (const r of recents) stmt.insRecent.run(r.block, r.ts, r.token, r.frm, r.too, r.amount);
     if (recents.length) stmt.trimRecent.run(RECENT_KEEP);
@@ -148,27 +177,71 @@ export function getHistory(token, since, groupSec) {
   if (!ps) {
     ps = db.prepare(`SELECT (minute / ${g}) * ${g} AS t,
         SUM(volume) AS volume, SUM(cnt) AS cnt, SUM(mint) AS mint, SUM(burn) AS burn,
-        SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt
+        SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt, SUM(avolume) AS avolume, SUM(acnt) AS acnt
       FROM buckets WHERE minute >= ? ${filter ? 'AND token = ?' : ''}
       GROUP BY t ORDER BY t`);
     histStmts.set(ck, ps);
   }
   const rows = filter ? ps.all(since, token) : ps.all(since);
-  return rows.map((r) => ({ t: r.t, volume: r.volume, cnt: r.cnt, mint: r.mint, burn: r.burn, rvolume: r.rvolume, rcnt: r.rcnt }));
+  return rows.map((r) => ({ t: r.t, volume: r.volume, cnt: r.cnt, mint: r.mint, burn: r.burn, rvolume: r.rvolume, rcnt: r.rcnt, avolume: r.avolume, acnt: r.acnt }));
 }
 
 // Per-token totals since `since` (defaults to a 24h window).
 export function getSummary(since) {
   const rows = db.prepare(`SELECT token, SUM(volume) AS volume, SUM(cnt) AS cnt, SUM(mint) AS mint, SUM(burn) AS burn,
-      SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt
+      SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt, SUM(avolume) AS avolume, SUM(acnt) AS acnt
     FROM buckets WHERE minute >= ? GROUP BY token`).all(since);
   const byToken = {};
-  let volume = 0, transfers = 0, rvolume = 0, rtransfers = 0;
+  let volume = 0, transfers = 0, rvolume = 0, rtransfers = 0, avolume = 0, atransfers = 0;
   for (const r of rows) {
-    byToken[r.token] = { volume: r.volume, transfers: r.cnt, mint: r.mint, burn: r.burn, rvolume: r.rvolume, rtransfers: r.rcnt };
-    volume += r.volume; transfers += r.cnt; rvolume += r.rvolume; rtransfers += r.rcnt;
+    byToken[r.token] = {
+      volume: r.volume, transfers: r.cnt, mint: r.mint, burn: r.burn,
+      rvolume: r.rvolume, rtransfers: r.rcnt, avolume: r.avolume, atransfers: r.acnt,
+    };
+    volume += r.volume; transfers += r.cnt;
+    rvolume += r.rvolume; rtransfers += r.rcnt;
+    avolume += r.avolume; atransfers += r.acnt;
   }
-  return { byToken, volume, transfers, rvolume, rtransfers };
+  return { byToken, volume, transfers, rvolume, rtransfers, avolume, atransfers };
+}
+
+// Addresses whose activity over the retained window exceeds the given absolute limits.
+// The indexer scales the per-day thresholds by how many days of history it actually holds.
+export const noisyAddresses = (maxTransfers, maxVolume) => stmt.noisy.all(maxTransfers, maxVolume);
+
+// ---- fee samples (exact per-block fees, sampled) ----
+export function insertFeeSamples(rows) {
+  if (!rows.length) return;
+  db.exec('BEGIN');
+  try {
+    for (const r of rows) stmt.insFee.run(r.block, r.minute, r.fees, r.txs, r.gasUsed);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+// Overwrite (not accumulate) the adjusted columns across a minute range. Used once after a cold
+// backfill, when those rows were scored before any address had been flagged. The range is zeroed
+// first so a bucket whose entire activity turned out to be noise correctly drops to 0 rather than
+// keeping its inflated first-pass value — such buckets never appear in `buckets` at all.
+export function setAdjusted(buckets, fromMinute, toMinute) {
+  let changed = 0;
+  db.exec('BEGIN');
+  try {
+    stmt.zeroAdj.run(fromMinute, toMinute);
+    for (const b of buckets.values()) changed += stmt.setAdj.run(b.avolume, b.acnt, b.minute, b.token).changes;
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  return changed;
+}
+
+export function feeStats(sinceMinute) {
+  const r = stmt.feeStats.get(sinceMinute);
+  return { blocks: r?.blocks || 0, fees: r?.fees || 0, txs: r?.txs || 0, gasUsed: r?.gas || 0 };
 }
 
 export const getTop = (limit = 8) => stmt.top.all(limit);
@@ -295,6 +368,7 @@ export function prune(nowSec, latestBlock, blockMs) {
   const weekBlocks = Math.round((7 * 86400 * 1000) / Math.max(200, blockMs));
   stmt.pruneBuckets.run(nowSec - 7 * 86400);
   stmt.pruneAddrs.run(latestBlock - weekBlocks);
+  stmt.pruneFees.run(nowSec - 7 * 86400);
 }
 
 // Close the database (WAL checkpoint) for a clean shutdown.
