@@ -233,7 +233,7 @@
       <div class="cardhead">
         <h2 id="chartTitle">Transfer volume</h2>
         <div class="toggles">
-          <div class="seg" id="metricSeg" title="Adjusted = real volume, minus transfers touching a high-frequency address">
+          <div class="seg" id="metricSeg" title="Adjusted = real volume, minus transfers where both ends are high-frequency addresses">
             <button data-m="adj">Adjusted</button>
             <button data-m="real" class="on">Real</button>
             <button data-m="raw">Raw</button>
@@ -297,7 +297,7 @@
     </div>
     <div class="card">
       <h2>Filtered addresses</h2>
-      <p class="cap">Addresses busy enough to be infrastructure rather than economic activity — excluded from <em>adjusted</em> volume. <a href="/methodology" style="color:var(--accent)">Method →</a></p>
+      <p class="cap">Addresses busy enough to be infrastructure rather than economic activity. A transfer is dropped from <em>adjusted</em> volume only when both its ends are flagged. <a href="/methodology" style="color:var(--accent)">Method →</a></p>
       <table><thead><tr><th>Address</th><th class="r">Transfers</th><th class="r">Volume</th></tr></thead>
         <tbody id="noiseTbl"></tbody></table>
       <div class="cov" id="noiseFoot"></div>
@@ -519,7 +519,7 @@ async function renderWatch(){
 
 // toggles
 const CAPS={
-  adj:'Adjusted volume = real volume, minus every transfer touching a high-frequency address (Visa / Allium address filter).',
+  adj:'Adjusted volume = real volume, minus transfers where <em>both</em> ends are high-frequency addresses — infrastructure talking to itself.',
   real:'Real volume = one largest transfer per transaction, per token — routing hops &amp; contract internals filtered out.',
   raw:'Raw volume = every Transfer event, unfiltered. Inflated by routing hops and bot activity.',
 };

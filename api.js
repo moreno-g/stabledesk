@@ -143,7 +143,7 @@ export async function handleV1(req, res, u) {
       excludedVolume24h: n.excludedVolume24h ?? null,
       excludedShare: n.excludedShare ?? null,
       addresses: n.top || [],
-      note: 'Addresses whose activity rate exceeds the thresholds are treated as infrastructure and excluded from adjusted volume.',
+      note: 'Addresses whose activity rate exceeds the thresholds are treated as infrastructure. A transfer is excluded from adjusted volume only when both of its ends are flagged; see /methodology.',
       updatedAt: s.updatedAt,
     }, 200, H);
   }

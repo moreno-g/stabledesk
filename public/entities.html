@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stabledesk · Entities</title>
+<meta name="description" content="Experimental: what Arc's highest-volume addresses actually are, derived from public chain data alone.">
+<meta name="robots" content="noindex">
+<link rel="canonical" href="https://stabledesk.xyz/entities">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%230FA79E'/%3E%3Cstop offset='.5' stop-color='%2325C4B8'/%3E%3Cstop offset='1' stop-color='%239B7EDE'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M22 10L10 10L10 22L22 22' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round' transform='rotate(-45 16 16)'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0B0F14; --panel:#121820; --inset:#0E141B; --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583;
+    --line:#212B36; --line-2:#2B3742; --accent:#25C4B8; --good:#37C98A; --warn:#E7A93A; --bad:#E5686A;
+    --usyc:#9B7EDE; --eurc:#5B8DEF;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --shadow:0 1px 2px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.28);
+  }
+  @media (prefers-color-scheme:light){:root{
+    --bg:#EEF1F5; --panel:#FFFFFF; --inset:#EAEEF3; --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2;
+    --line:#E1E6EC; --line-2:#D2DAE2; --accent:#0FA79E; --good:#128A5B; --warn:#B4791A; --bad:#D2494B;
+    --usyc:#7E5FD0; --eurc:#3F72D9;
+    --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08);
+  }}
+  :root[data-theme="dark"]{--bg:#0B0F14; --panel:#121820; --inset:#0E141B; --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583; --line:#212B36; --line-2:#2B3742; --accent:#25C4B8; --good:#37C98A; --warn:#E7A93A; --bad:#E5686A; --usyc:#9B7EDE; --eurc:#5B8DEF}
+  :root[data-theme="light"]{--bg:#EEF1F5; --panel:#FFFFFF; --inset:#EAEEF3; --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2; --line:#E1E6EC; --line-2:#D2DAE2; --accent:#0FA79E; --good:#128A5B; --warn:#B4791A; --bad:#D2494B; --usyc:#7E5FD0; --eurc:#3F72D9}
+  *{box-sizing:border-box}
+  body{margin:0; font-family:var(--sans); background:var(--bg); color:var(--ink); line-height:1.55; -webkit-font-smoothing:antialiased; padding:clamp(14px,3vw,30px)}
+  .shell{max-width:1180px; margin:0 auto}
+  a{color:var(--accent)}
+  .top{display:flex; align-items:center; gap:11px; margin-bottom:6px; flex-wrap:wrap}
+  .logo{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--usyc));flex:none;position:relative}
+  .logo::after{content:"";position:absolute;inset:7px;border:2.4px solid #fff;border-right-color:transparent;border-radius:4px;transform:rotate(-45deg)}
+  h1{font-size:clamp(20px,3vw,26px); margin:0; letter-spacing:-.02em}
+  .exp{font-size:10px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; padding:3px 9px; border-radius:999px; color:var(--warn); border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line-2))}
+  .iconbtn{display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:8px; border:1px solid var(--line-2); background:var(--panel); color:var(--ink-2); cursor:pointer; padding:0; margin-left:auto}
+  .iconbtn:hover{color:var(--ink); border-color:var(--ink-3)} .iconbtn svg{width:16px;height:16px;display:block}
+  .sub{color:var(--ink-2); margin:2px 0 20px; font-size:14px; max-width:78ch}
+
+  .kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px}
+  .kpi{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:13px 15px; box-shadow:var(--shadow)}
+  .kpi .lab{font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:600; margin-bottom:6px}
+  .kpi .val{font-family:var(--mono); font-size:20px; font-weight:600; font-variant-numeric:tabular-nums}
+  .kpi .sub2{font-size:10.5px; color:var(--ink-3); margin-top:3px}
+
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); padding:16px 17px; margin-bottom:14px}
+  .card h2{font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-2); margin:0; font-weight:650}
+  .card .cap{font-size:11.5px; color:var(--ink-3); margin:4px 0 12px; max-width:82ch}
+
+  .tblwrap{overflow-x:auto; scrollbar-width:thin; scrollbar-color:var(--line-2) transparent}
+  .tblwrap::-webkit-scrollbar{height:8px}
+  .tblwrap::-webkit-scrollbar-track{background:transparent}
+  .tblwrap::-webkit-scrollbar-thumb{background:var(--line-2); border-radius:8px; border:2px solid transparent; background-clip:padding-box}
+  table{width:100%; border-collapse:collapse; font-size:12px; min-width:840px}
+  th{text-align:left; font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3); font-weight:600; padding:0 10px 9px 0; white-space:nowrap}
+  th.r,td.r{text-align:right}
+  td{padding:9px 10px 9px 0; border-top:1px solid var(--line); font-variant-numeric:tabular-nums; vertical-align:top}
+  .addr{font-family:var(--mono); color:var(--ink-2)}
+  .amt{font-family:var(--mono); font-weight:600}
+  .rank{font-family:var(--mono); color:var(--ink-3); width:26px}
+  .lblchip{font-family:var(--sans); font-size:11px; font-weight:650; color:var(--ink)}
+
+  .kind{font-family:var(--sans); font-size:9.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; padding:2px 7px; border-radius:5px; border:1px solid var(--line-2); color:var(--ink-3); white-space:nowrap}
+  .kind.validator{color:var(--usyc); border-color:color-mix(in srgb,var(--usyc) 45%,var(--line-2))}
+  .kind.token{color:var(--accent); border-color:color-mix(in srgb,var(--accent) 45%,var(--line-2))}
+  .kind.multisig{color:var(--good); border-color:color-mix(in srgb,var(--good) 45%,var(--line-2))}
+  .kind.proxy,.kind.router{color:var(--eurc); border-color:color-mix(in srgb,var(--eurc) 45%,var(--line-2))}
+  .kind-handler{color:var(--warn); border-color:color-mix(in srgb,var(--warn) 45%,var(--line-2))}
+  .src{font-size:9px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-3); border:1px solid var(--line-2); border-radius:4px; padding:1px 5px; margin-left:6px}
+  .src.curated{color:var(--good); border-color:color-mix(in srgb,var(--good) 40%,var(--line-2))}
+  .why{font-size:10.5px; color:var(--ink-3); font-family:var(--mono); line-height:1.45}
+  .iface{font-family:var(--mono); font-size:10px; color:var(--ink-3)}
+  .empty{color:var(--ink-3); font-size:12px; font-family:var(--mono); padding:18px 0}
+  .foot-note{font-size:11px; color:var(--ink-3); font-family:var(--mono); margin-top:12px; border-top:1px dashed var(--line-2); padding-top:11px}
+
+  .site-foot{margin-top:26px; border-top:1px solid var(--line); padding-top:16px; font-size:12px; color:var(--ink-3)}
+  .sf-cols{display:flex; flex-wrap:wrap; gap:10px 24px; align-items:center; justify-content:space-between}
+  .sf-brand{display:flex; align-items:center; gap:8px; font-weight:700; color:var(--ink-2); letter-spacing:.02em}
+  .sf-logo{width:16px; height:16px; border-radius:5px; background:linear-gradient(135deg,var(--accent),#9B7EDE); flex:none}
+  .sf-links{display:flex; flex-wrap:wrap; gap:8px 18px}
+  .sf-links a{color:var(--ink-2); text-decoration:none} .sf-links a:hover{color:var(--ink)}
+  @media (max-width:820px){ .kpis{grid-template-columns:repeat(2,1fr)} }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+<script src="/theme.js"></script>
+</head>
+<body>
+<div class="shell">
+  <div class="top">
+    <div class="logo"></div>
+    <h1>Entities</h1>
+    <span class="exp">Experimental</span>
+    <button class="iconbtn" id="themeBtn" type="button" aria-label="Theme"></button>
+  </div>
+  <p class="sub">What Arc's highest-volume addresses actually are — derived from public chain data alone:
+  bytecode, EIP-1967 storage slots and block authorship. No label set is copied from another provider, and
+  no attempt is made to attach a natural person to an address. <a href="/">← Terminal</a></p>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="card">
+    <h2>Top addresses by volume</h2>
+    <p class="cap">Volume on Arc is concentrated enough that deriving the head of the distribution covers
+    almost all flow. <b>Curated</b> means we assert the name; <b>derived</b> means the chain does — the
+    “why” column is the evidence.</p>
+    <div class="tblwrap">
+      <table>
+        <thead><tr>
+          <th>#</th><th>Address</th><th>Type</th><th>Why</th>
+          <th>Interfaces</th><th>Funded by</th><th class="r">Transfers</th><th class="r">Volume</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="8" class="empty">Deriving…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="foot-note" id="runNote"></div>
+  </div>
+
+  <div class="card">
+    <h2>Bytecode clusters</h2>
+    <p class="cap">Addresses sharing a bytecode fingerprint are the same contract deployed more than once.
+    Identifying one identifies the whole family — this is what makes labelling scale.</p>
+    <div id="clusters"><div class="empty">No repeated deployments found yet.</div></div>
+  </div>
+
+  <footer class="site-foot">
+    <div class="sf-cols">
+      <div class="sf-brand"><span class="sf-logo"></span> Stabledesk</div>
+      <nav class="sf-links">
+        <a href="/">Terminal</a><a href="/docs">API</a><a href="/methodology">Methodology</a>
+        <a href="/status">Status</a><a href="https://x.com/getStabledesk">@getStabledesk</a>
+      </nav>
+    </div>
+  </footer>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const nf = new Intl.NumberFormat('en-US');
+const esc = (s) => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const short = (a) => a ? a.slice(0,8)+'…'+a.slice(-6) : '—';
+function compact(n){
+  if(n==null||isNaN(n)) return '—';
+  const a=Math.abs(n);
+  if(a>=1e9) return (n/1e9).toFixed(2)+'B';
+  if(a>=1e6) return (n/1e6).toFixed(2)+'M';
+  if(a>=1e3) return (n/1e3).toFixed(1)+'K';
+  return nf.format(Number(n.toFixed(a<10?2:0)));
+}
+const ago = (ts)=>{ if(!ts) return 'never'; const s=Math.max(0,Math.round((Date.now()-ts)/1000));
+  return s<60? s+'s ago' : (s<3600? Math.floor(s/60)+'m ago' : Math.floor(s/3600)+'h ago'); };
+
+function render(d){
+  const st = d.stats || {};
+  $('#kpis').innerHTML = [
+    ['Addresses shown', nf.format(st.shown||0), 'top by volume'],
+    ['Identified', nf.format(st.identified||0) + '/' + nf.format(st.shown||0), 'type derived from chain data'],
+    ['Volume covered', ((st.volumeCoverage||0)*100).toFixed(1)+'%', 'share of shown volume identified'],
+    ['Known addresses', nf.format(st.knownTotal||0), 'total in the registry'],
+  ].map(([l,v,s])=>`<div class="kpi"><div class="lab">${l}</div><div class="val">${v}</div><div class="sub2">${s}</div></div>`).join('');
+
+  const rows = d.addresses || [];
+  $('#rows').innerHTML = rows.length ? rows.map((x,i)=>{
+    const kindCls = x.kind === 'token-handler' ? 'kind kind-handler' : 'kind ' + (x.kind||'');
+    const name = x.label
+      ? `<span class="lblchip">${esc(x.label)}</span>`
+      : (x.tokenSymbol ? `<span class="lblchip">${esc(x.tokenSymbol)}</span>` : `<span class="addr">${short(x.address)}</span>`);
+    const src = x.source ? `<span class="src ${x.source}">${x.source}</span>` : '';
+    const funder = x.firstFrom
+      ? (x.firstFromLabel ? `<span class="lblchip">${esc(x.firstFromLabel)}</span>` : `<span class="addr">${short(x.firstFrom)}</span>`)
+      : '<span style="color:var(--ink-3)">—</span>';
+    return `<tr>
+      <td class="rank">${i+1}</td>
+      <td>${name}${src}<div class="why">${esc(x.address)}</div></td>
+      <td>${x.kind ? `<span class="${kindCls}">${esc(x.kind)}</span>` : '<span style="color:var(--ink-3)">—</span>'}</td>
+      <td class="why">${esc(x.why||'—')}</td>
+      <td class="iface">${x.interfaces && x.interfaces.length ? esc(x.interfaces.join(' · ')) : '—'}</td>
+      <td>${funder}</td>
+      <td class="r">${nf.format(x.transfers||0)}</td>
+      <td class="r amt">${compact(x.volume)}</td></tr>`;
+  }).join('') : '<tr><td colspan="8" class="empty">Nothing indexed yet.</td></tr>';
+
+  const lr = d.lastRun || {};
+  $('#runNote').textContent = `Last derivation ${ago(lr.at)}`
+    + (lr.derived ? ` · ${nf.format(lr.derived)} addresses probed` : '')
+    + (lr.error ? ` · error: ${lr.error}` : '');
+
+  const cl = d.clusters || [];
+  $('#clusters').innerHTML = cl.length ? cl.map(c=>`
+    <div style="padding:10px 0;border-top:1px solid var(--line)">
+      <div class="iface" style="color:var(--ink-2)">fingerprint ${esc(c.code_hash)} · ${c.n} deployments</div>
+      <div class="addr" style="font-size:11px;margin-top:4px">${c.addresses.map(a=>esc(short(a))).join('&nbsp; ')}</div>
+    </div>`).join('') : '<div class="empty">No repeated deployments found yet.</div>';
+}
+
+async function load(){
+  try{
+    const r = await fetch('/api/entities',{cache:'no-store'});
+    if(!r.ok){ $('#rows').innerHTML='<tr><td colspan="8" class="empty">Entity derivation is disabled.</td></tr>'; return; }
+    render(await r.json());
+  }catch(e){ $('#rows').innerHTML='<tr><td colspan="8" class="empty">Could not reach the API.</td></tr>'; }
+}
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>

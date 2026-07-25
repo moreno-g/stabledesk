@@ -63,6 +63,25 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_fee_minute ON fee_samples(minute);
 
+  -- Derived on-chain attributes for high-volume addresses (experimental — see entities.js).
+  -- Everything here is computed from public chain data, never scraped from another provider.
+  -- Dropping this table and entities.js removes the feature entirely.
+  CREATE TABLE IF NOT EXISTS address_meta (
+    address     TEXT PRIMARY KEY,
+    is_contract INTEGER NOT NULL DEFAULT 0,
+    code_hash   TEXT,                  -- bytecode fingerprint: clusters identical deployments
+    code_size   INTEGER,
+    token_name  TEXT,
+    token_symbol TEXT,
+    impl        TEXT,                  -- EIP-1967 implementation slot (proxy target)
+    admin       TEXT,                  -- EIP-1967 admin slot
+    interfaces  TEXT,                  -- comma-separated selector names found in the bytecode
+    kind        TEXT,                  -- derived classification (wallet | token | proxy | ...)
+    blocks_made INTEGER NOT NULL DEFAULT 0,  -- blocks produced, if a validator
+    checked     INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_ameta_hash ON address_meta(code_hash);
+
   CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 
   CREATE TABLE IF NOT EXISTS api_keys (
@@ -106,6 +125,10 @@ for (const col of ['rvolume REAL NOT NULL DEFAULT 0', 'rcnt INTEGER NOT NULL DEF
 }
 // Migration: Pro-tier expiry, so a lapsed subscription reverts to free automatically.
 try { db.exec('ALTER TABLE api_keys ADD COLUMN expires_at INTEGER'); } catch { /* already present */ }
+// Migration: the address that first funded each address — the cheapest edge of the funding
+// graph, and the one heuristic that reliably ties an operational wallet back to its treasury.
+// Captured at index time (free) rather than reconstructed later (a full-history log scan).
+try { db.exec('ALTER TABLE addr_stats ADD COLUMN first_from TEXT'); } catch { /* already present */ }
 
 const RECENT_KEEP = 1200;
 
@@ -119,10 +142,12 @@ const stmt = {
       mint = mint + excluded.mint, burn = burn + excluded.burn,
       rvolume = rvolume + excluded.rvolume, rcnt = rcnt + excluded.rcnt,
       avolume = avolume + excluded.avolume, acnt = acnt + excluded.acnt`),
-  upAddr: db.prepare(`INSERT INTO addr_stats(address, transfers, volume, last_block) VALUES(?, ?, ?, ?)
+  // first_from is written once and never overwritten — it records who funded the address first.
+  upAddr: db.prepare(`INSERT INTO addr_stats(address, transfers, volume, last_block, first_from) VALUES(?, ?, ?, ?, ?)
     ON CONFLICT(address) DO UPDATE SET
       transfers = transfers + excluded.transfers, volume = volume + excluded.volume,
-      last_block = MAX(last_block, excluded.last_block)`),
+      last_block = MAX(last_block, excluded.last_block),
+      first_from = COALESCE(addr_stats.first_from, excluded.first_from)`),
   insRecent: db.prepare('INSERT INTO recent(block, ts, token, frm, too, amount) VALUES(?, ?, ?, ?, ?, ?)'),
   trimRecent: db.prepare('DELETE FROM recent WHERE id <= (SELECT MAX(id) FROM recent) - ?'),
   top: db.prepare('SELECT address, transfers, volume FROM addr_stats ORDER BY volume DESC LIMIT ?'),
@@ -155,7 +180,7 @@ export function applyBatch(buckets, addrs, recents) {
     for (const b of buckets.values()) {
       stmt.upBucket.run(b.minute, b.token, b.volume, b.cnt, b.mint, b.burn, b.rvolume || 0, b.rcnt || 0, b.avolume || 0, b.acnt || 0);
     }
-    for (const [addr, x] of addrs) stmt.upAddr.run(addr, x.transfers, x.volume, x.lastBlock);
+    for (const [addr, x] of addrs) stmt.upAddr.run(addr, x.transfers, x.volume, x.lastBlock, x.firstFrom || null);
     for (const r of recents) stmt.insRecent.run(r.block, r.ts, r.token, r.frm, r.too, r.amount);
     if (recents.length) stmt.trimRecent.run(RECENT_KEEP);
     db.exec('COMMIT');
@@ -363,6 +388,39 @@ export function sizeDistribution(token) {
 }
 export const largestByToken = (token, limit = 8) => tkstmt.largest.all(token, limit);
 export const recentByToken = (token, limit = 12) => tkstmt.recent.all(token, limit);
+
+// ---- derived address attributes (experimental — entities.js; drop this block to remove) ----
+const emstmt = {
+  up: db.prepare(`INSERT INTO address_meta(address, is_contract, code_hash, code_size, token_name,
+      token_symbol, impl, admin, interfaces, kind, blocks_made, checked)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(address) DO UPDATE SET
+      is_contract = excluded.is_contract, code_hash = excluded.code_hash, code_size = excluded.code_size,
+      token_name = excluded.token_name, token_symbol = excluded.token_symbol, impl = excluded.impl,
+      admin = excluded.admin, interfaces = excluded.interfaces, kind = excluded.kind,
+      blocks_made = MAX(address_meta.blocks_made, excluded.blocks_made), checked = excluded.checked`),
+  get: db.prepare('SELECT * FROM address_meta WHERE address = ?'),
+  // The derived view: top addresses by volume, joined to whatever we've worked out about them.
+  joined: db.prepare(`SELECT a.address, a.transfers, a.volume, a.first_from, m.is_contract, m.code_hash,
+      m.code_size, m.token_name, m.token_symbol, m.impl, m.admin, m.interfaces, m.kind, m.blocks_made, m.checked
+    FROM addr_stats a LEFT JOIN address_meta m ON m.address = a.address
+    ORDER BY a.volume DESC LIMIT ?`),
+  // Addresses sharing a bytecode fingerprint are the same contract deployed more than once,
+  // so identifying one identifies the whole family.
+  clusters: db.prepare(`SELECT code_hash, COUNT(*) AS n FROM address_meta
+    WHERE code_hash IS NOT NULL GROUP BY code_hash HAVING n > 1 ORDER BY n DESC LIMIT 20`),
+  byHash: db.prepare('SELECT address FROM address_meta WHERE code_hash = ? LIMIT 50'),
+  countKnown: db.prepare('SELECT COUNT(*) AS c FROM address_meta WHERE kind IS NOT NULL'),
+};
+export function upsertAddressMeta(m) {
+  emstmt.up.run(m.address, m.isContract ? 1 : 0, m.codeHash || null, m.codeSize || null,
+    m.tokenName || null, m.tokenSymbol || null, m.impl || null, m.admin || null,
+    m.interfaces || null, m.kind || null, m.blocksMade || 0, Date.now());
+}
+export const addressMeta = (a) => emstmt.get.get(a.toLowerCase());
+export const topWithMeta = (limit = 40) => emstmt.joined.all(limit);
+export const bytecodeClusters = () => emstmt.clusters.all().map((r) => ({ ...r, addresses: emstmt.byHash.all(r.code_hash).map((x) => x.address) }));
+export const knownAddressCount = () => emstmt.countKnown.get().c;
 
 export function prune(nowSec, latestBlock, blockMs) {
   const weekBlocks = Math.round((7 * 86400 * 1000) / Math.max(200, blockMs));

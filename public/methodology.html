@@ -98,11 +98,17 @@
     <strong>largest transfer per token</strong> and discard the rest. Per token, not per transaction: a swap moves two different
     assets in one transaction, and collapsing it to a single leg would erase the smaller asset's volume entirely.</p>
 
-    <p style="margin-bottom:0"><strong>3 · Adjusted volume</strong> — real volume, plus an <em>address-level</em> filter. Some
-    addresses are infrastructure rather than economic actors: market-making bots, faucets, sequencers, test harnesses. Any address
-    whose activity rate exceeds <strong>1,000 transfers</strong> or <strong>$10M of volume per month</strong> is flagged, and every
-    transfer touching a flagged address is excluded. Both thresholds and both filters come from the
+    <p><strong>3 · Adjusted volume</strong> — real volume, plus an <em>address-level</em> filter. Some addresses are infrastructure
+    rather than economic actors: market-making bots, faucets, sequencers, test harnesses. Any address whose activity rate exceeds
+    <strong>1,000 transfers</strong> or <strong>$10M of volume per month</strong> is flagged. A transfer is dropped when
+    <strong>both</strong> of its ends are flagged — infrastructure talking to infrastructure. The thresholds come from the
     <a href="https://visaonchainanalytics.com/" rel="noopener">Visa / Allium onchain analytics</a> methodology.</p>
+    <p style="margin-bottom:0"><strong>Why "both ends", not "either end".</strong> Visa drops a transfer if <em>either</em> end is
+    flagged. That is right for retail-shaped chains, where most transfers run user-to-user and a flagged counterparty is a strong
+    signal of noise. Arc is hub-and-spoke: almost every transfer touches a faucet, router or sequencer, so the "either end" rule
+    deletes genuine payments along with the churn — measured on the testnet, it removed <strong>99.9%</strong> of volume and stopped
+    describing anything. A bot paying a user, or a user funding an exchange, is real value delivered to a real party, so we keep it.
+    Only bot-to-bot movement is discarded.</p>
   </div>
   <div class="card">
     <p style="margin-top:0"><strong>How flags are applied.</strong> Our retention window is a rolling ~7 days rather than a calendar
@@ -136,7 +142,7 @@
     <tbody>
       <tr><td>Raw volume</td><td>Sum of every <code>Transfer</code> event value.</td></tr>
       <tr><td>Real volume</td><td>Sum of the largest transfer per transaction, per token (routing hops &amp; contract internals removed).</td></tr>
-      <tr><td>Adjusted volume</td><td>Real volume, minus every transfer touching a flagged high-frequency address.</td></tr>
+      <tr><td>Adjusted volume</td><td>Real volume, minus transfers where both ends are flagged high-frequency addresses.</td></tr>
       <tr><td>Transfers</td><td>Count of transfer events in the period.</td></tr>
       <tr><td>Mint / Burn</td><td>Transfers from / to the zero address <code>0x000…000</code> — supply created / destroyed on-chain.</td></tr>
       <tr><td>Net issuance</td><td>Mint − Burn over the period: net new supply minted on-chain.</td></tr>
