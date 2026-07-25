@@ -182,6 +182,16 @@
   tr.watched td{background:color-mix(in srgb,var(--warn) 8%,transparent)}
   .empty{color:var(--ink-3); font-size:12px; font-family:var(--mono); padding:18px 0}
 
+  /* network economics tiles */
+  .econ{display:grid; grid-template-columns:repeat(3,1fr); gap:11px; margin-top:10px}
+  .econ .e{background:var(--inset); border:1px solid var(--line); border-radius:10px; padding:12px 13px}
+  .econ .e.hero{grid-column:1/-1; background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 10%,var(--inset)),var(--inset))}
+  .econ .lab{font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:600; margin-bottom:6px}
+  .econ .val{font-family:var(--mono); font-size:17px; font-weight:600; font-variant-numeric:tabular-nums}
+  .econ .hero .val{font-size:27px; color:var(--accent); letter-spacing:-.02em}
+  .econ .sub{font-size:10.5px; color:var(--ink-3); margin-top:4px; line-height:1.45}
+  @media (max-width:560px){ .econ{grid-template-columns:1fr} }
+
   .foot{margin-top:6px; font-size:11px; color:var(--ink-3); line-height:1.6; font-family:var(--mono)}
   .foot code{color:var(--ink-2)}
   .site-foot{margin-top:26px; border-top:1px solid var(--line); padding-top:16px; font-size:12px; color:var(--ink-3)}
@@ -223,7 +233,8 @@
       <div class="cardhead">
         <h2 id="chartTitle">Transfer volume</h2>
         <div class="toggles">
-          <div class="seg" id="metricSeg" title="Real = one largest transfer per tx (routing / bot noise removed)">
+          <div class="seg" id="metricSeg" title="Adjusted = real volume, minus transfers touching a high-frequency address">
+            <button data-m="adj">Adjusted</button>
             <button data-m="real" class="on">Real</button>
             <button data-m="raw">Raw</button>
           </div>
@@ -240,7 +251,7 @@
           </div>
         </div>
       </div>
-      <p class="cap" id="chartCap">Real volume = one largest transfer per transaction — routing hops &amp; bot noise filtered out (Visa / Allium method).</p>
+      <p class="cap" id="chartCap">Real volume = one largest transfer per transaction, per token — routing hops &amp; contract internals filtered out.</p>
       <div class="chartwrap">
         <div class="peak" id="chartPeak"></div>
         <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true"></svg>
@@ -274,6 +285,22 @@
       <p class="cap">By transfer volume moved (in + out), across indexed history.</p>
       <table><thead><tr><th>#</th><th>Address</th><th class="r">Transfers</th><th class="r">Volume</th></tr></thead>
         <tbody id="top"></tbody></table>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Network economics</h2>
+      <p class="cap">Gas on Arc is paid in USDC, so fees are dollars read straight from the chain — no price feed, no conversion. Measured from transaction receipts.</p>
+      <div class="econ" id="econ"></div>
+      <div class="cov" id="feeBasis"></div>
+    </div>
+    <div class="card">
+      <h2>Filtered addresses</h2>
+      <p class="cap">Addresses busy enough to be infrastructure rather than economic activity — excluded from <em>adjusted</em> volume. <a href="/methodology" style="color:var(--accent)">Method →</a></p>
+      <table><thead><tr><th>Address</th><th class="r">Transfers</th><th class="r">Volume</th></tr></thead>
+        <tbody id="noiseTbl"></tbody></table>
+      <div class="cov" id="noiseFoot"></div>
     </div>
   </div>
 
@@ -346,7 +373,7 @@ function renderState(d){
     ['Current block','#'+nf.format(n.block),''],
     ['Block time',money(n.blockTimeMs,0),'ms'],
     ['Throughput',money(n.tps,1),'tx/s'],
-    ['Cost / transfer','$'+n.costPerTransferUsdc.toFixed(5),''],
+    ['Avg fee / tx', d.fees&&d.fees.perTx!=null ? '$'+d.fees.perTx.toFixed(5) : '—',''],
     ['Active addr · 1h',compact(d.activeAddresses1h),''],
     ['24h volume',compact(s.rvolume),'real'],
   ].map(([l,v,u])=>`<div class="kpi"><div class="lab">${l}</div><div class="val">${v}<span class="unit">${u}</span></div></div>`).join('');
@@ -387,6 +414,43 @@ function renderState(d){
       <td><button class="star ${isWatched(x.address)?'on':''}" onclick="toggleWatch('${x.address}')" title="Watch address">${isWatched(x.address)?'★':'☆'}</button> ${x.label? `<span class="lblchip">${esc(x.label)}</span>`:`<span class="addr">${short(x.address)}</span>`}${x.contract?'<span class="tag">contract</span>':''}</td>
       <td class="r">${nf.format(x.transfers)}</td><td class="r amt">${compact(x.volume)}</td></tr>`).join('')
     : '<tr><td colspan="4" style="color:var(--ink-3);padding:14px 0">Building rankings…</td></tr>';
+
+  renderFees(d.fees);
+  renderNoise(d.noise);
+}
+
+// ---- network economics (fees, denominated in USDC because that's the gas token) ----
+const usd = (n,dp)=> (n==null||isNaN(n)) ? '—' : '$'+Number(n).toFixed(dp);
+function renderFees(f){
+  const el=$('#econ'), basis=$('#feeBasis');
+  if(!f){ el.innerHTML='<div class="empty">Sampling blocks for fee data…</div>'; basis.textContent=''; return; }
+  el.innerHTML=`
+    <div class="e hero"><div class="lab">Cost to move $1M</div>
+      <div class="val">${usd(f.perMillionMoved,2)}</div>
+      <div class="sub">total network fees paid per $1M of real stablecoin volume moved</div></div>
+    <div class="e"><div class="lab">Avg fee / tx</div><div class="val">${usd(f.perTx,5)}</div></div>
+    <div class="e"><div class="lab">Fees / day</div><div class="val">${usd(f.perDay,2)}</div><div class="sub">run rate</div></div>
+    <div class="e"><div class="lab">Avg gas / tx</div><div class="val">${f.avgGasPerTx!=null?compact(f.avgGasPerTx):'—'}</div></div>`;
+  basis.textContent=`Exact from ${nf.format(f.sampledBlocks)} sampled blocks`
+    + (f.sampleCoverage!=null? ` (${(f.sampleCoverage*100).toFixed(1)}% of the window)`:'')
+    + ` · ${nf.format(f.sampledTxs)} transactions · gas ${f.gasGwei.toFixed(1)} gwei`;
+}
+
+// ---- address-level noise filter ----
+function renderNoise(n){
+  const tb=$('#noiseTbl'), foot=$('#noiseFoot');
+  if(!n || !n.top || !n.top.length){
+    tb.innerHTML='<tr><td colspan="3" style="color:var(--ink-3);padding:14px 0">No address exceeds the thresholds yet.</td></tr>';
+    foot.textContent = n ? `Limits over ${n.windowDays.toFixed(1)}d of history: ${compact(n.maxTransfers)} transfers or ${compact(n.maxVolume)} volume.` : '';
+    return;
+  }
+  tb.innerHTML=n.top.map(x=>`<tr>
+    <td>${x.label?`<span class="lblchip">${esc(x.label)}</span>`:`<span class="addr">${short(x.address)}</span>`}<span class="tag">${esc(x.reason)}</span></td>
+    <td class="r">${nf.format(x.transfers)}</td>
+    <td class="r amt">${compact(x.volume)}</td></tr>`).join('');
+  foot.textContent=`${nf.format(n.flagged)} address${n.flagged===1?'':'es'} flagged · limits over ${n.windowDays.toFixed(1)}d: `
+    + `${compact(n.maxTransfers)} transfers or ${compact(n.maxVolume)} volume · removes `
+    + `${compact(n.excludedVolume24h)} (${(n.excludedShare*100).toFixed(1)}%) of 24h real volume`;
 }
 
 // ---- chart ----
@@ -398,7 +462,7 @@ function renderChart(payload){
   const color=`var(${TCOLOR[chart.token]})`;
   if(series.length<2){ svg.innerHTML=''; empty.style.display='flex'; peak.textContent=''; axis.textContent=''; return; }
   empty.style.display='none';
-  const val=(p)=> chart.metric==='raw' ? (p.volume||0) : (p.rvolume||0);
+  const val=(p)=> chart.metric==='raw' ? (p.volume||0) : chart.metric==='adj' ? (p.avolume||0) : (p.rvolume||0);
   const W=1000,H=260,pad=10;
   const maxV=Math.max(1,...series.map(val));
   const X=i=>i/(series.length-1)*W;
@@ -454,8 +518,14 @@ async function renderWatch(){
 }
 
 // toggles
+const CAPS={
+  adj:'Adjusted volume = real volume, minus every transfer touching a high-frequency address (Visa / Allium address filter).',
+  real:'Real volume = one largest transfer per transaction, per token — routing hops &amp; contract internals filtered out.',
+  raw:'Raw volume = every Transfer event, unfiltered. Inflated by routing hops and bot activity.',
+};
 $('#metricSeg').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
-  chart.metric=b.dataset.m; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b)); loadChart(); });
+  chart.metric=b.dataset.m; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b));
+  $('#chartCap').innerHTML=CAPS[chart.metric]; loadChart(); });
 $('#tokenSeg').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
   chart.token=b.dataset.tok; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b));
   $('#chartTitle').textContent = chart.token==='ALL'?'Transfer volume':chart.token+' transfer volume'; loadChart(); });

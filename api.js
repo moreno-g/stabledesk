@@ -113,6 +113,41 @@ export async function handleV1(req, res, u) {
 
   if (path === '/v1/network') return json(res, { ...s.network, indexLag: s.indexLag ?? null, updatedAt: s.updatedAt }, 200, H);
 
+  // Network fee economics. Gas on Arc is paid in USDC, so these are dollar figures straight
+  // from the chain — no price feed involved.
+  if (path === '/v1/network/fees') {
+    if (!s.fees) return json(res, { error: 'no_fee_samples', hint: 'Fee sampling is still warming up, retry shortly.' }, 503, H);
+    return json(res, {
+      currency: 'USDC',
+      perTransaction: s.fees.perTx,
+      perBlock: s.fees.perBlock,
+      perDay: s.fees.perDay,
+      perMillionMoved: s.fees.perMillionMoved,
+      inWindow: s.fees.inWindow,
+      windowSec: s.fees.windowSec,
+      avgGasPerTx: s.fees.avgGasPerTx,
+      gasGwei: s.fees.gasGwei,
+      sample: { blocks: s.fees.sampledBlocks, transactions: s.fees.sampledTxs, coverage: s.fees.sampleCoverage },
+      note: 'Fees are exact for sampled blocks and extrapolated to the window; see /methodology.',
+      updatedAt: s.updatedAt,
+    }, 200, H);
+  }
+
+  // Addresses excluded from adjusted volume (the address-level noise filter).
+  if (path === '/v1/addresses/filtered') {
+    const n = s.noise || {};
+    return json(res, {
+      flagged: n.flagged ?? 0,
+      thresholds: { transfersPerDay: n.txPerDay, volumePerDay: n.volumePerDay },
+      window: { days: n.windowDays, maxTransfers: n.maxTransfers, maxVolume: n.maxVolume },
+      excludedVolume24h: n.excludedVolume24h ?? null,
+      excludedShare: n.excludedShare ?? null,
+      addresses: n.top || [],
+      note: 'Addresses whose activity rate exceeds the thresholds are treated as infrastructure and excluded from adjusted volume.',
+      updatedAt: s.updatedAt,
+    }, 200, H);
+  }
+
   if (path === '/v1/stablecoins') return json(res, { supply: s.supply, totalSupply: s.totalSupply, summary24h: s.summary24h, updatedAt: s.updatedAt }, 200, H);
 
   if (path === '/v1/stablecoins/history') {

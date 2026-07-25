@@ -86,22 +86,57 @@
     history on first run, then keeps indexing forward and persists aggregates in SQLite.</p>
   </div>
 
-  <h2>Real volume vs raw volume</h2>
+  <h2>Three volume measures</h2>
   <div class="card">
-    <p style="margin-top:0">A single user action often emits several <code>Transfer</code> events (routing hops, contract internals, bot
-    activity), which inflates naïve volume. To approximate genuine economic value moved, we apply a <strong>single-directional
-    filter</strong>: within each transaction we keep only the <strong>largest transfer per token</strong> and discard the rest.</p>
-    <p style="margin-bottom:0"><strong>Real volume</strong> is this noise-filtered figure (the terminal's default). <strong>Raw volume</strong>
-    is every <code>Transfer</code> event, shown for comparison. This is the same approach used by the
-    <a href="https://visaonchainanalytics.com/" rel="noopener">Visa / Allium onchain analytics</a> dashboard.</p>
+    <p style="margin-top:0">Naïve volume badly overstates real activity, for two independent reasons. We correct each with its own
+    filter, and publish all three figures so you can see exactly what every step removes.</p>
+
+    <p><strong>1 · Raw volume</strong> — every <code>Transfer</code> event, unfiltered.</p>
+
+    <p><strong>2 · Real volume</strong> — a <em>transaction-level</em> filter. A single user action often emits several
+    <code>Transfer</code> events (routing hops, contract internals), so within each transaction we keep only the
+    <strong>largest transfer per token</strong> and discard the rest. Per token, not per transaction: a swap moves two different
+    assets in one transaction, and collapsing it to a single leg would erase the smaller asset's volume entirely.</p>
+
+    <p style="margin-bottom:0"><strong>3 · Adjusted volume</strong> — real volume, plus an <em>address-level</em> filter. Some
+    addresses are infrastructure rather than economic actors: market-making bots, faucets, sequencers, test harnesses. Any address
+    whose activity rate exceeds <strong>1,000 transfers</strong> or <strong>$10M of volume per month</strong> is flagged, and every
+    transfer touching a flagged address is excluded. Both thresholds and both filters come from the
+    <a href="https://visaonchainanalytics.com/" rel="noopener">Visa / Allium onchain analytics</a> methodology.</p>
+  </div>
+  <div class="card">
+    <p style="margin-top:0"><strong>How flags are applied.</strong> Our retention window is a rolling ~7 days rather than a calendar
+    month, so the monthly thresholds are converted to a daily rate and multiplied by however many days of history we actually hold.
+    That window is floored at one full day, so a freshly-restarted indexer can't brand an ordinary address a bot off a handful of
+    transfers. The flag set is recomputed every minute, and the <a href="/">terminal</a> lists the currently flagged addresses —
+    the filter is auditable, not a black box.</p>
+    <p style="margin-bottom:0">Flags are derived from the same history they filter, so on a <em>cold</em> start the initial backfill
+    is indexed before any address has been flagged. Rather than ship a figure we know is wrong, the indexer re-reads that range once
+    the first pass has revealed the high-frequency addresses and rewrites the adjusted numbers.</p>
+  </div>
+
+  <h2>Network fees &amp; economics</h2>
+  <div class="card">
+    <p style="margin-top:0">Gas on Arc is paid <strong>in USDC</strong>. That makes fee metrics unusually direct: a fee figure is
+    already a dollar figure, with no token price, no exchange rate and no oracle in the path. We read fees from
+    <strong>transaction receipts</strong> — <code>gasUsed × effectiveGasPrice</code>, summed per block — which captures the priority
+    tip as well as the base fee.</p>
+    <p><strong>Sampling.</strong> Receipts only exist per transaction, and at ~0.5s blocks fetching every one would mean ~172,000
+    requests a day against a rate-limited public RPC. So we sample a few blocks per poll, at a randomised offset behind the head.
+    Each sampled block is <strong>exact</strong>; the per-day and per-window figures derived from them are <strong>extrapolations</strong>.
+    The terminal and the API always report how many blocks a fee number rests on — an estimate is never presented as a measured total.</p>
+    <p style="margin-bottom:0"><strong>Cost to move $1M</strong> divides total network fees by <em>real</em> volume, not adjusted
+    volume. The fee total in the numerator includes every transaction, high-frequency addresses included; dividing it by only the
+    non-bot volume would price the whole network's cost against a fraction of its throughput and badly overstate it.</p>
   </div>
 
   <h2>Metric definitions</h2>
   <table>
     <thead><tr><th>Metric</th><th>Definition</th></tr></thead>
     <tbody>
-      <tr><td>Real volume</td><td>Sum of the largest transfer per transaction, per token (routing / bot noise removed).</td></tr>
       <tr><td>Raw volume</td><td>Sum of every <code>Transfer</code> event value.</td></tr>
+      <tr><td>Real volume</td><td>Sum of the largest transfer per transaction, per token (routing hops &amp; contract internals removed).</td></tr>
+      <tr><td>Adjusted volume</td><td>Real volume, minus every transfer touching a flagged high-frequency address.</td></tr>
       <tr><td>Transfers</td><td>Count of transfer events in the period.</td></tr>
       <tr><td>Mint / Burn</td><td>Transfers from / to the zero address <code>0x000…000</code> — supply created / destroyed on-chain.</td></tr>
       <tr><td>Net issuance</td><td>Mint − Burn over the period: net new supply minted on-chain.</td></tr>
@@ -110,7 +145,10 @@
       <tr><td>Velocity</td><td>Real transfer volume per day ÷ supply — how often the supply turns over.</td></tr>
       <tr><td>Active addresses</td><td>Distinct addresses that sent or received in the trailing window (e.g. 1h).</td></tr>
       <tr><td>Size distribution</td><td>Histogram of transfer amounts bucketed by magnitude, over recently indexed transfers.</td></tr>
-      <tr><td>Cost / transfer</td><td>Current gas price × 21,000 gas, expressed in USDC (gas is paid in USDC on Arc).</td></tr>
+      <tr><td>Avg fee / tx</td><td>Total fees ÷ transaction count over sampled blocks, in USDC. Measured from receipts, not estimated from a gas assumption.</td></tr>
+      <tr><td>Fees / day</td><td>Mean fee per sampled block × blocks per day — a run rate, not a cumulative total.</td></tr>
+      <tr><td>Cost to move $1M</td><td>Total network fees ÷ real volume, scaled to $1M. What the network charges to move a million dollars.</td></tr>
+      <tr><td>Flagged address</td><td>An address exceeding 1,000 transfers or $10M volume per month, pro-rated to the retained window.</td></tr>
     </tbody>
   </table>
 
