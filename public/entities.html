@@ -72,6 +72,11 @@
   .why{font-size:10.5px; color:var(--ink-3); font-family:var(--mono); line-height:1.45}
   .iface{font-family:var(--mono); font-size:10px; color:var(--ink-3)}
   .empty{color:var(--ink-3); font-size:12px; font-family:var(--mono); padding:18px 0}
+  .betabox{background:color-mix(in srgb,var(--warn) 10%,var(--panel)); border:1px solid color-mix(in srgb,var(--warn) 34%,var(--line)); border-radius:12px; padding:14px 17px; margin-bottom:16px}
+  .betabox .bb-title{font-size:11px; letter-spacing:.07em; text-transform:uppercase; font-weight:700; color:var(--warn); margin-bottom:7px}
+  .betabox p{margin:0 0 8px; font-size:12.5px; color:var(--ink-2); line-height:1.6; max-width:88ch}
+  .betabox b{color:var(--ink)}
+  .betabox code{font-family:var(--mono); font-size:.92em; background:var(--inset); border:1px solid var(--line); border-radius:4px; padding:0 5px; color:var(--ink)}
   .foot-note{font-size:11px; color:var(--ink-3); font-family:var(--mono); margin-top:12px; border-top:1px dashed var(--line-2); padding-top:11px}
 
   .site-foot{margin-top:26px; border-top:1px solid var(--line); padding-top:16px; font-size:12px; color:var(--ink-3)}
@@ -94,8 +99,17 @@
     <button class="iconbtn" id="themeBtn" type="button" aria-label="Theme"></button>
   </div>
   <p class="sub">What Arc's highest-volume addresses actually are — derived from public chain data alone:
-  bytecode, EIP-1967 storage slots and block authorship. No label set is copied from another provider, and
+  bytecode, contract calls and block authorship. No label set is copied from another provider, and
   no attempt is made to attach a natural person to an address. <a href="/">← Terminal</a></p>
+
+  <div class="betabox">
+    <div class="bb-title">This page is in beta</div>
+    <p>Classifications are derived automatically and are <b>not verified</b>. A type tells you what an address
+    behaves like on-chain — it is not a claim about who operates it. Expect gaps: an address doing nothing
+    recognisable is simply shown as <code>contract</code>, and testnet data is not representative of mainnet.</p>
+    <p style="margin-bottom:0">The method and thresholds may change while this is being tested. Don't build
+    anything on these results yet — the <a href="/docs">stable API</a> is the one to rely on.</p>
+  </div>
 
   <div class="kpis" id="kpis"></div>
 
@@ -128,7 +142,7 @@
       <div class="sf-brand"><span class="sf-logo"></span> Stabledesk</div>
       <nav class="sf-links">
         <a href="/">Terminal</a><a href="/docs">API</a><a href="/methodology">Methodology</a>
-        <a href="/status">Status</a><a href="https://x.com/getStabledesk">@getStabledesk</a>
+        <a href="/status">Status</a><a href="/entities">Entities</a><a href="https://x.com/getStabledesk">@getStabledesk</a>
       </nav>
     </div>
   </footer>
