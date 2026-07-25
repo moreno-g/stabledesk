@@ -52,6 +52,14 @@ export function noiseLimits(observedSec) {
   return { days, maxTransfers: NOISE_FILTER.txPerDay * days, maxVolume: NOISE_FILTER.volumePerDay * days };
 }
 
+// A transfer counts as noise only when *both* ends are flagged infrastructure — bot talking to
+// bot. Visa / Allium drop a transfer if either end is flagged, which works on retail-shaped
+// chains where most transfers are user-to-user. Arc is hub-and-spoke: nearly every transfer
+// touches a faucet, router or sequencer, so "either end" deletes genuine payments along with
+// the churn (it removed 99.9% of testnet volume). A bot paying a user, or a user funding an
+// exchange, is real value delivered to a real party and is kept.
+export const isNoiseTransfer = (t, flagged = noisy) => flagged.has(t.frm) && flagged.has(t.too);
+
 let noisyLimits = noiseLimits(0);
 function refreshNoisy() {
   const cov = db.getCoverage();
@@ -86,10 +94,13 @@ export function feeMetrics(sample, blocksInWindow, blocksPerDay, volumeMoved) {
   };
 }
 
-function bumpAddr(map, a, amount, block) {
+// `from` is recorded only for the receiving side, and the DB keeps the first value it ever sees:
+// the cheapest edge of the funding graph, used to tie an operational wallet back to its funder.
+function bumpAddr(map, a, amount, block, from) {
   let x = map.get(a);
-  if (!x) { x = { transfers: 0, volume: 0, lastBlock: 0 }; map.set(a, x); }
+  if (!x) { x = { transfers: 0, volume: 0, lastBlock: 0, firstFrom: null }; map.set(a, x); }
   x.transfers += 1; x.volume += amount; x.lastBlock = Math.max(x.lastBlock, block);
+  if (from && !x.firstFrom) x.firstFrom = from;
 }
 
 function pushFeed(ev) {
@@ -176,7 +187,7 @@ function processLogs(logs, opts = {}) {
       if (opts.live && amount >= NOTABLE_MIN) pushFeed({ ts, kind: 'burn', token: meta.symbol, amount, from, to, block });
     } else {
       bumpAddr(addrs, from, amount, block);
-      bumpAddr(addrs, to, amount, block);
+      bumpAddr(addrs, to, amount, block, from);
       recents.push({ block, ts, token: meta.symbol, frm: from, too: to, amount });
       if (opts.live) {
         const ev = { ts, kind: 'transfer', token: meta.symbol, amount, from, to, block };
@@ -189,8 +200,8 @@ function processLogs(logs, opts = {}) {
   for (const m of txMax.values()) {
     const bk = getBk(m.minute, m.symbol);
     bk.rvolume += m.amount; bk.rcnt += 1;
-    // "adjusted" volume: real volume, minus anything touching a high-frequency address.
-    if (!noisy.has(m.frm) && !noisy.has(m.too)) { bk.avolume += m.amount; bk.acnt += 1; }
+    // "adjusted" volume: real volume, minus transfers where *both* ends are infrastructure.
+    if (!isNoiseTransfer(m)) { bk.avolume += m.amount; bk.acnt += 1; }
   }
 
   db.applyBatch(buckets, addrs, recents);
@@ -292,7 +303,7 @@ async function adjustBackfill(from, to) {
       return;
     }
     for (const m of largestPerTxToken(logs).values()) {
-      if (noisy.has(m.frm) || noisy.has(m.too)) continue;
+      if (isNoiseTransfer(m)) continue;
       const key = m.minute + '|' + m.symbol;
       let bk = buckets.get(key);
       if (!bk) { bk = { minute: m.minute, token: m.symbol, avolume: 0, acnt: 0 }; buckets.set(key, bk); }

@@ -138,7 +138,7 @@ test('crypto billing: order matching, idempotency, renewal, expiry', async () =>
 // ---- network fee economics + address-level noise filter ----
 test('fee sampling and the address noise filter', async () => {
   const db = await import('../db.js');
-  const { noiseLimits, feeMetrics } = await import('../indexer.js');
+  const { noiseLimits, feeMetrics, isNoiseTransfer } = await import('../indexer.js');
   const { NOISE_FILTER } = await import('../constants.js');
 
   // Thresholds scale with retained history, but never drop below a full day — otherwise a
@@ -160,6 +160,15 @@ test('fee sampling and the address noise filter', async () => {
   assert.equal(m.sampledBlocks, 10);
   assert.equal(m.sampleCoverage, 0.1);
   assert.equal(feeMetrics({ blocks: 1, fees: 1, txs: 0, gasUsed: 0 }, 1, 1, 0).perMillionMoved, null, 'no volume → no ratio');
+
+  // Only infrastructure-to-infrastructure movement is noise. On a hub-and-spoke chain like Arc
+  // almost every transfer touches a router or faucet, so dropping on "either end" (the Visa rule)
+  // would delete genuine payments too — measured at 99.9% of testnet volume.
+  const bots = new Set(['0xaaa', '0xbbb']);
+  assert.equal(isNoiseTransfer({ frm: '0xaaa', too: '0xbbb' }, bots), true, 'bot → bot is noise');
+  assert.equal(isNoiseTransfer({ frm: '0xaaa', too: '0xuser' }, bots), false, 'bot → user is a real delivery');
+  assert.equal(isNoiseTransfer({ frm: '0xuser', too: '0xbbb' }, bots), false, 'user → bot is a real payment');
+  assert.equal(isNoiseTransfer({ frm: '0xuser', too: '0xother' }, bots), false, 'user → user is never noise');
 
   // Adjusted volume is stored and summed alongside real volume.
   const minute = Math.floor(Date.now() / 1000 / 60) * 60 - 300;
@@ -188,6 +197,39 @@ test('fee sampling and the address noise filter', async () => {
   assert.equal(fs.blocks, 2, 'the replayed block is ignored, not counted twice');
   assert.equal(fs.fees, 2);
   assert.equal(fs.txs, 10);
+});
+
+// ---- entity derivation (experimental — see entities.js) ----
+test('entity derivation classifies from chain facts alone', async () => {
+  const { classify, detectInterfaces, decodeString, explain } = await import('../entities.js');
+
+  // Selector detection reads deployed bytecode — no ABI, no source, no verification service.
+  const code = '0x60806040' + 'a9059cbb' + 'deadbeef' + '70a08231' + 'cafe';
+  assert.deepEqual(detectInterfaces(code).sort(), ['balanceOf', 'transfer']);
+  assert.deepEqual(detectInterfaces('0x'), [], 'an EOA has no interfaces');
+
+  // A validator is infrastructure by definition — it authored blocks.
+  assert.equal(classify({ blocksMade: 12, isContract: false, interfaces: [] }), 'validator');
+  assert.equal(classify({ blocksMade: 0, isContract: false, interfaces: [] }), 'wallet');
+  assert.equal(classify({ blocksMade: 0, isContract: true, tokenSymbol: 'USDC', interfaces: ['transfer'] }), 'token');
+  assert.equal(classify({ blocksMade: 0, isContract: true, interfaces: ['getOwners', 'execTransaction'] }), 'multisig');
+  assert.equal(classify({ blocksMade: 0, isContract: true, impl: '0x' + '1'.repeat(40), interfaces: [] }), 'proxy');
+  assert.equal(classify({ blocksMade: 0, isContract: true, interfaces: ['transfer', 'balanceOf'] }), 'token-handler');
+  assert.equal(classify({ blocksMade: 0, isContract: true, interfaces: [] }), 'contract');
+
+  // Block authorship outranks bytecode: a validator that is also a contract is still a validator.
+  assert.equal(classify({ blocksMade: 3, isContract: true, tokenSymbol: 'X', interfaces: [] }), 'validator');
+
+  // Every classification carries its evidence — the page shows *why*, never a bare assertion.
+  assert.match(explain({ kind: 'validator', blocksMade: 7 }), /7 recent blocks/);
+  assert.match(explain({ kind: 'token', tokenSymbol: 'EURC' }), /symbol\(\) = "EURC"/);
+  assert.match(explain({ kind: 'proxy', impl: '0x' + 'a'.repeat(40) }), /implementation\(\) points at/);
+
+  // ABI string decoding, including the bytes32-style tokens that predate the string convention.
+  const abiStr = '0x' + '0'.repeat(62) + '20' + '0'.repeat(62) + '04' + Buffer.from('USDC').toString('hex').padEnd(64, '0');
+  assert.equal(decodeString(abiStr), 'USDC');
+  assert.equal(decodeString('0x'), null);
+  assert.equal(decodeString(null), null);
 });
 
 // ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----

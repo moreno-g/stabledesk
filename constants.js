@@ -43,6 +43,17 @@ export const FEE_SAMPLE = {
   lookback: 12,       // sample window sits this many blocks behind the head
 };
 
+// Entity derivation (experimental — see entities.js and /entities). Self-contained: turning
+// this off stops the loop and hides the page, leaving the rest of the terminal untouched.
+// Volume on Arc is extremely concentrated (measured: the top 20 addresses carry ~92% of it),
+// so deriving attributes for a few dozen addresses covers almost all flow.
+export const ENTITIES_ENABLED = process.env.ENTITIES_ENABLED !== 'false';
+export const ENTITY_TOP_N = 40;          // addresses to derive, by volume rank
+export const ENTITY_REFRESH_MS = 10 * 60 * 1000;
+export const ENTITY_WARMUP_MS = 20 * 1000;   // retry cadence until the indexer has rankings
+export const DERIVE_CHUNK = 8;               // addresses per RPC batch (the public endpoint rate-limits large ones)
+export const DERIVE_DELAY = 600;             // ms between batches
+
 // Crypto billing (Pro tier) — paid in native USDC on Base, since Arc is still testnet
 // (its USDC has no real value). Verified live against Base mainnet: chainId 8453,
 // USDC contract responds symbol()="USDC", decimals()=6.

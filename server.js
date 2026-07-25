@@ -11,9 +11,10 @@ import { gzipSync } from 'node:zlib';
 import * as db from './db.js';
 import { live, alertFeed, start, stop } from './indexer.js';
 import * as payments from './payments.js';
+import * as entities from './entities.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
-import { RANGES, ADDR_RE, TOKEN_SYMBOLS } from './constants.js';
+import { RANGES, ADDR_RE, TOKEN_SYMBOLS, ENTITIES_ENABLED } from './constants.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4317;
@@ -114,6 +115,11 @@ const server = http.createServer(async (req, res) => {
     const stats = db.addressStats(addr) || { address: addr, transfers: 0, volume: 0, last_block: 0 };
     return json(res, { ...stats, label: getLabel(addr)?.name || null, recent: db.addressRecent(addr, 12) });
   }
+  // experimental entity derivation — 404s cleanly when the flag is off
+  if (path === '/api/entities') {
+    if (!ENTITIES_ENABLED) return json(res, { error: 'disabled' }, 404);
+    return json(res, entities.snapshot());
+  }
   if (path === '/api/health') {
     return json(res, {
       ok: live.snapshot.ok,
@@ -136,6 +142,7 @@ const server = http.createServer(async (req, res) => {
   if (path === '/token' || path === '/token.html') return serveFile(req, res, 'token.html');
   if (path === '/methodology' || path === '/methodology.html') return serveFile(req, res, 'methodology.html');
   if (path === '/status' || path === '/status.html') return serveFile(req, res, 'status.html');
+  if (ENTITIES_ENABLED && (path === '/entities' || path === '/entities.html')) return serveFile(req, res, 'entities.html');
   if (path === '/' || path === '/index.html') return serveFile(req, res, 'index.html');
   return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404); // unknown → real 404
 });
@@ -145,6 +152,7 @@ server.listen(PORT, () => {
   if (!db.getKey('sbd_demo')) db.createKey('sbd_demo', 'Public demo key', 'free');
   start();
   payments.start();
+  if (ENTITIES_ENABLED) entities.start();
 });
 
 let shuttingDown = false;
@@ -154,6 +162,7 @@ function shutdown() {
   console.log('\nShutting down…');
   stop();                          // stop the live poll loop
   payments.stop();                 // stop the payment poller
+  entities.stop();                 // stop the entity derivation loop
   server.close(() => { try { db.close(); } catch {} process.exit(0); });
   setTimeout(() => { try { db.close(); } catch {} process.exit(1); }, 10000).unref();
 }
