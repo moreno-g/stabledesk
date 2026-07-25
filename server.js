@@ -15,6 +15,7 @@ import * as entities from './entities.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
 import { RANGES, ADDR_RE, TOKEN_SYMBOLS, ENTITIES_ENABLED } from './constants.js';
+import { CHAIN, NETWORK } from './chains.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 4317;
@@ -32,10 +33,24 @@ function json(res, body, code = 200) {
 // Static assets are shipped with the app and never change at runtime: cache them in memory
 // (buffer + gzip + content hash) and serve with ETag revalidation + gzip when accepted.
 const assetCache = new Map();
+
+// Network-dependent copy in the static pages. Two directives, deliberately minimal:
+//   {{NET}} / {{CHAIN_ID}}                          — substituted with the active profile
+//   <!--testnet-only--> … <!--/testnet-only-->      — removed entirely on mainnet
+// Applied once at load time, so the cached buffer, its gzip and its ETag all already reflect
+// the active network. Nothing is templated per request.
+function applyNetwork(html) {
+  const out = html
+    .replaceAll('{{NET}}', CHAIN.label)
+    .replaceAll('{{CHAIN_ID}}', String(CHAIN.chainId));
+  return CHAIN.isTestnet ? out : out.replace(/<!--testnet-only-->[\s\S]*?<!--\/testnet-only-->/g, '');
+}
+
 async function loadAsset(name, type) {
   let a = assetCache.get(name);
   if (!a) {
-    const buf = await readFile(join(__dirname, 'public', name));
+    let buf = await readFile(join(__dirname, 'public', name));
+    if (type.startsWith('text/html')) buf = Buffer.from(applyNetwork(buf.toString('utf8')), 'utf8');
     const etag = '"' + createHash('sha1').update(buf).digest('base64').slice(0, 22) + '"';
     a = { buf, gz: gzipSync(buf), etag, type };
     assetCache.set(name, a);
@@ -150,7 +165,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Stabledesk → http://localhost:${PORT}`);
+  console.log(`Stabledesk → http://localhost:${PORT}  ·  ${CHAIN.label} (${NETWORK}, chain ${CHAIN.chainId})`);
   if (!db.getKey('sbd_demo')) db.createKey('sbd_demo', 'Public demo key', 'free');
   start();
   payments.start();

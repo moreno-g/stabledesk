@@ -5,14 +5,19 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { SIZE_BRACKETS } from './constants.js';
+import { CHAIN } from './chains.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// One database file per network. Aggregates are additive, so a single faucet-funded row mixed
+// into mainnet history could never be subtracted back out — the separation has to happen before
+// the first write, not after. Testnet keeps the original filename so existing deployments carry
+// their history across this change untouched.
 function resolveDbPath() {
   if (process.env.DB_PATH) return process.env.DB_PATH;
   const vol = process.env.RAILWAY_VOLUME_MOUNT_PATH;
-  if (vol) return join(vol, 'arc.db');
-  return join(__dirname, 'arc.db');
+  if (vol) return join(vol, CHAIN.dbFile);
+  return join(__dirname, CHAIN.dbFile);
 }
 
 const dbPath = resolveDbPath();

@@ -5,6 +5,7 @@ import { rpc, net, hex, topicAddr, toUnits, TOKENS, TOKEN_ADDRS, TRANSFER_TOPIC,
 import * as db from './db.js';
 import { getLabel } from './labels.js';
 import { NOISE_FILTER, FEE_SAMPLE } from './constants.js';
+import { CHAIN } from './chains.js';
 
 const TOTAL_SUPPLY = '0x18160ddd'; // ERC-20 totalSupply() selector
 const SUPPLY_TTL = 30000;          // refresh supplies at most this often
@@ -16,13 +17,13 @@ const codeCache = new Map();        // address -> isContract (bool)
 // live alert feed (in-app "whale alerts") + webhook alert rules
 export const alertFeed = [];
 const FEED_MAX = 40;
-const NOTABLE_MIN = 1000;           // min amount to surface in the feed
+const NOTABLE_MIN = CHAIN.notableMin;  // min amount to surface in the feed (scales with the network)
 let alertRules = [];
 let rulesAt = 0;
 
 const POLL_MS = 7000;       // steady-state poll interval
 const HEADER_WINDOW = 15;   // blocks for live TPS / block-time / activity strip
-const MAX_BACKFILL = 3000;  // blocks of history to seed on first run (~25 min)
+const MAX_BACKFILL = CHAIN.maxBackfill; // blocks of history to seed on first run
 const CHUNK = 500;          // blocks per backfill request
 const CHUNK_DELAY = 450;    // ms between backfill chunks (respect rate limit)
 const PRUNE_EVERY = 120;    // prune roughly every N ticks
@@ -378,7 +379,7 @@ function buildSnapshot(latest, gasWei, headers) {
   const indexedThrough = db.getCheckpoint();
   live.snapshot = {
     ok: true, booting: false, stale: false, updatedAt: Date.now(),
-    endpoint: net.endpoint, chainId: 5042002,
+    endpoint: net.endpoint, chainId: CHAIN.chainId, network: CHAIN.id,
     indexLag: indexedThrough != null ? Math.max(0, latest - indexedThrough) : null,
     network: {
       block: latest,
