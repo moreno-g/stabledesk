@@ -142,7 +142,9 @@ const server = http.createServer(async (req, res) => {
   if (path === '/token' || path === '/token.html') return serveFile(req, res, 'token.html');
   if (path === '/methodology' || path === '/methodology.html') return serveFile(req, res, 'methodology.html');
   if (path === '/status' || path === '/status.html') return serveFile(req, res, 'status.html');
-  if (ENTITIES_ENABLED && (path === '/entities' || path === '/entities.html')) return serveFile(req, res, 'entities.html');
+  // Served even when derivation is off: the footer links to it from every page, and the page
+  // itself reports "disabled" when /api/entities 404s. A dead link is worse than an honest one.
+  if (path === '/entities' || path === '/entities.html') return serveFile(req, res, 'entities.html');
   if (path === '/' || path === '/index.html') return serveFile(req, res, 'index.html');
   return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404); // unknown → real 404
 });
