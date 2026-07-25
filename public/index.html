@@ -207,6 +207,8 @@
   @media (max-width:900px){ .kpis{grid-template-columns:repeat(3,1fr)} .grid{grid-template-columns:1fr} }
   @media (max-width:520px){ .kpis{grid-template-columns:repeat(2,1fr)} }
   @media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
+  /* beta marker on the footer link to the experimental Entities page */
+  .beta-dot{font-size:8.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--warn); border:1px solid color-mix(in srgb,var(--warn) 40%,transparent); border-radius:4px; padding:1px 4px; margin-left:4px; vertical-align:1px}
 </style>
 <script src="/theme.js"></script>
 <script defer src="https://cloud.umami.is/script.js" data-website-id="2f5d5bca-9ebd-4b1a-aded-b503e2939270"></script>
@@ -297,7 +299,7 @@
     </div>
     <div class="card">
       <h2>Filtered addresses</h2>
-      <p class="cap">Addresses busy enough to be infrastructure rather than economic activity. A transfer is dropped from <em>adjusted</em> volume only when both its ends are flagged. <a href="/methodology" style="color:var(--accent)">Method →</a></p>
+      <p class="cap">Addresses busy enough to be infrastructure rather than economic activity. A transfer is dropped from <em>adjusted</em> volume only when both its ends are flagged. <a href="/methodology" style="color:var(--accent)">Method →</a> · <a href="/entities" style="color:var(--accent)">What these addresses are <span class="beta-dot">beta</span></a></p>
       <table><thead><tr><th>Address</th><th class="r">Transfers</th><th class="r">Volume</th></tr></thead>
         <tbody id="noiseTbl"></tbody></table>
       <div class="cov" id="noiseFoot"></div>
@@ -325,6 +327,7 @@
         <a href="/docs">API</a>
         <a href="/methodology">Methodology</a>
         <a href="/status">Status</a>
+        <a href="/entities">Entities <span class="beta-dot">beta</span></a>
         <a href="https://x.com/getStabledesk">@getStabledesk</a>
       </nav>
     </div>
