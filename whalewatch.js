@@ -8,9 +8,10 @@
 
 import { alertFeed } from './indexer.js';
 import * as db from './db.js';
+import { CHAIN } from './chains.js';
 import { sendTelegram, configured as telegramConfigured } from './telegram.js';
 
-export const TWEET_WORTHY_MIN = 250000; // well above the 1K in-app alert threshold
+export const TWEET_WORTHY_MIN = CHAIN.tweetWorthyMin; // well above the 1K in-app alert threshold
 const CHECK_MS = 15000;
 
 const short = (a) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '');

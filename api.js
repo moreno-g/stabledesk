@@ -4,8 +4,9 @@ import { randomBytes } from 'node:crypto';
 import * as db from './db.js';
 import { live } from './indexer.js';
 import { getLabel } from './labels.js';
-import { RANGES, TIERS, TOKEN_SYMBOLS, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
+import { RANGES, TIERS, TOKEN_SYMBOLS, TOKEN_LIST, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
 import { validateWebhook } from './validate.js';
+import { CHAIN } from './chains.js';
 
 // fixed-window in-memory rate limiter, per key per minute
 const rl = new Map();
@@ -72,7 +73,8 @@ export async function handleV1(req, res, u) {
   if (path === '/v1/status') {
     return json(res, {
       ok: live.snapshot.ok,
-      chainId: 5042002,
+      chainId: CHAIN.chainId,
+      network: CHAIN.id,
       block: live.snapshot.network?.block ?? null,
       indexLag: live.snapshot.indexLag ?? null,
       updatedAt: live.snapshot.updatedAt ?? null,
@@ -160,7 +162,7 @@ export async function handleV1(req, res, u) {
   // per-token detail: supply/velocity + 24h summary + net issuance + size distribution
   if (path.startsWith('/v1/stablecoins/')) {
     const token = path.slice('/v1/stablecoins/'.length).toUpperCase();
-    if (!TOKEN_SYMBOLS.has(token)) return json(res, { error: 'bad_token', hint: 'token must be USDC, EURC, or USYC.' }, 400, H);
+    if (!TOKEN_SYMBOLS.has(token)) return json(res, { error: 'bad_token', hint: `token must be one of: ${TOKEN_LIST}.` }, 400, H);
     const sm = s.summary24h?.byToken?.[token] || null;
     return json(res, {
       token, supply: s.supply?.[token] || null, summary24h: sm,
@@ -222,7 +224,7 @@ export async function handleV1(req, res, u) {
     if (whErr) return json(res, { error: 'webhook_blocked', hint: 'Webhook must be a public https URL (no localhost or private IPs).' }, 400, H);
 
     const token = body.token ? String(body.token).toUpperCase() : null;
-    if (token && !TOKEN_SYMBOLS.has(token)) return json(res, { error: 'bad_token', hint: 'token must be USDC, EURC, or USYC.' }, 400, H);
+    if (token && !TOKEN_SYMBOLS.has(token)) return json(res, { error: 'bad_token', hint: `token must be one of: ${TOKEN_LIST}.` }, 400, H);
 
     const address = body.address ? String(body.address).toLowerCase() : null;
     if (address && !ADDR_RE.test(address)) return json(res, { error: 'bad_address' }, 400, H);

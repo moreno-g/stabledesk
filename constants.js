@@ -1,5 +1,7 @@
 // Shared constants for the dashboard API and public /v1 API.
 
+import { CHAIN } from './chains.js';
+
 export const RANGES = {
   '1h': { span: 3600, group: 60 },
   '24h': { span: 86400, group: 900 },
@@ -11,7 +13,8 @@ export const TIERS = {
   pro: { rpm: 600, maxAlerts: 20 },
 };
 
-export const TOKEN_SYMBOLS = new Set(['USDC', 'EURC', 'USYC']);
+export const TOKEN_SYMBOLS = new Set(Object.values(CHAIN.tokens).map((t) => t.symbol));
+export const TOKEN_LIST = [...TOKEN_SYMBOLS].join(', ');
 export const ADDR_RE = /^0x[0-9a-f]{40}$/;
 
 // Transfer-size brackets for the "transaction size distribution" (Visa / Allium style).

@@ -199,6 +199,50 @@ test('fee sampling and the address noise filter', async () => {
   assert.equal(fs.txs, 10);
 });
 
+// ---- network switch (testnet / mainnet) ----
+test('network profile: token parsing and mainnet fail-fast', async () => {
+  const { parseTokens, CHAIN, NETWORK } = await import('../chains.js');
+
+  // Tests run without ARC_NETWORK, so the default must be the safe one.
+  assert.equal(NETWORK, 'testnet');
+  assert.equal(CHAIN.isTestnet, true);
+  assert.equal(CHAIN.chainId, 5042002);
+  assert.equal(CHAIN.dbFile, 'arc.db', 'testnet keeps the original filename so deployed history survives');
+
+  const t = parseTokens('USDC:0x' + '1'.repeat(40) + ':6, EURC:0x' + '2'.repeat(40) + ':6');
+  assert.equal(Object.keys(t).length, 2);
+  assert.equal(t['0x' + '1'.repeat(40)].symbol, 'USDC');
+  assert.equal(t['0x' + '1'.repeat(40)].decimals, 6);
+  assert.equal(parseTokens(''), null);
+  assert.throws(() => parseTokens('USDC:notanaddress:6'), /ARC_TOKENS/);
+  assert.throws(() => parseTokens('USDC:0x' + '1'.repeat(40) + ':abc'), /ARC_TOKENS/);
+
+  // The safety property: asking for mainnet without its config must abort the process, not
+  // quietly serve testnet data under a mainnet banner. Checked in a subprocess because the
+  // profile is resolved once at module load.
+  const { execFileSync } = await import('node:child_process');
+  const run = (env) => {
+    try {
+      execFileSync(process.execPath, ['-e', "import('./chains.js').then(m=>console.log(m.CHAIN.chainId))"],
+        { env: { ...process.env, ...env }, cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' });
+      return null;
+    } catch (e) { return String(e.stderr || e.message); }
+  };
+  const err = run({ ARC_NETWORK: 'mainnet', ARC_CHAIN_ID: '', ARC_RPC_URLS: '', ARC_TOKENS: '' });
+  assert.ok(err, 'misconfigured mainnet must fail, not fall back');
+  assert.match(err, /ARC_CHAIN_ID/);
+  assert.match(err, /ARC_RPC_URLS/);
+  assert.match(err, /ARC_TOKENS/);
+
+  // A plain http endpoint is rejected too — testnet RPCs are https and mainnet must not be laxer.
+  const insecure = run({ ARC_NETWORK: 'mainnet', ARC_CHAIN_ID: '9999', ARC_RPC_URLS: 'http://rpc.example', ARC_TOKENS: 'USDC:0x' + '1'.repeat(40) + ':6' });
+  assert.match(insecure || '', /not an https URL/);
+
+  // Fully configured, it boots and reports the configured chain — on its own database file.
+  const ok = run({ ARC_NETWORK: 'mainnet', ARC_CHAIN_ID: '9999', ARC_RPC_URLS: 'https://rpc.example', ARC_TOKENS: 'USDC:0x' + '1'.repeat(40) + ':6' });
+  assert.equal(ok, null, 'a complete mainnet config must start cleanly');
+});
+
 // ---- entity derivation (experimental — see entities.js) ----
 test('entity derivation classifies from chain facts alone', async () => {
   const { classify, detectInterfaces, decodeString, explain } = await import('../entities.js');

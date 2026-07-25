@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stabledesk · Methodology</title>
-<meta name="description" content="How Stabledesk measures stablecoin activity on the Arc testnet — real volume (single-directional method), mint/burn, velocity, and data sources.">
+<meta name="description" content="How Stabledesk measures stablecoin activity on the {{NET}} — real volume (single-directional method), mint/burn, velocity, and data sources.">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Stabledesk">
 <meta property="og:title" content="Stabledesk · Methodology">
@@ -16,7 +16,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:site" content="@getStabledesk">
 <meta name="twitter:title" content="Stabledesk · Methodology">
-<meta name="twitter:description" content="How Stabledesk measures stablecoin activity on the Arc testnet.">
+<meta name="twitter:description" content="How Stabledesk measures stablecoin activity on the {{NET}}.">
 <meta name="twitter:image" content="https://stabledesk.xyz/og.png">
 <meta property="og:image:alt" content="Stabledesk — methodology">
 <meta property="og:locale" content="en_US">
@@ -73,19 +73,20 @@
 <body>
 <div class="wrap">
   <div class="top"><div class="logo"></div><h1>Methodology</h1><button class="iconbtn" id="themeBtn" type="button" style="margin-left:auto" aria-label="Theme"></button></div>
-  <p class="sub">How Stabledesk measures stablecoin activity on the Arc testnet. <a href="/">← Back to the terminal</a></p>
+  <p class="sub">How Stabledesk measures stablecoin activity on the {{NET}}. <a href="/">← Back to the terminal</a></p>
 
-  <p class="lead">Stabledesk indexes on-chain <code>Transfer</code> events for the Arc testnet stablecoins and turns them into
+  <p class="lead">Stabledesk indexes on-chain <code>Transfer</code> events for the {{NET}} stablecoins and turns them into
   time series, supply metrics and flow analytics — with a deliberate focus on <strong>real economic volume</strong>, not raw event counts.</p>
 
   <h2>Data source</h2>
   <div class="card">
     <p style="margin-top:0">Everything is read directly from the chain — no third-party data provider. Blocks and logs come from the
-    <strong>Arc testnet public RPC</strong> (with fallback endpoints), chain ID <code>5042002</code>. Arc is an EVM chain where
+    <strong>{{NET}} public RPC</strong> (with fallback endpoints), chain ID <code>{{CHAIN_ID}}</code>. Arc is an EVM chain where
     gas is paid in USDC and blocks are ~0.5s with no reorgs.</p>
-    <p style="margin-bottom:0">We track the three official testnet stablecoins (ERC-20 interface, 6 decimals): <strong>USDC</strong> <code>0x3600…0000</code>
-    (native), <strong>EURC</strong> and <strong>USYC</strong> (yield / tokenized MMF). A historical indexer backfills recent
-    history on first run, then keeps indexing forward and persists aggregates in SQLite.</p>
+    <p style="margin-bottom:0">We track the official {{NET}} stablecoins (ERC-20 interface): <strong>USDC</strong><!--testnet-only-->
+    <code>0x3600…0000</code><!--/testnet-only--> (native gas token), <strong>EURC</strong> and <strong>USYC</strong>
+    (yield / tokenized MMF). A historical indexer backfills recent history on first run, then keeps indexing forward
+    and persists aggregates in SQLite.</p>
   </div>
 
   <h2>Three volume measures</h2>
@@ -171,9 +172,9 @@
 
   <h2>Caveats</h2>
   <div class="note">
-    This is a <strong>testnet</strong> prototype (v0). Supply figures are inflated by faucet mints and are not representative of mainnet.
-    Address labels are a small curated / heuristic set and will grow over time. Figures are best-effort from public RPC data, may lag or
-    reset, and are provided for informational purposes only — <strong>not investment advice</strong>.
+<!--testnet-only-->    This is a <strong>testnet</strong> prototype (v0). Supply figures are inflated by faucet mints and carry no real value.
+<!--/testnet-only-->    Address labels are a small curated / heuristic set and will grow over time. Figures are best-effort from public RPC data,
+    may lag or reset, and are provided for informational purposes only — <strong>not investment advice</strong>.
   </div>
 
   <footer class="site-foot">
@@ -188,7 +189,7 @@
         <a href="https://x.com/getStabledesk">@getStabledesk</a>
       </nav>
     </div>
-    <div class="sf-legal">© 2026 Stabledesk · Live Arc testnet data · Prototype v0 — read-only · not investment advice.</div>
+    <div class="sf-legal">© 2026 Stabledesk · Live {{NET}} data · Prototype v0 — read-only · not investment advice.</div>
   </footer>
 </div>
 </body>
