@@ -12,9 +12,14 @@ import * as db from './db.js';
 import { live, alertFeed, start, stop } from './indexer.js';
 import * as payments from './payments.js';
 import * as entities from './entities.js';
+import * as tvl from './tvl.js';
+import * as rankings from './rankings.js';
+import { search } from './search.js';
+import { CATEGORIES } from './protocols.js';
+import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
-import { RANGES, ADDR_RE, TOKEN_SYMBOLS, ENTITIES_ENABLED } from './constants.js';
+import { RANGES, ADDR_RE, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED } from './constants.js';
 import { CHAIN, NETWORK } from './chains.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -135,6 +140,41 @@ const server = http.createServer(async (req, res) => {
     if (!ENTITIES_ENABLED) return json(res, { error: 'disabled' }, 404);
     return json(res, entities.snapshot());
   }
+
+  // ---- ecosystem: the protocol registry joined to measured TVL and flow ----
+  if (path === '/api/ecosystem') {
+    const snap = tvl.snapshot();
+    if (u.searchParams.get('format') === 'csv') {
+      return csvResponse(res, `arc-protocols-${NETWORK}.csv`, snap.protocols, PROTOCOL_COLUMNS);
+    }
+    return json(res, { ...snap, categories: CATEGORIES, tvlEnabled: TVL_ENABLED });
+  }
+  if (path === '/api/ecosystem/candidates') {
+    const snap = tvl.snapshot();
+    if (u.searchParams.get('format') === 'csv') {
+      return csvResponse(res, `arc-unnamed-contracts-${NETWORK}.csv`, snap.candidates, CANDIDATE_COLUMNS);
+    }
+    return json(res, { candidates: snap.candidates, unattributed: snap.totals.unattributed });
+  }
+  // Accepts either ?id= (a registry entry) or ?address= (any contract, named or not) so the
+  // unnamed-contracts list on /ecosystem never links somewhere that 404s.
+  if (path === '/api/protocol') {
+    const id = String(u.searchParams.get('id') || '').toLowerCase();
+    const addr = String(u.searchParams.get('address') || '').toLowerCase();
+    let d = null;
+    if (id) d = tvl.detail(id);
+    else if (ADDR_RE.test(addr)) d = tvl.addressDetail(addr);
+    else if (addr) return json(res, { error: 'bad_address' }, 400);
+    if (!d) return json(res, { error: 'not_found' }, 404);
+    return json(res, d);
+  }
+  if (path === '/api/search') {
+    return json(res, search(u.searchParams.get('q'), 10));
+  }
+  if (path === '/api/rankings') {
+    const r = rankings.daily();
+    return json(res, { ...r, digest: rankings.digest(r) });
+  }
   if (path === '/api/health') {
     return json(res, {
       ok: live.snapshot.ok,
@@ -160,6 +200,8 @@ const server = http.createServer(async (req, res) => {
   // Served even when derivation is off: the footer links to it from every page, and the page
   // itself reports "disabled" when /api/entities 404s. A dead link is worse than an honest one.
   if (path === '/entities' || path === '/entities.html') return serveFile(req, res, 'entities.html');
+  if (path === '/ecosystem' || path === '/ecosystem.html') return serveFile(req, res, 'ecosystem.html');
+  if (path === '/protocol' || path === '/protocol.html') return serveFile(req, res, 'protocol.html');
   if (path === '/' || path === '/index.html') return serveFile(req, res, 'index.html');
   return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404); // unknown → real 404
 });
@@ -170,6 +212,7 @@ server.listen(PORT, () => {
   start();
   payments.start();
   if (ENTITIES_ENABLED) entities.start();
+  if (TVL_ENABLED) tvl.start();
 });
 
 let shuttingDown = false;
@@ -180,6 +223,7 @@ function shutdown() {
   stop();                          // stop the live poll loop
   payments.stop();                 // stop the payment poller
   entities.stop();                 // stop the entity derivation loop
+  tvl.stop();                      // stop the TVL balance scanner
   server.close(() => { try { db.close(); } catch {} process.exit(0); });
   setTimeout(() => { try { db.close(); } catch {} process.exit(1); }, 10000).unref();
 }

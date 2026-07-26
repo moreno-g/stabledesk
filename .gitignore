@@ -2,4 +2,7 @@ node_modules/
 arc.db
 arc.db-wal
 arc.db-shm
+arc-mainnet.db
+arc-mainnet.db-wal
+arc-mainnet.db-shm
 .DS_Store
