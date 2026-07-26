@@ -3,24 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Stabledesk · Token</title>
-<meta name="description" content="Per-token stablecoin detail on the {{NET}} — supply, velocity, net issuance, transfer-size distribution and largest transfers for USDC, EURC & USYC.">
+<title>{{TITLE}}</title>
+<meta name="description" content="{{DESCRIPTION}}">
+<meta name="robots" content="{{ROBOTS}}">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Stabledesk">
-<meta property="og:title" content="Stabledesk · Token detail">
-<meta property="og:description" content="Supply, velocity, net issuance & transfer-size distribution per stablecoin on the {{NET}}.">
-<meta property="og:url" content="https://stabledesk.xyz/token">
+<meta property="og:title" content="{{OG_TITLE}}">
+<meta property="og:description" content="{{OG_DESC}}">
+<meta property="og:url" content="{{CANONICAL}}">
 <meta property="og:image" content="https://stabledesk.xyz/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:site" content="@getStabledesk">
-<meta name="twitter:title" content="Stabledesk · Token detail">
-<meta name="twitter:description" content="Per-token stablecoin analytics on the {{NET}}.">
+<meta name="twitter:title" content="{{OG_TITLE}}">
+<meta name="twitter:description" content="{{OG_DESC}}">
 <meta name="twitter:image" content="https://stabledesk.xyz/og.png">
 <meta property="og:image:alt" content="Stabledesk — per-token stablecoin detail">
 <meta property="og:locale" content="en_US">
-<link rel="canonical" id="canon" href="https://stabledesk.xyz/token">
+<link rel="canonical" id="canon" href="{{CANONICAL}}">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%230FA79E'/%3E%3Cstop offset='.5' stop-color='%2325C4B8'/%3E%3Cstop offset='1' stop-color='%239B7EDE'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M22 10L10 10L10 22L22 22' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round' transform='rotate(-45 16 16)'/%3E%3C/svg%3E">
 <style>
   :root{
@@ -104,6 +105,7 @@
   @media (prefers-reduced-motion:reduce){*{transition:none!important}}
   /* beta marker on the footer link to the experimental Entities page */
   .beta-dot{font-size:8.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--warn); border:1px solid color-mix(in srgb,var(--warn) 40%,transparent); border-radius:4px; padding:1px 4px; margin-left:4px; vertical-align:1px}
+  .ssr{font-size:12.5px; color:var(--ink-3); margin:0 0 14px; max-width:80ch; line-height:1.6}
 </style>
 <script src="/theme.js"></script>
 <script defer src="https://cloud.umami.is/script.js" data-website-id="2f5d5bca-9ebd-4b1a-aded-b503e2939270"></script>
@@ -112,11 +114,15 @@
 <div class="shell" id="shell">
   <div class="top">
     <a class="back" href="/">← Terminal</a>
-    <h1><span class="tokdot"></span><span id="tokName">—</span></h1>
+    <h1><span class="tokdot"></span><span id="tokName">{{TOKEN}}</span></h1>
     <span class="live"><span class="dot down" id="statusDot"></span><span id="statusText">connecting…</span></span>
     <span class="switch" id="tokSwitch"></span>
     <span class="meta" id="metaLine"></span>
   </div>
+
+  <!-- Rendered server-side so the figures exist in the markup a crawler receives, not only after
+       the client fetches /api/token. The client refreshes it with the same sentence. -->
+  <p class="ssr" id="ssrSummary">{{SSR}}</p>
 
   <div class="kpis" id="kpis"></div>
 
@@ -195,29 +201,36 @@ const TCOLOR={USDC:'--usdc',EURC:'--eurc',USYC:'--usyc'};
 const short=(a)=>a?a.slice(0,6)+'…'+a.slice(-4):'—';
 const esc=(s)=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function compact(n){ if(n==null||isNaN(n))return '—'; const a=Math.abs(n);
-  if(a>=1e9)return (n/1e9).toFixed(2)+'B'; if(a>=1e6)return (n/1e6).toFixed(2)+'M';
+  if(a>=1e12)return (n/1e12).toFixed(2)+'T'; if(a>=1e9)return (n/1e9).toFixed(2)+'B'; if(a>=1e6)return (n/1e6).toFixed(2)+'M';
   if(a>=1e3)return (n/1e3).toFixed(1)+'K'; return nf.format(Number(n.toFixed(a<10?2:0))); }
 const tAgo=(sec)=>{const s=Math.max(0,Math.floor(Date.now()/1000-sec));return s<60?s+'s':(s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h');};
 
+// The canonical form is the path URL (/token/usdc). The query form is still read as a fallback so
+// any old link that hasn't been redirected yet still resolves to the right token rather than
+// silently falling back to USDC.
 const params=new URLSearchParams(location.search);
-let token=(params.get('token')||'USDC').toUpperCase();
+const pathTok=(location.pathname.match(/^\/token\/([A-Za-z0-9]{2,10})$/)||[])[1];
+let token=(pathTok||params.get('token')||'USDC').toUpperCase();
 if(!TOK.includes(token)) token='USDC';
 let range='24h', metric='real';
+const tokenUrl=(t)=>'/token/'+t.toLowerCase();
 
 document.documentElement.style.setProperty('--c',`var(${TCOLOR[token]})`);
 $('#shell').style.setProperty('--c',`var(${TCOLOR[token]})`);
 $('#tokName').textContent=token;
 $('#lt1').textContent=token; $('#lt2').textContent=token;
-document.title='Stabledesk · '+token;
-// SEO: per-token canonical + breadcrumb structured data
-document.getElementById('canon').href='https://stabledesk.xyz/token?token='+token;
+// document.title is deliberately NOT overwritten: the server renders a fuller, per-token title
+// than anything reconstructable here, and replacing it would throw that away on every load.
+// SEO: canonical points at the path URL; the server sets the same value, this only keeps them in
+// step if the page was reached by the query form.
+document.getElementById('canon').href='https://stabledesk.xyz'+tokenUrl(token);
 (function(){const ld=document.createElement('script');ld.type='application/ld+json';
   ld.textContent=JSON.stringify({"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[
     {"@type":"ListItem","position":1,"name":"Terminal","item":"https://stabledesk.xyz/"},
-    {"@type":"ListItem","position":2,"name":token,"item":"https://stabledesk.xyz/token?token="+token}]});
+    {"@type":"ListItem","position":2,"name":token,"item":"https://stabledesk.xyz"+tokenUrl(token)}]});
   document.head.appendChild(ld);})();
 // token switcher
-$('#tokSwitch').innerHTML=TOK.map(t=>`<a href="/token?token=${t}" class="${t===token?'on':''}">${t}</a>`).join('');
+$('#tokSwitch').innerHTML=TOK.map(t=>`<a href="${tokenUrl(t)}" class="${t===token?'on':''}">${t}</a>`).join('');
 
 const CAP={real:'Real volume = one largest transfer per transaction (routing/bot noise filtered).',
   raw:'Raw volume = every Transfer event, including routing hops & bot noise.',
@@ -226,7 +239,7 @@ const CAP={real:'Real volume = one largest transfer per transaction (routing/bot
 
 function renderKpis(d){
   const sup=d.supply||{}, sm=d.summary24h||{};
-  const vel=sup.velocity?(sup.velocity<1?sup.velocity.toFixed(3):sup.velocity.toFixed(1))+'×':'—';
+  const vel=sup.velocity?(sup.velocity<0.001?'<0.001×':(sup.velocity<1?sup.velocity.toFixed(3):sup.velocity.toFixed(1))+'×'):'—';
   const net=d.netIssuance24h;
   const netCls=net==null?'':(net>0?'pos':(net<0?'neg':''));
   const netStr=net==null?'—':(net>0?'+':'')+compact(net);

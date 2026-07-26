@@ -183,6 +183,14 @@ export function aggregate() {
   };
 }
 
+// Chain-wide total only. The dashboard polls every few seconds and needs one number, so this skips
+// the per-protocol attribution and flow lookups that aggregate() does.
+export function total() {
+  let t = 0;
+  for (const r of db.balanceRows()) t += r.balance;
+  return t;
+}
+
 // TVL movers — today's level against `daysBack` ago, per protocol. Drives the daily rankings.
 export function movers(daysBack = 1) {
   const now = today();

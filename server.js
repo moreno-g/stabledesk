@@ -15,7 +15,7 @@ import * as entities from './entities.js';
 import * as tvl from './tvl.js';
 import * as rankings from './rankings.js';
 import { search } from './search.js';
-import { CATEGORIES } from './protocols.js';
+import { CATEGORIES, PROTOCOLS, protocolById } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
@@ -77,6 +77,76 @@ async function serveFile(req, res, name, type = 'text/html; charset=utf-8', code
   } catch { res.writeHead(404, SEC); res.end('not found'); }
 }
 
+// ---- templated pages ----
+// The same HTML file served with per-entity metadata *and* real numbers baked in. Two reasons this
+// has to happen server-side: a crawler fetching /token/usdc otherwise receives a skeleton whose
+// title is the generic "Stabledesk · Token" — identical for every token, so three pages collapse
+// into one in the index — and none of the figures exist in the markup at all.
+//
+// Cached per entity with a short TTL, so the baked-in numbers stay honest while ETag and gzip keep
+// working. The key set is bounded because every id is validated against the registry (or the token
+// list) before it gets here; an unknown id 404s rather than minting a cache entry.
+const TEMPLATE_TTL_MS = 60000;
+const pageCache = new Map();
+
+const escAttr = (s) => String(s == null ? '' : s)
+  .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+
+async function serveTemplated(req, res, name, key, vars) {
+  const ck = name + '|' + key;
+  let p = pageCache.get(ck);
+  if (!p || p.expires < Date.now()) {
+    try {
+      // loadAsset has already applied the network profile, so {{NET}} etc. are resolved.
+      const base = await loadAsset(name, 'text/html; charset=utf-8');
+      let html = base.buf.toString('utf8');
+      for (const [k, v] of Object.entries(vars)) html = html.replaceAll('{{' + k + '}}', escAttr(v));
+      const buf = Buffer.from(html, 'utf8');
+      p = {
+        buf,
+        gz: gzipSync(buf),
+        etag: '"' + createHash('sha1').update(buf).digest('base64').slice(0, 22) + '"',
+        expires: Date.now() + TEMPLATE_TTL_MS,
+      };
+      pageCache.set(ck, p);
+    } catch { res.writeHead(404, SEC); return res.end('not found'); }
+  }
+  const h = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache', etag: p.etag, 'content-security-policy': CSP, ...SEC };
+  if (req.headers['if-none-match'] === p.etag) { res.writeHead(304, h); return res.end(); }
+  if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+    res.writeHead(200, { ...h, 'content-encoding': 'gzip', vary: 'Accept-Encoding' });
+    return res.end(p.gz);
+  }
+  res.writeHead(200, h); res.end(p.buf);
+}
+
+const redirect = (res, to) => { res.writeHead(301, { location: to, 'cache-control': 'no-cache', ...SEC }); res.end(); };
+
+const compactNum = (n) => {
+  if (n == null || !Number.isFinite(n)) return '—';
+  const a = Math.abs(n);
+  // Testnet supply is faucet-inflated well past a billion, so T has to exist — otherwise a real
+  // figure renders as "2000.96B", which reads as a formatting bug rather than a large number.
+  if (a >= 1e12) return (n / 1e12).toFixed(2) + 'T';
+  if (a >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (a >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (a >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(Math.round(n * 100) / 100);
+};
+
+// Category labels come from the registry, so the indefinite article has to be derived rather than
+// written into the sentence — "a issuer" otherwise ends up in a meta description.
+const article = (word) => (/^[aeiou]/i.test(String(word || '')) ? 'an' : 'a');
+
+// Velocity below a thousandth rounds to "0.000×", which looks broken rather than small. Report the
+// bound instead — it is the same claim, honestly stated.
+const velocityTxt = (v) => {
+  if (v == null || !Number.isFinite(v) || v === 0) return '—';
+  if (v < 0.001) return '<0.001×';
+  return (v < 1 ? v.toFixed(3) : v.toFixed(1)) + '×';
+};
+
 // Coarse per-IP throttle for the keyless internal /api (dashboard needs ~60 req/min; 300 is generous).
 const apiRl = new Map();
 function apiThrottle(req) {
@@ -100,7 +170,9 @@ const server = http.createServer(async (req, res) => {
   if (path.startsWith('/api/')) {
     if (!apiThrottle(req)) return json(res, { error: 'rate_limited' }, 429);
   }
-  if (path === '/api/state') return json(res, live.snapshot);
+  // TVL is merged in here rather than computed by the indexer: it comes from a separate scan loop on
+  // its own cadence, and tvl.total() is a single summed query so the dashboard's polling stays cheap.
+  if (path === '/api/state') return json(res, { ...live.snapshot, tvl: TVL_ENABLED ? tvl.total() : null });
   if (path === '/api/alerts') return json(res, { feed: alertFeed });
   if (path === '/api/history') {
     const token = (u.searchParams.get('token') || 'ALL').toUpperCase();
@@ -187,21 +259,114 @@ const server = http.createServer(async (req, res) => {
 
   // SEO
   if (path === '/robots.txt') return serveFile(req, res, 'robots.txt', 'text/plain; charset=utf-8');
-  if (path === '/sitemap.xml') return serveFile(req, res, 'sitemap.xml', 'application/xml; charset=utf-8');
+  // Generated rather than a static file, so adding a protocol to the registry lists it for
+  // crawlers with no second step — a hand-maintained sitemap is a hand-maintained omission.
+  if (path === '/sitemap.xml') {
+    const url = (loc, freq, pri) => `  <url><loc>https://stabledesk.xyz${loc}</loc><changefreq>${freq}</changefreq><priority>${pri}</priority></url>`;
+    const body = ['<?xml version="1.0" encoding="UTF-8"?>',
+      '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+      url('/', 'hourly', '1.0'),
+      url('/ecosystem', 'daily', '0.9'),
+      url('/docs', 'weekly', '0.8'),
+      url('/methodology', 'monthly', '0.6'),
+      ...[...TOKEN_SYMBOLS].map((s) => url(`/token/${s.toLowerCase()}`, 'daily', '0.8')),
+      ...PROTOCOLS.map((p) => url(`/protocol/${p.id}`, 'daily', '0.7')),
+      '</urlset>', ''].join('\n');
+    res.writeHead(200, { 'content-type': 'application/xml; charset=utf-8', 'cache-control': 'public, max-age=3600', ...SEC });
+    return res.end(body);
+  }
 
   // static assets + pages
   if (path === '/theme.js') return serveFile(req, res, 'theme.js', 'text/javascript; charset=utf-8');
   if (path === '/og.png') return serveFile(req, res, 'og.png', 'image/png');
   if (path === '/banner.png') return serveFile(req, res, 'banner.png', 'image/png');
   if (path === '/docs' || path === '/docs.html') return serveFile(req, res, 'docs.html');
-  if (path === '/token' || path === '/token.html') return serveFile(req, res, 'token.html');
+
+  // ---- one indexable page per token, on a path URL ----
+  // Previously every token shared /token with a single generic title, so three distinct pages
+  // collapsed into one in a search index. Old query URLs 301 here rather than 404 — existing links
+  // and bookmarks keep working, and the redirect consolidates their ranking signal.
+  const tokMatch = /^\/token\/([A-Za-z0-9]{2,10})$/.exec(path);
+  if (tokMatch) {
+    const sym = tokMatch[1].toUpperCase();
+    if (!TOKEN_SYMBOLS.has(sym)) return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404);
+    const s = live.snapshot;
+    const sup = s.supply?.[sym] || null;
+    const sm = s.summary24h?.byToken?.[sym] || null;
+    const net = CHAIN.label;
+    const supplyTxt = sup ? compactNum(sup.supply) : '—';
+    const volTxt = sup ? compactNum(sup.rvolume24h) : '—';
+    const velTxt = velocityTxt(sup?.velocity);
+    const issuance = sm ? sm.mint - sm.burn : null;
+    return serveTemplated(req, res, 'token.html', sym, {
+      TITLE: `${sym} on ${net} — supply, volume & velocity · Stabledesk`,
+      DESCRIPTION: `Live ${sym} analytics on ${net} (Circle's L1): ${supplyTxt} supply, ${volTxt} real volume over 24h, `
+        + `${velTxt} velocity${issuance != null ? `, ${compactNum(issuance)} net issuance` : ''}. `
+        + 'Transfer-size distribution, largest transfers and mint/burn, measured from chain data.',
+      CANONICAL: `https://stabledesk.xyz/token/${sym.toLowerCase()}`,
+      OG_TITLE: `${sym} on ${net} · Stabledesk`,
+      OG_DESC: `${supplyTxt} supply · ${volTxt} 24h real volume · ${velTxt} velocity`,
+      ROBOTS: 'index, follow',
+      TOKEN: sym,
+      SSR: `${sym} on ${net}: ${supplyTxt} supply, ${volTxt} real transfer volume over the last 24 hours, `
+        + `velocity ${velTxt}${issuance != null ? `, net issuance ${compactNum(issuance)}` : ''}.`,
+    });
+  }
+  if (path === '/token' || path === '/token.html') {
+    const q = String(u.searchParams.get('token') || '').toUpperCase();
+    if (TOKEN_SYMBOLS.has(q)) return redirect(res, `/token/${q.toLowerCase()}`);
+    return redirect(res, `/token/${[...TOKEN_SYMBOLS][0].toLowerCase()}`);
+  }
   if (path === '/methodology' || path === '/methodology.html') return serveFile(req, res, 'methodology.html');
   if (path === '/status' || path === '/status.html') return serveFile(req, res, 'status.html');
   // Served even when derivation is off: the footer links to it from every page, and the page
   // itself reports "disabled" when /api/entities 404s. A dead link is worse than an honest one.
   if (path === '/entities' || path === '/entities.html') return serveFile(req, res, 'entities.html');
   if (path === '/ecosystem' || path === '/ecosystem.html') return serveFile(req, res, 'ecosystem.html');
-  if (path === '/protocol' || path === '/protocol.html') return serveFile(req, res, 'protocol.html');
+
+  // ---- one indexable page per protocol ----
+  const protoMatch = /^\/protocol\/([a-z0-9-]{1,40})$/.exec(path);
+  if (protoMatch) {
+    const p = protocolById(protoMatch[1]);
+    if (!p) return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404);
+    const d = tvl.detail(p.id);
+    const tvlTxt = compactNum(d?.tvl ?? 0);
+    const net = CHAIN.label;
+    const cat = CATEGORIES[p.category]?.label || p.category;
+    return serveTemplated(req, res, 'protocol.html', p.id, {
+      TITLE: `${p.name} on ${net} — TVL & activity · Stabledesk`,
+      DESCRIPTION: `${p.name}${p.vendor ? ` (${p.vendor})` : ''} on ${net}: ${tvlTxt} held in stablecoins across `
+        + `${p.contracts.length} contract${p.contracts.length === 1 ? '' : 's'}. ${p.desc || ''}`.trim(),
+      CANONICAL: `https://stabledesk.xyz/protocol/${p.id}`,
+      OG_TITLE: `${p.name} on ${net} · Stabledesk`,
+      OG_DESC: `${cat} · ${tvlTxt} held in stablecoins`,
+      ROBOTS: 'index, follow',
+      PROTOCOL: p.name,
+      SSR: `${p.name} is ${article(cat)} ${cat.toLowerCase()} protocol on ${net}, holding ${tvlTxt} in stablecoins across `
+        + `${p.contracts.length} tracked contract${p.contracts.length === 1 ? '' : 's'}.`,
+    });
+  }
+  if (path === '/protocol' || path === '/protocol.html') {
+    const id = String(u.searchParams.get('id') || '').toLowerCase();
+    if (id && protocolById(id)) return redirect(res, `/protocol/${id}`);
+    // The address variant stays on a query URL and is deliberately noindex: nobody searches a hex
+    // address, and mass-indexing profiles of institutional counterparties on a compliance-first
+    // chain is a liability rather than an SEO asset. The lookup works; it just isn't crawled.
+    const addr = String(u.searchParams.get('address') || '').toLowerCase();
+    if (ADDR_RE.test(addr)) {
+      return serveTemplated(req, res, 'protocol.html', 'addr', {
+        TITLE: 'Unnamed contract · Stabledesk',
+        DESCRIPTION: 'A contract holding stablecoin balances that no listed protocol claims.',
+        CANONICAL: 'https://stabledesk.xyz/ecosystem',
+        OG_TITLE: 'Unnamed contract · Stabledesk',
+        OG_DESC: 'A contract holding stablecoin balances that no listed protocol claims.',
+        ROBOTS: 'noindex',
+        PROTOCOL: 'Unnamed contract',
+        SSR: '',
+      });
+    }
+    return redirect(res, '/ecosystem');
+  }
   if (path === '/' || path === '/index.html') return serveFile(req, res, 'index.html');
   return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404); // unknown → real 404
 });
