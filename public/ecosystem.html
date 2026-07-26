@@ -220,6 +220,7 @@ const short = (a) => a ? a.slice(0,10)+'…'+a.slice(-6) : '—';
 function compact(n){
   if(n==null||isNaN(n)) return '—';
   const a=Math.abs(n);
+  if(a>=1e12) return (n/1e12).toFixed(2)+'T';
   if(a>=1e9) return (n/1e9).toFixed(2)+'B';
   if(a>=1e6) return (n/1e6).toFixed(2)+'M';
   if(a>=1e3) return (n/1e3).toFixed(1)+'K';
@@ -252,7 +253,7 @@ function renderRows(){
       v ? '<a href="'+esc(v)+'" rel="noopener nofollow" target="_blank">'+esc(k)+'</a>' : '').join('');
     return '<tr class="clickable" data-id="'+esc(p.id)+'">'
       + '<td class="rank">'+(i+1)+'</td>'
-      + '<td><a class="pname" href="/protocol?id='+encodeURIComponent(p.id)+'">'+esc(p.name)+'</a>'+badges
+      + '<td><a class="pname" href="/protocol/'+encodeURIComponent(p.id)+'">'+esc(p.name)+'</a>'+badges
         + (p.vendor ? '<div class="pvendor">'+esc(p.vendor)+'</div>' : '')
         + (p.desc ? '<div class="pdesc">'+esc(p.desc)+'</div>' : '') + '</td>'
       + '<td><span class="cat '+esc(p.category)+'">'+esc(p.categoryLabel||p.category)+'</span></td>'
@@ -266,7 +267,7 @@ function renderRows(){
   }).join('') : '<tr><td colspan="9" class="empty">No protocol in this category yet.</td></tr>';
 
   document.querySelectorAll('tr.clickable').forEach(tr=>{
-    tr.addEventListener('click', (e)=>{ if(e.target.tagName!=='A') location.href='/protocol?id='+encodeURIComponent(tr.dataset.id); });
+    tr.addEventListener('click', (e)=>{ if(e.target.tagName!=='A') location.href='/protocol/'+encodeURIComponent(tr.dataset.id); });
   });
 }
 
@@ -343,12 +344,12 @@ $('#q').addEventListener('input', (e)=>{
       const parts = [];
       if(d.protocols?.length){
         parts.push('<div class="rgroup">Protocols</div>');
-        for(const p of d.protocols) parts.push('<a class="ritem" href="/protocol?id='+encodeURIComponent(p.id)+'">'
+        for(const p of d.protocols) parts.push('<a class="ritem" href="/protocol/'+encodeURIComponent(p.id)+'">'
           +esc(p.name)+' <span class="rmeta">'+esc(p.categoryLabel||p.category)+'</span></a>');
       }
       if(d.tokens?.length){
         parts.push('<div class="rgroup">Tokens</div>');
-        for(const t of d.tokens) parts.push('<a class="ritem" href="/token?token='+encodeURIComponent(t.symbol)+'">'
+        for(const t of d.tokens) parts.push('<a class="ritem" href="/token/'+encodeURIComponent(t.symbol.toLowerCase())+'">'
           +esc(t.symbol)+' <span class="rmeta">'+esc(t.kind)+'</span></a>');
       }
       if(d.addresses?.length){
