@@ -3,6 +3,11 @@
 import { randomBytes } from 'node:crypto';
 import * as db from './db.js';
 import { live } from './indexer.js';
+import * as tvl from './tvl.js';
+import * as rankings from './rankings.js';
+import { search } from './search.js';
+import { CATEGORIES } from './protocols.js';
+import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS, TVL_HISTORY_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { RANGES, TIERS, TOKEN_SYMBOLS, TOKEN_LIST, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
 import { validateWebhook } from './validate.js';
@@ -169,6 +174,67 @@ export async function handleV1(req, res, u) {
       netIssuance24h: sm ? sm.mint - sm.burn : null,
       distribution: db.sizeDistribution(token), updatedAt: s.updatedAt,
     }, 200, H);
+  }
+
+  // ---- ecosystem: registry + measured TVL ----
+  // `?format=csv` is supported on the list endpoints so a spreadsheet can pull them directly.
+  if (path === '/v1/protocols') {
+    const snap = tvl.snapshot();
+    if (u.searchParams.get('format') === 'csv') {
+      return csvResponse(res, `arc-protocols-${CHAIN.id}.csv`, snap.protocols, PROTOCOL_COLUMNS, H);
+    }
+    return json(res, {
+      protocols: snap.protocols, registry: snap.registry, categories: CATEGORIES,
+      totals: snap.totals, method: snap.method, updatedAt: snap.lastRun?.at ?? null,
+    }, 200, H);
+  }
+
+  if (path === '/v1/protocols/unnamed') {
+    const snap = tvl.snapshot();
+    if (u.searchParams.get('format') === 'csv') {
+      return csvResponse(res, `arc-unnamed-contracts-${CHAIN.id}.csv`, snap.candidates, CANDIDATE_COLUMNS, H);
+    }
+    return json(res, {
+      candidates: snap.candidates, unattributed: snap.totals.unattributed,
+      note: 'Contracts holding stablecoin balances that no registry entry claims. Submit an identification: see /ecosystem.',
+      updatedAt: snap.lastRun?.at ?? null,
+    }, 200, H);
+  }
+
+  if (path.startsWith('/v1/protocols/')) {
+    const id = path.slice('/v1/protocols/'.length).toLowerCase();
+    const d = tvl.detail(id);
+    if (!d) return json(res, { error: 'not_found', hint: 'See /v1/protocols for the list of ids.' }, 404, H);
+    return json(res, d, 200, H);
+  }
+
+  if (path === '/v1/tvl/history') {
+    const days = Math.min(180, Math.max(1, Number(u.searchParams.get('days')) || 30));
+    const protocol = u.searchParams.get('protocol') || '*';
+    const series = tvl.history(protocol, days);
+    if (u.searchParams.get('format') === 'csv') {
+      return csvResponse(res, `arc-tvl-${protocol === '*' ? 'total' : protocol}.csv`, series, TVL_HISTORY_COLUMNS, H);
+    }
+    return json(res, { protocol, days, series }, 200, H);
+  }
+
+  if (path === '/v1/tvl') {
+    const snap = tvl.snapshot();
+    return json(res, {
+      ...snap.totals, method: snap.method, series: snap.series,
+      protocols: snap.protocols.filter((p) => p.tvl > 0).map((p) => ({ id: p.id, name: p.name, tvl: p.tvl })),
+      updatedAt: snap.lastRun?.at ?? null,
+    }, 200, H);
+  }
+
+  if (path === '/v1/rankings') {
+    const r = rankings.daily();
+    return json(res, { ...r, digest: rankings.digest(r) }, 200, H);
+  }
+
+  if (path === '/v1/search') {
+    const limit = Math.min(25, Number(u.searchParams.get('limit')) || 10);
+    return json(res, search(u.searchParams.get('q'), limit), 200, H);
   }
 
   if (path === '/v1/addresses/top') {

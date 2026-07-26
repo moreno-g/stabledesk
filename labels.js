@@ -1,6 +1,13 @@
 // Address label registry — the seed of the "entity intelligence" moat.
 // Known Arc testnet contracts + system addresses, keyed by lowercase address.
 // Grows over time (heuristics, crowd-sourcing) — this is the static core.
+//
+// Lookup order is deliberate: the hand-written labels below win, then the protocol registry
+// (protocols.js) names anything a listed protocol claims. So adding a protocol to the registry
+// labels all of its contracts everywhere they already appear — top addresses, transfer feeds,
+// alerts — without touching this file.
+
+import { protocolLabel } from './protocols.js';
 
 export const LABELS = {
   '0x0000000000000000000000000000000000000000': { name: 'Null · mint/burn', type: 'system' },
@@ -14,4 +21,8 @@ export const LABELS = {
   '0x522faf9a91c41c443c66765030741e4aace147d0': { name: 'Multicall3From', type: 'infra' },
 };
 
-export const getLabel = (addr) => (addr ? LABELS[addr.toLowerCase()] || null : null);
+export const getLabel = (addr) => {
+  if (!addr) return null;
+  const k = addr.toLowerCase();
+  return LABELS[k] || protocolLabel(k);
+};

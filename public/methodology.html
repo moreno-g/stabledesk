@@ -139,6 +139,28 @@
     non-bot volume would price the whole network's cost against a fraction of its throughput and badly overstate it.</p>
   </div>
 
+  <h2>TVL &amp; the protocol registry</h2>
+  <div class="card">
+    <p style="margin-top:0"><strong>TVL is measured as stablecoin balances held by contracts</strong> — <code>balanceOf</code> on each
+    indexed asset, for every address we have established has bytecode. On a chain where value is denominated in USDC this is what TVL
+    <em>means</em>: there is no volatile base asset to price and no LP share maths, so no per-protocol adapter is needed. On Ethereum the
+    same method would be worthless; here it is the direct measurement.</p>
+    <p><strong>Only contracts count.</strong> Contract-ness comes from <code>eth_getCode</code>, never from a heuristic. A balance sitting in
+    a plain wallet is someone's money, not value locked in a protocol, and is excluded.</p>
+    <p><strong>Unattributed value is reported, never hidden.</strong> A contract holding a balance that no registry entry claims is counted
+    in the chain total and listed separately as unattributed. We publish the share of TVL we can actually name, next to the total — an
+    ecosystem page that quietly drops what it cannot label is understating the chain, and one that assigns it to a plausible protocol is
+    inventing data.</p>
+    <p><strong>Registry provenance.</strong> Each protocol entry records how we know its contracts: <code>canonical</code> (a deterministic
+    address identical on every EVM chain), <code>team</code> (the operator confirmed it), or <code>observed</code> (we found and classified it
+    ourselves — which is not a claim about who operates it). Only the first two are marked verified. Two entries may never claim the same
+    contract, because that would double-count its balance.</p>
+    <p style="margin-bottom:0"><strong>Known limits.</strong> Value held in assets other than the indexed stablecoins is invisible to this
+    method. A protocol's own accounting may therefore be higher than ours, and where we know that to be the case the entry says so. TVL
+    history begins the day measurement began — nothing is back-filled or estimated. Registry submissions and corrections:
+    <code>PROTOCOLS.md</code>.</p>
+  </div>
+
   <h2>Metric definitions</h2>
   <table>
     <thead><tr><th>Metric</th><th>Definition</th></tr></thead>
@@ -158,6 +180,10 @@
       <tr><td>Fees / day</td><td>Mean fee per sampled block × blocks per day — a run rate, not a cumulative total.</td></tr>
       <tr><td>Cost to move $1M</td><td>Total network fees ÷ real volume, scaled to $1M. What the network charges to move a million dollars.</td></tr>
       <tr><td>Flagged address</td><td>An address exceeding 1,000 transfers or $10M volume per month, pro-rated to the retained window.</td></tr>
+      <tr><td>TVL</td><td>Sum of indexed stablecoin balances held by addresses with bytecode, read with <code>balanceOf</code>.</td></tr>
+      <tr><td>Attributed TVL</td><td>The part of TVL held by contracts a registry entry claims. The remainder is reported as unattributed.</td></tr>
+      <tr><td>Protocol "moved"</td><td>Transfer volume across a protocol's contracts over the retained window (~7 days) — not 24 hours.</td></tr>
+      <tr><td>Observed</td><td>A listed protocol we have seen hold a balance or move value. Distinguishes a live entry from one only listed.</td></tr>
     </tbody>
   </table>
 
@@ -182,6 +208,7 @@
       <div class="sf-brand"><span class="sf-logo"></span> Stabledesk</div>
       <nav class="sf-links">
         <a href="/">Terminal</a>
+        <a href="/ecosystem">Ecosystem</a>
         <a href="/docs">API</a>
         <a href="/methodology">Methodology</a>
         <a href="/status">Status</a>

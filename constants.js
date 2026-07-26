@@ -57,6 +57,25 @@ export const ENTITY_WARMUP_MS = 20 * 1000;   // retry cadence until the indexer 
 export const DERIVE_CHUNK = 8;               // addresses per RPC batch (the public endpoint rate-limits large ones)
 export const DERIVE_DELAY = 600;             // ms between batches
 
+// TVL scanning (see tvl.js and /ecosystem). Batch shape mirrors entity derivation, which is the
+// one already proven against the rate-limited public RPC: TVL_CHUNK holders × one call per indexed
+// stablecoin per batch, spaced by TVL_DELAY. With three tokens that is 24 calls a batch.
+export const TVL_ENABLED = process.env.TVL_ENABLED !== 'false';
+export const TVL_REFRESH_MS = 5 * 60 * 1000;
+export const TVL_WARMUP_MS = 25 * 1000;      // retry cadence until the indexer has rankings
+export const TVL_CHUNK = 8;
+export const TVL_DELAY = 600;
+export const TVL_MAX_TARGETS = 600;          // ceiling on contracts scanned per pass
+// Minimum balance for an unregistered contract to be worth naming. Scaled off the network's own
+// notability threshold, because "a balance worth investigating" means something very different
+// with faucet money than with real deposits.
+export const TVL_CANDIDATE_MIN = Math.max(1, Math.round(CHAIN.notableMin / 10));
+
+// Daily rankings (see rankings.js). The move threshold exists so the digest reports movement
+// rather than rounding noise — a protocol drifting 0.2% is not news.
+export const RANKING_TOP_N = 5;
+export const RANKING_MIN_MOVE_PCT = 0.02;
+
 // Crypto billing (Pro tier) — paid in native USDC on Base, since Arc is still testnet
 // (its USDC has no real value). Verified live against Base mainnet: chainId 8453,
 // USDC contract responds symbol()="USDC", decimals()=6.
