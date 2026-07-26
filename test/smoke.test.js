@@ -276,6 +276,153 @@ test('entity derivation classifies from chain facts alone', async () => {
   assert.equal(decodeString(null), null);
 });
 
+// ---- protocol registry (protocols.js) ----
+test('registry validates itself and never double-claims a contract', async () => {
+  const { PROTOCOLS, registryStats, protocolForAddress, protocolById, CATEGORIES } = await import('../protocols.js');
+
+  const ids = PROTOCOLS.map((p) => p.id);
+  assert.equal(new Set(ids).size, ids.length, 'protocol ids are unique');
+
+  // The invariant that matters for TVL: one contract, one owner. Two entries claiming the same
+  // address would double-count its balance in the chain total.
+  const claimed = new Set();
+  for (const p of PROTOCOLS) {
+    assert.ok(CATEGORIES[p.category], `${p.id} has a known category`);
+    assert.ok(['canonical', 'team', 'observed'].includes(p.source), `${p.id} declares provenance`);
+    // Verified means somebody accountable confirmed it — never our own classification.
+    if (p.verified) assert.notEqual(p.source, 'observed', `${p.id} cannot be both observed and verified`);
+    for (const c of p.contracts) {
+      assert.match(c, /^0x[0-9a-f]{40}$/, `${p.id} address ${c} is lowercase hex`);
+      assert.ok(!claimed.has(c), `${c} is claimed only once`);
+      claimed.add(c);
+    }
+  }
+
+  const st = registryStats();
+  assert.equal(st.total, PROTOCOLS.length);
+  assert.equal(st.verified + st.unverified, st.total);
+  assert.equal(st.contracts, claimed.size);
+
+  // Address → protocol resolution, and the case-insensitivity callers rely on.
+  const sample = PROTOCOLS[0].contracts[0];
+  assert.equal(protocolForAddress(sample.toUpperCase())?.id, PROTOCOLS[0].id);
+  assert.equal(protocolForAddress('0x' + 'f'.repeat(40)), null);
+  assert.equal(protocolById('nope'), null);
+});
+
+// ---- TVL aggregation (tvl.js) ----
+test('tvl attributes balances to protocols and reports the rest as unattributed', async () => {
+  const db = await import('../db.js');
+  const tvl = await import('../tvl.js');
+  const { PROTOCOLS } = await import('../protocols.js');
+
+  const owner = PROTOCOLS.find((p) => p.contracts.length === 1);
+  const registered = owner.contracts[0];
+  const stranger = '0x' + 'ab'.repeat(20);
+
+  db.upsertBalances([
+    { address: registered, token: 'USDC', balance: 300 },
+    { address: registered, token: 'EURC', balance: 200 },
+    { address: stranger, token: 'USDC', balance: 500 },
+  ]);
+
+  const agg = tvl.aggregate();
+  assert.equal(agg.totals.tvl, 1000, 'total is every recorded balance');
+  assert.equal(agg.totals.byToken.USDC, 800);
+  assert.equal(agg.totals.byToken.EURC, 200);
+  assert.equal(agg.totals.attributed, 500, 'only the registered contract is attributed');
+  assert.equal(agg.totals.unattributed, 500, 'the rest is reported, not dropped');
+  assert.equal(agg.totals.attributed + agg.totals.unattributed, agg.totals.tvl);
+  assert.equal(agg.totals.attributedShare, 0.5);
+
+  const row = agg.protocols.find((p) => p.id === owner.id);
+  assert.equal(row.tvl, 500);
+  assert.equal(row.contractsWithBalance, 1);
+  assert.equal(row.observed, true, 'holding a balance counts as observed');
+
+  // The unnamed contract becomes a registry candidate — the work queue, not a silent write-off.
+  const cand = agg.candidates.find((c) => c.address === stranger);
+  assert.ok(cand, 'unregistered holder is surfaced as a candidate');
+  assert.equal(cand.tvl, 500);
+  assert.equal(agg.candidates.some((c) => c.address === registered), false, 'registered contracts are not candidates');
+
+  // Detail view stays traceable: the headline equals the sum of the contract table.
+  const d = tvl.detail(owner.id);
+  assert.equal(d.contractDetail.reduce((a, c) => a + c.tvl, 0), d.tvl);
+  assert.equal(tvl.detail('does-not-exist'), null);
+
+  // An unattributed address resolves to its own view rather than a dead link.
+  const ad = tvl.addressDetail(stranger);
+  assert.equal(ad.unnamed, true);
+  assert.equal(ad.tvl, 500);
+  // …and a registered one redirects to the owning protocol instead of claiming to be unnamed.
+  assert.equal(tvl.addressDetail(registered).id, owner.id);
+});
+
+// ---- CSV export ----
+test('csv quotes correctly and neutralises spreadsheet formulas', async () => {
+  const { toCsv } = await import('../csv.js');
+
+  const out = toCsv(
+    [{ a: 'plain', b: 1 }, { a: 'has,comma', b: 'has "quote"' }, { a: 'line\nbreak', b: null }],
+    [['A', 'a'], ['B', 'b']],
+  );
+  const lines = out.trimEnd().split('\r\n');
+  assert.equal(lines[0], 'A,B');
+  assert.equal(lines[1], 'plain,1');
+  assert.equal(lines[2], '"has,comma","has ""quote"""');
+  assert.ok(out.includes('"line\nbreak",'), 'embedded newline is quoted, not stripped');
+
+  // A label starting with = would be executed as a formula on open; prefixing a tab defuses it.
+  for (const bad of ['=cmd()', '+1', '-1', '@SUM(A1)']) {
+    assert.ok(toCsv([{ a: bad }], [['A', 'a']]).includes('\t' + bad), `${bad} is neutralised`);
+  }
+
+  // Accessor functions, so an API response gaining a field can't reshape a saved import.
+  assert.ok(toCsv([{ links: { site: 'x' } }], [['site', (r) => r.links.site]]).includes('site\r\nx'));
+});
+
+// ---- global search ----
+test('search resolves protocols, tokens and address prefixes', async () => {
+  const { search } = await import('../search.js');
+  const { PROTOCOLS } = await import('../protocols.js');
+
+  assert.equal(search('a').total, undefined, 'queries under two characters return nothing');
+
+  const first = PROTOCOLS[0];
+  const byName = search(first.name.toLowerCase());
+  assert.equal(byName.protocols[0].id, first.id, 'an exact name ranks first');
+
+  assert.ok(search('usdc').tokens.some((t) => t.symbol === 'USDC'));
+
+  // A registry contract is findable by address prefix even with no indexed activity — a protocol
+  // that just deployed has an address and no transfers yet.
+  const addr = first.contracts[0];
+  const byPrefix = search(addr.slice(0, 6));
+  assert.ok(byPrefix.addresses.some((a) => a.address === addr), 'registry contracts match by prefix');
+  assert.equal(byPrefix.addresses.find((a) => a.address === addr).protocol.id, first.id);
+
+  // Exact address resolves even when unknown, so a lookup never comes back empty-handed.
+  const unknown = '0x' + '9'.repeat(40);
+  assert.equal(search(unknown).addresses[0].address, unknown);
+});
+
+// ---- daily rankings ----
+test('rankings digest reports missing baselines instead of inventing 0%', async () => {
+  const { daily, digest } = await import('../rankings.js');
+
+  const r = daily();
+  assert.ok(typeof r.day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.day));
+  assert.ok(r.chain.tvl > 0, 'picks up the balances seeded above');
+
+  const text = digest(r);
+  assert.match(text, /Arc ecosystem/);
+  assert.match(text, /Top by TVL/);
+  // No stored history in this run, so movers must say so rather than showing a fabricated 0%.
+  assert.match(text, /no baseline yet/);
+  assert.match(text, /haven't named yet/, 'the digest asks for help identifying unnamed contracts');
+});
+
 // ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----
 test('whalewatch: threshold filtering, drafting, and dedupe', async () => {
   const db = await import('../db.js');

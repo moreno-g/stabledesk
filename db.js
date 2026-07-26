@@ -119,6 +119,29 @@ db.exec(`
     text TEXT NOT NULL, created INTEGER NOT NULL, delivered INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS idx_drafts_delivered ON tweet_drafts(delivered);
+
+  -- Stablecoin balances held by contract addresses. On a chain where value is denominated in
+  -- stablecoins, this *is* TVL: no price oracle, no LP maths, no per-protocol adapter for the
+  -- bulk of it — just balanceOf on the assets we already index. See tvl.js and /methodology.
+  CREATE TABLE IF NOT EXISTS tvl (
+    address TEXT    NOT NULL,
+    token   TEXT    NOT NULL,
+    balance REAL    NOT NULL DEFAULT 0,
+    checked INTEGER,
+    PRIMARY KEY (address, token)
+  );
+  CREATE INDEX IF NOT EXISTS idx_tvl_balance ON tvl(balance DESC);
+
+  -- Daily TVL per protocol, for charts and the movers ranking. protocol = '*' is the chain-wide
+  -- total; one row per (day, protocol) so a re-run during the same day overwrites rather than
+  -- accumulates — unlike the buckets table, TVL is a level, not a flow.
+  CREATE TABLE IF NOT EXISTS tvl_history (
+    day      INTEGER NOT NULL,
+    protocol TEXT    NOT NULL,
+    tvl      REAL    NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, protocol)
+  );
+  CREATE INDEX IF NOT EXISTS idx_tvlh_proto ON tvl_history(protocol, day);
 `);
 
 // Migrations, safe on existing DBs:
@@ -372,6 +395,11 @@ const adstmt = {
 export function addressStats(a) { return adstmt.stats.get(a.toLowerCase()); }
 export function addressRecent(a, limit = 20) { const x = a.toLowerCase(); return adstmt.recent.all(x, x, limit); }
 
+// Prefix search for the global search box. Bound as a parameter (not interpolated), and the caller
+// validates the prefix is hex first, so the LIKE pattern can't carry a wildcard.
+const searchStmt = db.prepare('SELECT address, transfers, volume FROM addr_stats WHERE address LIKE ? ORDER BY volume DESC LIMIT ?');
+export const searchAddresses = (prefix, limit = 10) => searchStmt.all(prefix.toLowerCase() + '%', limit);
+
 // ---- per-token detail (drill-down) ----
 const tkstmt = {
   amountsAll: db.prepare('SELECT amount FROM recent'),
@@ -427,7 +455,89 @@ export const topWithMeta = (limit = 40) => emstmt.joined.all(limit);
 export const bytecodeClusters = () => emstmt.clusters.all().map((r) => ({ ...r, addresses: emstmt.byHash.all(r.code_hash).map((x) => x.address) }));
 export const knownAddressCount = () => emstmt.countKnown.get().c;
 
+// ---- TVL (stablecoin balances held by contracts — see tvl.js) ----
+const tvstmt = {
+  up: db.prepare(`INSERT INTO tvl(address, token, balance, checked) VALUES(?, ?, ?, ?)
+    ON CONFLICT(address, token) DO UPDATE SET balance = excluded.balance, checked = excluded.checked`),
+  // Non-zero only: a contract that has never held anything is not a data point worth serving.
+  nonZero: db.prepare('SELECT address, token, balance, checked FROM tvl WHERE balance > 0 ORDER BY balance DESC'),
+  forAddr: db.prepare('SELECT token, balance, checked FROM tvl WHERE address = ? AND balance > 0'),
+  // Contracts the entity deriver has already confirmed have bytecode. Balances are only ever
+  // scanned for these plus the registry's own addresses — scanning every address seen would
+  // multiply RPC cost by ~1000 for no gain, since a plain wallet's balance is not TVL.
+  contracts: db.prepare('SELECT address FROM address_meta WHERE is_contract = 1 ORDER BY address LIMIT ?'),
+  // Records only whether an address has bytecode, and never overwrites an existing row — so the
+  // TVL scanner can discover contracts on its own without clobbering anything entities.js derived.
+  markCode: db.prepare(`INSERT INTO address_meta(address, is_contract, code_size, checked) VALUES(?, ?, ?, ?)
+    ON CONFLICT(address) DO NOTHING`),
+  unchecked: db.prepare(`SELECT a.address FROM addr_stats a LEFT JOIN address_meta m ON m.address = a.address
+    WHERE m.address IS NULL ORDER BY a.volume DESC LIMIT ?`),
+  histUp: db.prepare(`INSERT INTO tvl_history(day, protocol, tvl) VALUES(?, ?, ?)
+    ON CONFLICT(day, protocol) DO UPDATE SET tvl = excluded.tvl`),
+  histSeries: db.prepare('SELECT day, tvl FROM tvl_history WHERE protocol = ? AND day >= ? ORDER BY day'),
+  histOn: db.prepare('SELECT tvl FROM tvl_history WHERE protocol = ? AND day = ?'),
+  histPrune: db.prepare('DELETE FROM tvl_history WHERE day < ?'),
+};
+
+export function upsertBalances(rows) {
+  if (!rows.length) return 0;
+  const now = Date.now();
+  db.exec('BEGIN');
+  try {
+    for (const r of rows) tvstmt.up.run(r.address, r.token, r.balance, now);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  return rows.length;
+}
+
+export const balanceRows = () => tvstmt.nonZero.all();
+export const balancesForAddress = (a) => tvstmt.forAddr.all(String(a).toLowerCase());
+export const knownContracts = (limit = 2000) => tvstmt.contracts.all(limit).map((r) => r.address);
+export const markContract = (a, isContract, codeSize) => tvstmt.markCode.run(a, isContract ? 1 : 0, codeSize || 0, Date.now());
+export const uncheckedAddresses = (limit = 40) => tvstmt.unchecked.all(limit).map((r) => r.address);
+
+// Written once per scan; the same day is overwritten rather than added to, because TVL is a level.
+export function recordTvlSnapshot(day, entries) {
+  db.exec('BEGIN');
+  try {
+    for (const e of entries) tvstmt.histUp.run(day, e.protocol, e.tvl);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+export const tvlSeries = (protocol, sinceDay) => tvstmt.histSeries.all(protocol, sinceDay);
+export const tvlOn = (protocol, day) => tvstmt.histOn.get(protocol, day)?.tvl ?? null;
+
+// Window volume for a set of addresses, from the same aggregates the rankings use. The window is
+// however much history is retained (~7d), not 24h — callers label it as such rather than implying
+// a day. Statements are cached per placeholder count; the set is chunked so the SQL stays bounded.
+const inStmts = new Map();
+export function volumeForAddresses(addrs) {
+  const list = [...new Set((addrs || []).map((a) => String(a).toLowerCase()))];
+  let volume = 0, transfers = 0, found = 0;
+  for (let i = 0; i < list.length; i += 200) {
+    const part = list.slice(i, i + 200);
+    let ps = inStmts.get(part.length);
+    if (!ps) {
+      ps = db.prepare(`SELECT COUNT(*) AS found, SUM(volume) AS volume, SUM(transfers) AS transfers
+        FROM addr_stats WHERE address IN (${part.map(() => '?').join(',')})`);
+      inStmts.set(part.length, ps);
+    }
+    const r = ps.get(...part);
+    volume += r?.volume || 0;
+    transfers += r?.transfers || 0;
+    found += r?.found || 0;
+  }
+  return { volume, transfers, addressesSeen: found };
+}
+
 export function prune(nowSec, latestBlock, blockMs) {
+  tvstmt.histPrune.run(nowSec - 180 * 86400);
   const weekBlocks = Math.round((7 * 86400 * 1000) / Math.max(200, blockMs));
   stmt.pruneBuckets.run(nowSec - 7 * 86400);
   stmt.pruneAddrs.run(latestBlock - weekBlocks);

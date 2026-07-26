@@ -11,6 +11,9 @@ This is the project's wedge: not a generic explorer (Arcscan already exists), bu
 - **Network** — current block, block time (~0.5s), throughput (tx/s), cost per transfer in USDC (~$0.0005), active addresses.
 - **Stablecoin flows** — volume + transfer count for **USDC / EURC / USYC**, measured from `Transfer` events over a rolling window; mint/burn for native USDC.
 - **Per-block activity** + **largest transfers**, in real time.
+- **Ecosystem** (`/ecosystem`) — every protocol on Arc with its **TVL**, flow, status and official links, plus
+  the contracts holding balances nobody has named yet. TVL is measured as stablecoin balances held by
+  contracts, which needs no per-protocol adapter on a chain where value is denominated in USDC.
 
 ## Run
 
@@ -52,5 +55,21 @@ npm test   # smoke tests (node:test — no network, still zero deps)
 2. ✅ **Public API** — `/v1` with API keys, free/pro tiers, rate limiting, `/docs` developer page.
 3. **Deploy** to a public URL + managed DB (Neon/Supabase); split the indexer into a worker.
 4. **Billing** via Stripe (card) + USDC on-chain (pay on Arc).
-5. ✅ **Alerts** — live in-app feed + browser watchlist + Pro webhook alerts (`/v1/alerts`). Next: token/address detail pages, exports.
-6. Utility token (phase 3, optional) — access/stake + buyback, no revenue-share.
+5. ✅ **Alerts** — live in-app feed + browser watchlist + Pro webhook alerts (`/v1/alerts`).
+6. ✅ **Ecosystem registry + TVL** — `protocols.js` (curated, contribution-based — see `PROTOCOLS.md`),
+   `tvl.js` (balance scanner + unnamed-contract discovery), `/ecosystem`, `/protocol`, global search,
+   CSV export, and `rankings.js` for the daily digest.
+7. Utility token (phase 3, optional) — access/stake + buyback, no revenue-share.
+
+### Ecosystem endpoints
+
+- `GET /api/ecosystem` — registry joined to measured TVL and flow (`?format=csv`)
+- `GET /api/ecosystem/candidates` — contracts holding balances no protocol claims (`?format=csv`)
+- `GET /api/protocol?id=…` or `?address=…` — detail, named or unattributed
+- `GET /api/search?q=…` — protocols, tokens, addresses
+- `GET /api/rankings` — daily standings + the ready-to-post digest
+- Public equivalents: `/v1/protocols`, `/v1/protocols/{id}`, `/v1/protocols/unnamed`, `/v1/tvl`,
+  `/v1/tvl/history`, `/v1/rankings`, `/v1/search`
+
+Set `TVL_ENABLED=false` to stop the balance scanner; the pages then report it as disabled rather than
+showing stale figures.
