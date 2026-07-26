@@ -91,7 +91,23 @@
   .iconbtn:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
   .iconbtn svg{width:16px; height:16px; display:block}
 
-  .kpis{display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:14px}
+  .kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:14px}
+
+  /* Positioning statement — replaces an sr-only, keyword-stuffed h1 that no visitor ever saw. */
+  .tagline{font-size:clamp(21px,3.4vw,31px); line-height:1.18; letter-spacing:-.025em; font-weight:680; margin:4px 0 8px; max-width:26ch}
+  .tagsub{font-size:14px; color:var(--ink-2); margin:0 0 18px; max-width:74ch; line-height:1.6}
+  .tagsub a{color:var(--accent); text-decoration:none; font-weight:600}
+  .tagsub a:hover{text-decoration:underline}
+  .tnwarn{color:var(--warn); font-weight:650}
+
+  /* What you can actually do here. Without this, none of it is discoverable from the landing view. */
+  .feats{display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-bottom:16px}
+  .feat{display:block; text-decoration:none; background:var(--panel); border:1px solid var(--line); border-radius:11px; padding:11px 13px; box-shadow:var(--shadow)}
+  .feat:hover{border-color:var(--accent)}
+  .feat .ft{font-size:12.5px; font-weight:670; color:var(--ink); letter-spacing:-.01em}
+  .feat .fd{font-size:10.5px; color:var(--ink-3); margin-top:3px; line-height:1.4}
+  .feat .fk{font-size:9px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--accent); margin-bottom:5px}
+  @media (max-width:900px){ .feats{grid-template-columns:repeat(2,1fr)} }
   .kpi{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:13px 14px; box-shadow:var(--shadow)}
   .kpi .lab{font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:600; margin-bottom:7px; white-space:nowrap}
   .kpi .val{font-family:var(--mono); font-size:20px; font-weight:600; letter-spacing:-.01em; font-variant-numeric:tabular-nums}
@@ -215,7 +231,6 @@
 </head>
 <body>
 <div class="shell">
-  <h1 class="sr-only">Stabledesk — live stablecoin analytics terminal and data API for the {{NET}} (Circle L1): USDC, EURC and USYC volume, supply, velocity and flows.</h1>
   <div class="top">
     <div class="brand">
       <div class="logo"></div>
@@ -228,7 +243,46 @@
     <button class="iconbtn" id="themeBtn" type="button" title="Toggle theme" aria-label="Toggle light / dark theme"></button>
   </div>
 
+  <!-- The h1 was previously sr-only and keyword-stuffed: a visitor arriving from a link had no
+       statement of what this is, and a hidden keyword sentence is worth nothing to a crawler
+       either. One short visible line does both jobs. -->
+  <h1 class="tagline">Every stablecoin on Arc, measured in real time.</h1>
+  <p class="tagsub">USDC, EURC and USYC on Circle's L1 — supply, real volume, TVL and flows, measured from chain
+  data with a <a href="/methodology">published method</a>. Free <a href="/docs">API</a> and
+  <a href="/docs">webhook alerts</a>.<!--testnet-only--> <b class="tnwarn">Figures below are {{NET}} — faucet money, not real value.</b><!--/testnet-only--></p>
+
   <div class="kpis" id="kpis"></div>
+
+  <!-- Answers the ten-second test: a visitor arriving from a link should see, without scrolling,
+       that there is an API, alerts, whale tracking, protocol pages and webhooks. Static links, so
+       they are in the markup for crawlers too. -->
+  <nav class="feats" aria-label="What you can do here">
+    <a class="feat" href="/ecosystem">
+      <div class="fk">Ecosystem</div>
+      <div class="ft">Every protocol on Arc</div>
+      <div class="fd">TVL, flow and status per protocol</div>
+    </a>
+    <a class="feat" href="/docs">
+      <div class="fk">API</div>
+      <div class="ft">Free REST API</div>
+      <div class="fd">Free key, 60 req/min, no signup</div>
+    </a>
+    <a class="feat" href="#alerts">
+      <div class="fk">Alerts</div>
+      <div class="ft">Watch any address</div>
+      <div class="fd">Live feed + browser watchlist</div>
+    </a>
+    <a class="feat" href="/docs">
+      <div class="fk">Webhooks</div>
+      <div class="ft">Push to Discord or Slack</div>
+      <div class="fd">Fires when a transfer matches</div>
+    </a>
+    <a class="feat" href="#whales">
+      <div class="fk">Whales</div>
+      <div class="ft">Largest transfers, live</div>
+      <div class="fd">Every big move as it lands</div>
+    </a>
+  </nav>
 
   <div class="grid">
     <div class="card">
@@ -275,7 +329,7 @@
     </div>
   </div>
 
-  <div class="grid">
+  <div class="grid" id="whales">
     <div class="card">
       <h2>Largest transfers</h2>
       <p class="cap">Biggest recent stablecoin transfers indexed.</p>
@@ -306,7 +360,7 @@
     </div>
   </div>
 
-  <div class="grid">
+  <div class="grid" id="alerts">
     <div class="card">
       <h2>Live alerts</h2>
       <p class="cap">Notable stablecoin transfers, mints &amp; burns as they're indexed (≥ 1K).</p>
@@ -345,6 +399,7 @@ const money = (n,d=0)=> (n==null||isNaN(n))?'—':nf.format(Number(n.toFixed(d))
 function compact(n){
   if(n==null||isNaN(n)) return '—';
   const a=Math.abs(n);
+  if(a>=1e12) return (n/1e12).toFixed(2)+'T';
   if(a>=1e9) return (n/1e9).toFixed(2)+'B';
   if(a>=1e6) return (n/1e6).toFixed(2)+'M';
   if(a>=1e3) return (n/1e3).toFixed(1)+'K';
@@ -373,13 +428,14 @@ function renderState(d){
   $('#epLine').textContent=(d.endpoint||'').replace('https://','');
 
   const n=d.network, s=d.summary24h||{byToken:{},volume:0,transfers:0};
+  // Money first. The chain-plumbing figures (block time, throughput, gas) are real and still on the
+  // page below — but they answer "is this chain fast", and a first-time visitor is asking "is there
+  // anything here". Four tiles, because six stops being a glance.
   const kpis=[
-    ['Current block','#'+nf.format(n.block),''],
-    ['Block time',money(n.blockTimeMs,0),'ms'],
-    ['Throughput',money(n.tps,1),'tx/s'],
-    ['Avg fee / tx', d.fees&&d.fees.perTx!=null ? '$'+d.fees.perTx.toFixed(5) : '—',''],
-    ['Active addr · 1h',compact(d.activeAddresses1h),''],
+    ['Total stable supply',compact(d.totalSupply),'USDC+EURC+USYC'],
+    ['TVL',compact(d.tvl),'held by contracts'],
     ['24h volume',compact(s.rvolume),'real'],
+    ['Active addresses · 1h',compact(d.activeAddresses1h),''],
   ].map(([l,v,u])=>`<div class="kpi"><div class="lab">${l}</div><div class="val">${v}<span class="unit">${u}</span></div></div>`).join('');
   $('#kpis').innerHTML=kpis;
 
@@ -387,9 +443,9 @@ function renderState(d){
   $('#stbl').innerHTML = TOK.map(sym=>{
     const v=sup[sym]||{supply:0,volShare:0,velocity:0,rvolume24h:0};
     const share=(v.volShare*100);
-    const vel = v.velocity ? (v.velocity<1? v.velocity.toFixed(3):v.velocity.toFixed(1))+'×' : '—';
+    const vel = v.velocity ? (v.velocity<0.001 ? '<0.001×' : (v.velocity<1? v.velocity.toFixed(3):v.velocity.toFixed(1))+'×') : '—';
     return `<tr class="${sym.toLowerCase()}">
-      <td><a class="sy" href="/token?token=${sym}" style="color:inherit;text-decoration:none" title="${sym} detail →"><i></i>${sym}</a></td>
+      <td><a class="sy" href="/token/${sym.toLowerCase()}" style="color:inherit;text-decoration:none" title="${sym} detail →"><i></i>${sym}</a></td>
       <td>${compact(v.supply)}</td>
       <td>${compact(v.rvolume24h)}</td>
       <td class="sharecell">${share.toFixed(0)}%<div class="sharebar"><span style="width:${Math.min(100,share).toFixed(0)}%"></span></div></td>
