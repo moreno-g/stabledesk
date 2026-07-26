@@ -143,6 +143,13 @@
     <div class="ep"><span class="m">GET</span><span>/v1/stablecoins</span><span class="d">Supply, dominance, 24h summary</span></div>
     <div class="ep"><span class="m">GET</span><span>/v1/stablecoins/history</span><span class="d"><code>?token=USDC&range=24h</code> time series</span></div>
     <div class="ep"><span class="m">GET</span><span>/v1/stablecoins/{token}</span><span class="d">Per-token detail + size distribution</span></div>
+    <div class="ep"><span class="m">GET</span><span>/v1/protocols</span><span class="d">Registry + TVL + flow per protocol · <code>?format=csv</code></span></div>
+    <div class="ep"><span class="m">GET</span><span>/v1/protocols/{id}</span><span class="d">One protocol, with its per-contract breakdown</span></div>
+    <div class="ep"><span class="m">GET</span><span>/v1/protocols/unnamed</span><span class="d">Contracts holding balances no protocol claims · <code>?format=csv</code></span></div>
+    <div class="ep"><span class="m">GET</span><span>/v1/tvl</span><span class="d">Chain TVL, by token and by protocol</span></div>
+    <div class="ep"><span class="m">GET</span><span>/v1/tvl/history</span><span class="d"><code>?protocol=id&days=30</code> daily TVL · <code>?format=csv</code></span></div>
+    <div class="ep"><span class="m">GET</span><span>/v1/rankings</span><span class="d">Daily standings + the ready-to-post digest</span></div>
+    <div class="ep"><span class="m">GET</span><span>/v1/search</span><span class="d"><code>?q=</code> protocols, tokens and addresses</span></div>
     <div class="ep"><span class="m">GET</span><span>/v1/addresses/top</span><span class="d"><code>?limit=20</code> top by volume</span></div>
     <div class="ep"><span class="m">GET</span><span>/v1/transfers/largest</span><span class="d"><code>?limit=20</code> biggest transfers</span></div>
     <div class="ep"><span class="m">GET</span><span>/v1/address/{addr}</span><span class="d">Stats + recent transfers for an address</span></div>
@@ -177,6 +184,7 @@ curl -X DELETE https://stabledesk.xyz/v1/alerts/1 \
       <div class="sf-brand"><span class="sf-logo"></span> Stabledesk</div>
       <nav class="sf-links">
         <a href="/">Terminal</a>
+        <a href="/ecosystem">Ecosystem</a>
         <a href="/docs">API</a>
         <a href="/methodology">Methodology</a>
         <a href="/status">Status</a>
