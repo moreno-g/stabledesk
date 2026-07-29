@@ -196,7 +196,7 @@
 <script>
 const $=(s)=>document.querySelector(s);
 const nf=new Intl.NumberFormat('en-US');
-const TOK=['USDC','EURC','USYC'];
+const TOK={{TOKENS_JSON}};
 const TCOLOR={USDC:'--usdc',EURC:'--eurc',USYC:'--usyc'};
 const short=(a)=>a?a.slice(0,6)+'…'+a.slice(-4):'—';
 const esc=(s)=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
