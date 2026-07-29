@@ -45,9 +45,17 @@ const assetCache = new Map();
 // Applied once at load time, so the cached buffer, its gzip and its ETag all already reflect
 // the active network. Nothing is templated per request.
 function applyNetwork(html) {
+  // The tracked assets differ per network (USYC exists on testnet but not on mainnet), so the
+  // token list is substituted rather than written out — a hardcoded symbol would render an
+  // empty tab and an empty row on whichever network doesn't have it.
+  const symbols = [...new Set(Object.values(CHAIN.tokens).map((t) => t.symbol))];
   const out = html
     .replaceAll('{{NET}}', CHAIN.label)
-    .replaceAll('{{CHAIN_ID}}', String(CHAIN.chainId));
+    .replaceAll('{{CHAIN_ID}}', String(CHAIN.chainId))
+    .replaceAll('{{TOKENS_JSON}}', JSON.stringify(symbols))
+    .replaceAll('{{TOKENS_PLUS}}', symbols.join('+'))
+    .replaceAll('{{TOKENS_SLASH}}', symbols.join(' / '))
+    .replaceAll('{{TOKENS}}', symbols.join(', '));
   return CHAIN.isTestnet ? out : out.replace(/<!--testnet-only-->[\s\S]*?<!--\/testnet-only-->/g, '');
 }
 
