@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stabledesk · Stablecoin Terminal</title>
-<meta name="description" content="Live stablecoin analytics terminal for the {{NET}} (Circle L1) — USDC, EURC & USYC real volume, supply, velocity, flows, plus a developer data API.">
+<meta name="description" content="Live stablecoin analytics terminal for the {{NET}} (Circle L1) — {{TOKENS}} real volume, supply, velocity, flows, plus a developer data API.">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Stabledesk">
 <meta property="og:title" content="Stabledesk · Stablecoin Terminal">
@@ -22,7 +22,7 @@
 <meta property="og:image:alt" content="Stabledesk — stablecoin analytics terminal for the {{NET}}">
 <meta property="og:locale" content="en_US">
 <link rel="canonical" href="https://stabledesk.xyz/">
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","@id":"https://stabledesk.xyz/#org","name":"Stabledesk","url":"https://stabledesk.xyz/","logo":"https://stabledesk.xyz/og.png","sameAs":["https://x.com/getStabledesk"]},{"@type":"WebSite","@id":"https://stabledesk.xyz/#website","url":"https://stabledesk.xyz/","name":"Stabledesk","publisher":{"@id":"https://stabledesk.xyz/#org"}},{"@type":"WebApplication","name":"Stabledesk","url":"https://stabledesk.xyz/","applicationCategory":"FinanceApplication","operatingSystem":"Web","description":"Live stablecoin analytics terminal and data API for the {{NET}} (USDC, EURC, USYC).","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"publisher":{"@id":"https://stabledesk.xyz/#org"}}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","@id":"https://stabledesk.xyz/#org","name":"Stabledesk","url":"https://stabledesk.xyz/","logo":"https://stabledesk.xyz/og.png","sameAs":["https://x.com/getStabledesk"]},{"@type":"WebSite","@id":"https://stabledesk.xyz/#website","url":"https://stabledesk.xyz/","name":"Stabledesk","publisher":{"@id":"https://stabledesk.xyz/#org"}},{"@type":"WebApplication","name":"Stabledesk","url":"https://stabledesk.xyz/","applicationCategory":"FinanceApplication","operatingSystem":"Web","description":"Live stablecoin analytics terminal and data API for the {{NET}} ({{TOKENS}}).","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"publisher":{"@id":"https://stabledesk.xyz/#org"}}]}</script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%230FA79E'/%3E%3Cstop offset='.5' stop-color='%2325C4B8'/%3E%3Cstop offset='1' stop-color='%239B7EDE'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M22 10L10 10L10 22L22 22' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round' transform='rotate(-45 16 16)'/%3E%3C/svg%3E">
 <style>
   :root{
@@ -247,7 +247,7 @@
        statement of what this is, and a hidden keyword sentence is worth nothing to a crawler
        either. One short visible line does both jobs. -->
   <h1 class="tagline">Every stablecoin on Arc, measured in real time.</h1>
-  <p class="tagsub">USDC, EURC and USYC on Circle's L1 — supply, real volume, TVL and flows, measured from chain
+  <p class="tagsub">{{TOKENS}} on Circle's L1 — supply, real volume, TVL and flows, measured from chain
   data with a <a href="/methodology">published method</a>. Free <a href="/docs">API</a> and
   <a href="/docs">webhook alerts</a>.<!--testnet-only--> <b class="tnwarn">Figures below are {{NET}} — faucet money, not real value.</b><!--/testnet-only--></p>
 
@@ -296,9 +296,6 @@
           </div>
           <div class="seg" id="tokenSeg">
             <button data-tok="ALL" class="on">All</button>
-            <button data-tok="USDC">USDC</button>
-            <button data-tok="EURC">EURC</button>
-            <button data-tok="USYC">USYC</button>
           </div>
           <div class="seg" id="rangeSeg">
             <button data-rng="1h">1h</button>
@@ -322,7 +319,7 @@
 
     <div class="card">
       <h2>Stablecoins</h2>
-      <p class="cap">Supply, 24h real volume, share &amp; velocity. Testnet supply is inflated by faucet mints.</p>
+      <p class="cap">Supply, 24h real volume, share &amp; velocity.<!--testnet-only--> Testnet supply is inflated by faucet mints.<!--/testnet-only--></p>
       <table class="stbl"><thead><tr><th>Asset</th><th>Supply</th><th>24h vol</th><th>Share</th><th>Vel.</th></tr></thead>
         <tbody id="stbl"></tbody></table>
       <div class="cov" id="coverage"></div>
@@ -386,7 +383,7 @@
         <a href="https://x.com/getStabledesk">@getStabledesk</a>
       </nav>
     </div>
-    <div class="sf-legal">Live {{NET}} data · public RPC <span id="epLine">rpc.testnet.arc.io</span> · stablecoin volumes from <code>Transfer</code> events (USDC / EURC / USYC) · © 2026 Stabledesk · Prototype v0 — read-only · not investment advice.</div>
+    <div class="sf-legal">Live {{NET}} data · public RPC <span id="epLine">…</span> · stablecoin volumes from <code>Transfer</code> events ({{TOKENS_SLASH}}) · © 2026 Stabledesk · Prototype v0 — read-only · not investment advice.</div>
   </footer>
 </div>
 
@@ -412,7 +409,7 @@ const WKEY='arc-watch';
 const getWatch=()=>{ try{return JSON.parse(localStorage.getItem(WKEY)||'[]')}catch{return[]} };
 const isWatched=(a)=> a? getWatch().includes(a.toLowerCase()) : false;
 function toggleWatch(a){ a=a.toLowerCase(); let w=getWatch(); w=w.includes(a)?w.filter(x=>x!==a):[...w,a]; localStorage.setItem(WKEY,JSON.stringify(w)); renderWatch(); poll(); }
-const TOK=['USDC','EURC','USYC'];
+const TOK={{TOKENS_JSON}};
 const TCOLOR={ALL:'--accent',USDC:'--usdc',EURC:'--eurc',USYC:'--usyc'};
 
 let chart = { token:'ALL', range:'24h', metric:'real' };
@@ -432,7 +429,7 @@ function renderState(d){
   // page below — but they answer "is this chain fast", and a first-time visitor is asking "is there
   // anything here". Four tiles, because six stops being a glance.
   const kpis=[
-    ['Total stable supply',compact(d.totalSupply),'USDC+EURC+USYC'],
+    ['Total stable supply',compact(d.totalSupply),'{{TOKENS_PLUS}}'],
     ['TVL',compact(d.tvl),'held by contracts'],
     ['24h volume',compact(s.rvolume),'real'],
     ['Active addresses · 1h',compact(d.activeAddresses1h),''],
@@ -591,6 +588,9 @@ $('#tokenSeg').addEventListener('click',e=>{ const b=e.target.closest('button');
   $('#chartTitle').textContent = chart.token==='ALL'?'Transfer volume':chart.token+' transfer volume'; loadChart(); });
 $('#rangeSeg').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
   chart.range=b.dataset.rng; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b)); loadChart(); });
+
+// Token tabs follow the network's actual asset list — see applyNetwork() in server.js.
+$('#tokenSeg').insertAdjacentHTML('beforeend', TOK.map(t=>`<button data-tok="${t}">${t}</button>`).join(''));
 
 poll(); loadChart(); loadAlerts(); renderWatch();
 setInterval(poll,5000);
