@@ -1,0 +1,22 @@
+# ═══════════════════════════════════════════════════════════
+#  Config gitleaks pour stabledesk
+# ═══════════════════════════════════════════════════════════
+
+[extend]
+# Repart du jeu de règles complet, on ne fait qu'ajouter une exception.
+useDefault = true
+
+[allowlist]
+description = "Faux positif sur un commentaire de code"
+
+# generic-api-key déclenche sur ce commentaire d'api.js :
+#   // per-token detail: supply/velocity + 24h summary + ...
+# Le mot « token » sert d'amorce à la règle, et « supply/velocity »
+# a juste assez d'entropie pour passer le seuil. C'est de la prose.
+#
+# Ancré sur le texte plutôt que sur un numéro de ligne : un
+# .gitleaksignore par empreinte casserait au premier ajout de
+# ligne au-dessus.
+regexes = [
+    '''supply/velocity''',
+]
