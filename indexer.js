@@ -639,7 +639,30 @@ function degrade(err) {
   if (live.snapshot.ok) live.snapshot.lastError = err;
 }
 
-async function tick() {
+// setInterval does not wait for an async callback — it fires again on schedule whether or not the
+// previous call has returned. In steady state a tick closes a gap of a few blocks in well under
+// POLL_MS, so this never showed. It shows when a tick has a *long* gap to close: the chain coming
+// back after a multi-day outage with no restart in between, which is precisely the four-day 401
+// this codebase now knows how to survive. That tick runs for twenty minutes while the timer keeps
+// launching fresh ones on top of it, each reading the checkpoint anew and re-indexing ranges the
+// others are still working through.
+//
+// Overlapping ranges are not harmless, because applyBatch is additive (`volume = volume +
+// excluded.volume`): the same transfers are counted twice. Silent, and it inflates the headline
+// number — the worst shape a bug can take in a product whose claim is that its figures are read
+// off the chain.
+export function nonReentrant(fn) {
+  let running = false;
+  return async (...args) => {
+    // A skipped call is the normal state while catching up, so it is deliberately not logged:
+    // hundreds of "skipped" lines would bury the backfill progress they are printed next to.
+    if (running) return false;
+    running = true;
+    try { await fn(...args); return true; } finally { running = false; }
+  };
+}
+
+async function tickOnce() {
   let latest, gasWei;
   // The head fetch is its own step so a failure here can be attributed to the chain, while a
   // failure below is ours. Reporting an upstream outage as an indexer fault is what made the
@@ -701,6 +724,10 @@ async function tick() {
     console.error('[tick]', e.message || e);
   }
 }
+
+// What the timer and start() actually call. Never invoke tickOnce directly — the guard is the
+// only thing standing between a long catch-up and double-counted volume.
+const tick = nonReentrant(tickOnce);
 
 let timer = null;
 
