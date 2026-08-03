@@ -609,6 +609,37 @@ test('a slow tick is never re-entered while it is still running', async () => {
   await assert.rejects(boom(), /rpc exploded/, 'still callable after a failure — the guard was released');
 });
 
+// ---- catch-up progress (indexer.js) ----
+// The snapshot is only rebuilt when a tick completes, so during a long replay every figure derived
+// from it is frozen at the last completed pass. Before this existed, "replaying 830k blocks" and
+// "hung" were the same reading from outside — the one distinction a health endpoint is for.
+test('catch-up progress is reported from the live checkpoint, not the snapshot', async () => {
+  const { progressFrom } = await import('../indexer.js');
+
+  const mid = progressFrom(54_301_397, 55_131_311, 500);
+  assert.equal(mid.behind, 829_914);
+  assert.ok(mid.catchingUp, 'a multi-day gap is replaying history, not trailing the head');
+
+  // Ordinary lag: a few blocks behind is what steady state looks like, and calling it a catch-up
+  // would put the status page in a permanent state of alarm.
+  const steady = progressFrom(55_131_300, 55_131_311, 500);
+  assert.equal(steady.behind, 11);
+  assert.equal(steady.catchingUp, false);
+
+  assert.equal(progressFrom(55_131_311, 55_131_311, 500).behind, 0, 'caught up is 0, not null');
+
+  // A checkpoint past the head (the head reading is older than the last write) is clamped rather
+  // than reported as negative blocks remaining.
+  assert.equal(progressFrom(55_131_400, 55_131_311, 500).behind, 0);
+
+  // Nothing known yields null, never 0 — "caught up" and "no idea" must not render alike.
+  for (const [cp, head] of [[null, 55_131_311], [54_301_397, null], [null, null]]) {
+    const p = progressFrom(cp, head, 500);
+    assert.equal(p.behind, null);
+    assert.equal(p.catchingUp, false, 'an unknown gap is not a catch-up claim');
+  }
+});
+
 // ---- the availability record (chainuptime.js) ----
 // Every assertion here is really the same one: time we did not observe must never be published as
 // chain uptime. That is the only way this feature can lie, and it would lie in our favour, which
