@@ -17,6 +17,11 @@ export const TOKEN_SYMBOLS = new Set(Object.values(CHAIN.tokens).map((t) => t.sy
 export const TOKEN_LIST = [...TOKEN_SYMBOLS].join(', ');
 export const ADDR_RE = /^0x[0-9a-f]{40}$/;
 
+// The public origin, stated once. Three generated documents — sitemap.xml, openapi.json and
+// llms.txt — have to name it in absolute form, and three copies of a hostname is three chances
+// for one of them to keep pointing at an old one.
+export const SITE_ORIGIN = process.env.SITE_ORIGIN || 'https://stabledesk.xyz';
+
 // Transfer-size brackets for the "transaction size distribution" (Visa / Allium style).
 export const SIZE_BRACKETS = [
   { label: '<100', min: 0, max: 100 },

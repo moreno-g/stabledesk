@@ -42,6 +42,8 @@ indexing forward and serves:
 - `GET /api/history?token=ALL|USDC|EURC|USYC&range=1h|24h|7d` — time series (volume, count, mint, burn)
 - `GET /api/top?limit=N` — top addresses by volume
 - `GET /api/health` — status: indexer health *and* chain liveness, reported separately
+- `GET /openapi.json` — OpenAPI 3.1 description of the whole `/v1` surface
+- `GET /llms.txt` — short index of the site and its data, for language models and agents
 
 State (SQLite) is written to `arc.db` (gitignored). Delete it to re-index from scratch.
 
@@ -73,9 +75,17 @@ remedies, so they are tracked and reported as two separate things.
   (`windowEnd`) rather than at now — a trailing-24h-from-now window on a halted chain would
   report "24h volume: 0" and state the chain sat idle when in fact it stopped.
 
+### Machine-readable surfaces
+
+`/openapi.json` and `/llms.txt` are **generated from the live configuration**, for the same reason
+`sitemap.xml` is: a hand-maintained document is a hand-maintained omission, and the parts most
+likely to rot — the tracked token symbols, the chain id, the per-tier rate limits — are exactly the
+parts that differ per network. A smoke test reads the routes back out of `api.js` and fails if the
+API serves something the spec doesn't describe, or describes something it doesn't serve.
+
 ### How it works
 
-- **Modules**: `rpc.js` (RPC + chain constants) · `db.js` (SQLite schema + queries) · `indexer.js` (backfill + live loop + snapshot) · `server.js` (HTTP + API).
+- **Modules**: `rpc.js` (RPC + chain constants) · `db.js` (SQLite schema + queries) · `indexer.js` (backfill + live loop + snapshot) · `server.js` (HTTP + API) · `openapi.js` (generated spec + `llms.txt`).
 - **Trick**: blocks are ~0.5s with no reorgs, so a transfer's timestamp is derived from its block number against a rolling anchor — the indexer only needs `eth_getLogs`, sparing the rate-limited public RPC.
 
 ## Networks

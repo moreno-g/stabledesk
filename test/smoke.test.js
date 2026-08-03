@@ -467,6 +467,61 @@ test('rankings digest reports missing baselines instead of inventing 0%', async 
   assert.match(text, /haven't named yet/, 'the digest asks for help identifying unnamed contracts');
 });
 
+// ---- the machine-readable surfaces (openapi.js) ----
+// The spec is generated so it can't be forgotten, but "generated" only guarantees it is *built* —
+// not that it still describes the API. The drift that matters is a route added to api.js and never
+// described, so that is what this asserts, by reading the routes out of the source rather than
+// from a list someone has to remember to update.
+test('the OpenAPI spec describes every route the API actually serves', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { spec, llmsTxt } = await import('../openapi.js');
+  const doc = spec();
+
+  const src = await readFile(new URL('../api.js', import.meta.url), 'utf8');
+  const literal = [...src.matchAll(/path === '(\/v1[^']*)'/g)].map((m) => m[1]);
+  const prefixes = [...src.matchAll(/path\.startsWith\('(\/v1[^']*)'\)/g)].map((m) => m[1]);
+  const described = Object.keys(doc.paths);
+
+  for (const route of literal) {
+    assert.ok(described.includes(route), `${route} is served but not described in the spec`);
+  }
+  // Prefix routes appear templated ("/v1/address/{address}"), so they match by their stem.
+  for (const stem of prefixes) {
+    assert.ok(
+      described.some((p) => p.startsWith(stem) && p.includes('{')),
+      `${stem}… is served but has no templated path in the spec`,
+    );
+  }
+  // And the reverse: nothing described that isn't served, or the spec invents an endpoint.
+  for (const p of described) {
+    const served = literal.includes(p) || (p.includes('{') && prefixes.some((s) => p.startsWith(s)));
+    assert.ok(served, `${p} is described in the spec but no route serves it`);
+  }
+
+  // A dangling $ref makes the document unusable to every consumer that resolves them.
+  const refs = [];
+  (function walk(node) {
+    if (!node || typeof node !== 'object') return;
+    if (typeof node.$ref === 'string') refs.push(node.$ref);
+    for (const v of Object.values(node)) walk(v);
+  })(doc);
+  assert.ok(refs.length > 0);
+  for (const ref of refs) {
+    const target = ref.replace(/^#\//, '').split('/').reduce((o, k) => o?.[k], doc);
+    assert.notEqual(target, undefined, `dangling $ref: ${ref}`);
+  }
+
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(doc)), 'the spec must serialise');
+
+  // Both documents are network-derived on purpose: a hardcoded token list would render USYC on a
+  // network that doesn't carry it, which is the failure the generation exists to prevent.
+  const tokens = [...TOKEN_SYMBOLS];
+  const tokenEnum = doc.paths['/v1/stablecoins/{token}'].get.parameters[0].schema.enum;
+  assert.deepEqual(tokenEnum, tokens, 'the token enum must come from the active network profile');
+  assert.match(llmsTxt(), new RegExp(tokens.join(', ')), 'llms.txt states the tracked assets');
+  assert.match(llmsTxt(), /openapi\.json/, 'llms.txt points an agent at the spec');
+});
+
 // ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----
 test('whalewatch: threshold filtering, drafting, and dedupe', async () => {
   const db = await import('../db.js');
