@@ -527,6 +527,42 @@ test('a chain-state change is announced once, with the blame pointed the right w
     'recovery has its own budget');
 });
 
+// ---- overlapping ticks (indexer.js) ----
+// setInterval fires on schedule regardless of whether the previous async callback has returned, so
+// a tick with a multi-day gap to close gets re-entered every POLL_MS while it works. The damage is
+// not wasted requests: applyBatch adds to the existing bucket, so two passes over the same range
+// count the same transfers twice and silently inflate the headline volume.
+test('a slow tick is never re-entered while it is still running', async () => {
+  const { nonReentrant } = await import('../indexer.js');
+
+  let started = 0, finished = 0;
+  const slow = nonReentrant(async () => {
+    started++;
+    await new Promise((r) => setTimeout(r, 40));
+    finished++;
+  });
+
+  // One long call, with several timer firings landing on top of it.
+  const first = slow();
+  const during = await Promise.all([slow(), slow(), slow()]);
+  assert.deepEqual(during, [false, false, false], 'calls arriving mid-run are refused, not queued');
+  assert.equal(started, 1, 'the body runs once, however many times the timer fires');
+
+  assert.equal(await first, true, 'the call that did run reports that it ran');
+  assert.equal(finished, 1);
+
+  // And the guard clears afterwards — a lock that leaked would freeze the indexer permanently,
+  // which is a worse failure than the one being fixed.
+  assert.equal(await slow(), true, 'the next tick after completion runs normally');
+  assert.equal(started, 2);
+
+  // A throwing tick must release the guard too. tickOnce catches its own errors today, but a lock
+  // that depends on the body never throwing is a lock waiting to deadlock.
+  const boom = nonReentrant(async () => { throw new Error('rpc exploded'); });
+  await assert.rejects(boom(), /rpc exploded/);
+  await assert.rejects(boom(), /rpc exploded/, 'still callable after a failure — the guard was released');
+});
+
 // ---- the availability record (chainuptime.js) ----
 // Every assertion here is really the same one: time we did not observe must never be published as
 // chain uptime. That is the only way this feature can lie, and it would lie in our favour, which
