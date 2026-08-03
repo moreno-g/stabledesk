@@ -199,6 +199,30 @@ test('fee sampling and the address noise filter', async () => {
   assert.equal(fs.txs, 10);
 });
 
+// ---- chain liveness ----
+test('a stopped chain is told apart from a stopped indexer', async () => {
+  const { chainStateFrom } = await import('../indexer.js');
+  const { CHAIN_HALT_MS } = await import('../constants.js');
+
+  // First contact: nothing to compare against, so no halt can be claimed.
+  assert.equal(chainStateFrom(null, 100, 0), 'live', 'a first reading is never a halt');
+
+  // The head moving is the whole signal.
+  assert.equal(chainStateFrom(100, 101, 0), 'live');
+  assert.equal(chainStateFrom(100, 100_000, 10 * CHAIN_HALT_MS), 'live', 'a jump forward clears any stall');
+
+  // A head that has not moved is only a halt once it has stood still longer than a block could
+  // plausibly take. Polling between blocks must not be reported as the chain stopping.
+  assert.equal(chainStateFrom(100, 100, 1000), 'live', 'a moment between blocks is not a halt');
+  assert.equal(chainStateFrom(100, 100, CHAIN_HALT_MS), 'live', 'the threshold itself is not yet a halt');
+  assert.equal(chainStateFrom(100, 100, CHAIN_HALT_MS + 1), 'halted');
+
+  // A reorg-free chain shouldn't go backwards, but if an endpoint serves a stale head we treat it
+  // as "not advancing" rather than trusting it — the same rule, no special case.
+  assert.equal(chainStateFrom(100, 99, CHAIN_HALT_MS + 1), 'halted', 'a backwards head is not progress');
+  assert.equal(chainStateFrom(100, 99, 1000), 'live', 'but still needs the dwell time before it counts');
+});
+
 // ---- network switch (testnet / mainnet) ----
 test('network profile: token parsing and mainnet fail-fast', async () => {
   const { parseTokens, CHAIN, NETWORK } = await import('../chains.js');

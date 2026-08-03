@@ -29,13 +29,31 @@ No install (Node ≥ 20, native `fetch` + native `node:sqlite`). On first run th
 - `GET /api/state` — live snapshot: network stats, 24h summary, top addresses, largest transfers ← **seed of the monetizable API**
 - `GET /api/history?token=ALL|USDC|EURC|USYC&range=1h|24h|7d` — time series (volume, count, mint, burn)
 - `GET /api/top?limit=N` — top addresses by volume
-- `GET /api/health` — status
+- `GET /api/health` — status: indexer health *and* chain liveness, reported separately
 
 State (SQLite) is written to `arc.db` (gitignored). Delete it to re-index from scratch.
 
 ```bash
 npm test   # smoke tests (node:test — no network, still zero deps)
 ```
+
+### When the chain stops
+
+Arc halting and Stabledesk breaking have the same symptom — nothing updates — and opposite
+remedies, so they are tracked and reported as two separate things.
+
+- **Chain state** comes from head advancement: `live`, `halted` (the RPC answers but the head has
+  not moved for `CHAIN_HALT_MS`), or `unreachable` (no endpoint answered). Published on
+  `/api/health`, `/api/state` and `/v1/status` as `chain`.
+- **Degraded mode**: whenever the chain can't be read, the snapshot is rebuilt from SQLite alone
+  and served with `degraded: true`. The terminal keeps showing indexed history — volumes, top
+  addresses, largest transfers, fee economics — labelled with when it was measured, instead of
+  going blank. Only a genuinely empty database reports `booting`.
+- **Live-only figures go null, never stale**: block time, throughput and gas price are absent
+  rather than carried over, because an old number displayed as current is a wrong number.
+- **Rolling windows re-anchor**: frozen, the 24h windows end at the last indexed minute
+  (`windowEnd`) rather than at now — a trailing-24h-from-now window on a halted chain would
+  report "24h volume: 0" and state the chain sat idle when in fact it stopped.
 
 ### How it works
 

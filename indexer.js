@@ -4,7 +4,7 @@
 import { rpc, net, hex, topicAddr, toUnits, TOKENS, TOKEN_ADDRS, TRANSFER_TOPIC, ZERO } from './rpc.js';
 import * as db from './db.js';
 import { getLabel } from './labels.js';
-import { NOISE_FILTER, FEE_SAMPLE } from './constants.js';
+import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS } from './constants.js';
 import { CHAIN } from './chains.js';
 
 const TOTAL_SUPPLY = '0x18160ddd'; // ERC-20 totalSupply() selector
@@ -40,6 +40,51 @@ let noisyAt = 0;
 const NOISY_TTL = 60000;
 
 export const live = { snapshot: { ok: false, booting: true } };
+
+// Chain liveness, tracked separately from indexer health. From a single failed poll the two are
+// indistinguishable, and collapsing them makes an upstream outage read as our bug — the terminal
+// says "offline" when the code is fine and the chain simply stopped producing blocks.
+//   live        — the head is advancing
+//   halted      — the RPC answers, but the head hasn't moved for CHAIN_HALT_MS
+//   unreachable — no endpoint answered at all
+export const chain = { state: 'unknown', head: null, headAt: 0, lastOkAt: 0, lastError: null };
+
+// Pure: the head-advancement rule on its own. A head that has not moved is only evidence of a
+// halt once it has stood still longer than a block could plausibly take — below that threshold
+// the honest reading is that the chain is fine and we polled between blocks.
+export function chainStateFrom(prevHead, latest, sinceHeadMs, haltMs = CHAIN_HALT_MS) {
+  if (prevHead == null || latest > prevHead) return 'live';
+  return sinceHeadMs > haltMs ? 'halted' : 'live';
+}
+
+function noteHead(latest) {
+  const now = Date.now();
+  chain.lastOkAt = now;
+  chain.lastError = null;
+  const advanced = chain.head == null || latest > chain.head;
+  chain.state = chainStateFrom(chain.head, latest, now - chain.headAt);
+  if (advanced) { chain.head = latest; chain.headAt = now; }
+  return chain.state;
+}
+
+function noteRpcFailure(err) {
+  chain.state = 'unreachable';
+  chain.lastError = String(err?.message || err);
+}
+
+// What the API and the pages report about the chain, with the "how long" the UI needs to say
+// something specific ("no new block for 4 min") instead of a bare status word.
+export function chainStatus() {
+  return {
+    state: chain.state,
+    head: chain.head,
+    // How long the head has been frozen. Null while live, so a caller can't render "stalled for
+    // 0s" on a healthy chain.
+    stalledMs: chain.state === 'live' || !chain.headAt ? null : Date.now() - chain.headAt,
+    lastContactMs: chain.lastOkAt ? Date.now() - chain.lastOkAt : null,
+    lastError: chain.lastError,
+  };
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const range = (a, b) => { const o = []; for (let n = a; n <= b; n++) o.push(n); return o; };
@@ -214,7 +259,26 @@ async function refreshSupplies() {
   const { out } = await rpc(entries.map(([addr]) => ({ method: 'eth_call', params: [{ to: addr, data: TOTAL_SUPPLY }, 'latest'] })));
   const s = {};
   entries.forEach(([, meta], i) => { try { s[meta.symbol] = Number(BigInt(out[i])) / 10 ** meta.decimals; } catch {} });
-  if (Object.keys(s).length) { supplies = s; suppliesAt = Date.now(); }
+  if (Object.keys(s).length) {
+    supplies = s;
+    suppliesAt = Date.now();
+    // Persisted so a restart while the chain is unreachable can still report supply — it is the
+    // headline figure, and totalSupply moves slowly enough that yesterday's number is honest as
+    // long as the page says how old it is.
+    try { db.setMetaValue('supplies', JSON.stringify({ at: suppliesAt, s })); } catch { /* meta write is best-effort */ }
+  }
+}
+
+// Restore the last measured supplies, keeping their original timestamp so `suppliesAgeMs`
+// reports the true age rather than pretending they were just read.
+function loadPersistedSupplies() {
+  if (Object.keys(supplies).length) return;
+  try {
+    const raw = db.getMetaValue('supplies');
+    if (!raw) return;
+    const { at, s } = JSON.parse(raw);
+    if (s && Object.keys(s).length) { supplies = s; suppliesAt = at || 0; }
+  } catch { /* unreadable meta is not worth failing a boot over */ }
 }
 
 async function detectContracts(addresses) {
@@ -331,30 +395,38 @@ async function backfill(latest) {
   if (cold) await adjustBackfill(start, latest);
 }
 
-function buildSnapshot(latest, gasWei, headers) {
+// Every part of the snapshot that comes from SQLite alone — no RPC, no live headers. Shared by
+// the live path and the degraded path, so a frozen terminal reports exactly what a live one
+// would rather than running a second, subtly different implementation that drifts from it.
+function dbDerived({ frozen = false } = {}) {
   const nowSec = Math.floor(Date.now() / 1000);
-  const firstTs = parseInt(headers[0].timestamp, 16);
-  const lastTs = parseInt(headers.at(-1).timestamp, 16);
-  const windowSec = Math.max(1, lastTs - firstTs);
-  const totalTx = headers.reduce((a, b) => a + b.transactions.length, 0);
-  const tps = totalTx / windowSec;
-
-  const summary = db.getSummary(nowSec - 86400);
   const cov = db.getCoverage();
-  const covSec = cov.a ? Math.max(60, nowSec - cov.a) : 0;
+  // Which instant the rolling windows end at. Live, that is now. Frozen, it has to be the newest
+  // indexed minute: the trailing 24h from *now* contains nothing once the chain has been down a
+  // day, and publishing "24h volume: 0" would state the chain sat idle when what happened is that
+  // it stopped. Anchoring to the last data point reports the last 24h that were actually measured,
+  // and `windowEnd` tells the pages what to label it.
+  const asOf = frozen && cov.b ? cov.b : nowSec;
+  const summary = db.getSummary(asOf - 86400);
+  const covSec = cov.a ? Math.max(60, asOf - cov.a) : 0;
 
-  const totalSupply = Object.values(supplies).reduce((a, b) => a + b, 0);
+  // Supply is read with `totalSupply()` calls, so it is unknown — not zero — whenever the chain
+  // has never been reachable in this process and nothing was persisted from a previous one. Zero
+  // is a measurement; null is the absence of one, and rendering "$0 total supply" would be the
+  // most alarming wrong number on the page.
+  const known = Object.keys(supplies).length > 0;
+  const totalSupply = known ? Object.values(supplies).reduce((a, b) => a + b, 0) : null;
   const supply = {};
   for (const meta of Object.values(TOKENS)) {
     const sym = meta.symbol;
-    const sup = supplies[sym] || 0;
+    const sup = known ? supplies[sym] ?? null : null;
     const rvol = summary.byToken[sym]?.rvolume || 0;
     const perDay = covSec ? (rvol / covSec) * 86400 : 0;
     supply[sym] = {
       supply: sup,
-      dominance: totalSupply ? sup / totalSupply : 0,
+      dominance: totalSupply && sup != null ? sup / totalSupply : null,
       volShare: summary.rvolume ? rvol / summary.rvolume : 0,
-      velocity: sup ? perDay / sup : 0, // real transfers/day ÷ supply
+      velocity: sup ? perDay / sup : null, // real transfers/day ÷ supply
       rvolume24h: rvol,
       avolume24h: summary.byToken[sym]?.avolume || 0,
     };
@@ -370,29 +442,15 @@ function buildSnapshot(latest, gasWei, headers) {
   const feeWindowSec = Math.min(86400, covSec || 86400);
   const blockSec = Math.max(0.2, avgBlockMs / 1000);
   const fees = feeMetrics(
-    db.feeStats(nowSec - feeWindowSec),
+    db.feeStats(asOf - feeWindowSec),
     feeWindowSec / blockSec,
     86400 / blockSec,
     summary.rvolume,
   );
 
-  const indexedThrough = db.getCheckpoint();
-  live.snapshot = {
-    ok: true, booting: false, stale: false, updatedAt: Date.now(),
-    endpoint: net.endpoint, chainId: CHAIN.chainId, network: CHAIN.id,
-    indexLag: indexedThrough != null ? Math.max(0, latest - indexedThrough) : null,
-    network: {
-      block: latest,
-      blockTimeMs: (windowSec / (headers.length - 1)) * 1000,
-      tps,
-      gasGwei: Number(gasWei) / 1e9,
-      costPerTransferUsdc: Number(gasWei * 21000n) / 1e18,
-      txPerDay: tps * 86400,
-    },
-    liveBlocks: headers.map((b) => ({ n: parseInt(b.number, 16), tx: b.transactions.length })),
-    activeAddresses1h: db.activeSince(latest - Math.round(3600000 / Math.max(200, avgBlockMs))),
+  return {
     summary24h: summary,
-    fees: fees ? { ...fees, windowSec: feeWindowSec, gasGwei: Number(gasWei) / 1e9 } : null,
+    fees: fees ? { ...fees, windowSec: feeWindowSec } : null,
     noise: {
       flagged: noisyRows.length,
       txPerDay: NOISE_FILTER.txPerDay,
@@ -419,18 +477,115 @@ function buildSnapshot(latest, gasWei, headers) {
       toMinute: cov.b || null,
       minutes: cov.a ? Math.round((cov.b - cov.a) / 60) : 0,
     },
+    // When the newest indexed data was actually recorded, as opposed to when this object was
+    // assembled. On a frozen chain the two are hours apart, and the pages need the former to
+    // say how stale the figures are.
+    dataAt: cov.b ? cov.b * 1000 : null,
+    // The instant the 24h windows above end at — equal to now while live, and to `dataAt` once
+    // frozen. Published so a caller can label the window instead of assuming it is trailing-now.
+    windowEnd: asOf * 1000,
   };
 }
 
+function buildSnapshot(latest, gasWei, headers) {
+  const firstTs = parseInt(headers[0].timestamp, 16);
+  const lastTs = parseInt(headers.at(-1).timestamp, 16);
+  const windowSec = Math.max(1, lastTs - firstTs);
+  const totalTx = headers.reduce((a, b) => a + b.transactions.length, 0);
+  const tps = totalTx / windowSec;
+
+  const base = dbDerived({ frozen: chain.state !== 'live' });
+  const indexedThrough = db.getCheckpoint();
+  live.snapshot = {
+    ...base,
+    ok: true, booting: false, updatedAt: Date.now(),
+    // A halted chain still answers every RPC call, so the poll "succeeds" and the headers are
+    // real — but nothing is advancing. Reporting that as live would be the same lie as an empty
+    // page, just quieter.
+    stale: chain.state !== 'live', degraded: chain.state !== 'live',
+    chain: chainStatus(),
+    endpoint: net.endpoint, chainId: CHAIN.chainId, network: CHAIN.id,
+    indexLag: indexedThrough != null ? Math.max(0, latest - indexedThrough) : null,
+    network: {
+      block: latest,
+      blockTimeMs: (windowSec / (headers.length - 1)) * 1000,
+      tps,
+      gasGwei: Number(gasWei) / 1e9,
+      costPerTransferUsdc: Number(gasWei * 21000n) / 1e18,
+      txPerDay: tps * 86400,
+    },
+    liveBlocks: headers.map((b) => ({ n: parseInt(b.number, 16), tx: b.transactions.length })),
+    activeAddresses1h: db.activeSince(latest - Math.round(3600000 / Math.max(200, avgBlockMs))),
+    fees: base.fees ? { ...base.fees, gasGwei: Number(gasWei) / 1e9 } : null,
+  };
+}
+
+// The degraded snapshot: everything SQLite can answer on its own, served when the chain is
+// halted or unreachable. Publishing indexed history with an explicit "frozen at" beats an empty
+// terminal — the numbers were true when they were measured, and the page says exactly when that
+// was. `ok` stays true because the data *is* valid; `degraded` is what tells a caller it is not
+// moving. Only a genuinely empty database is `booting`.
+function snapshotFromDb() {
+  loadPersistedSupplies();
+  const base = dbDerived({ frozen: true });
+  const indexedThrough = db.getCheckpoint();
+
+  if (!base.coverage.minutes && !base.summary24h.transfers && indexedThrough == null) {
+    live.snapshot = { ok: false, booting: true, chain: chainStatus() };
+    return false;
+  }
+
+  live.snapshot = {
+    ...base,
+    ok: true, booting: false, stale: true, degraded: true,
+    updatedAt: base.dataAt || Date.now(),
+    chain: chainStatus(),
+    endpoint: net.endpoint, chainId: CHAIN.chainId, network: CHAIN.id,
+    indexLag: null,
+    // No live headers to measure against, so the chain-plumbing figures are null rather than
+    // carried over — a stale block time presented as current is a wrong number, not an old one.
+    network: {
+      block: indexedThrough ?? chain.head ?? null,
+      blockTimeMs: null, tps: null, gasGwei: null, costPerTransferUsdc: null, txPerDay: null,
+    },
+    liveBlocks: [],
+    activeAddresses1h: indexedThrough != null
+      ? db.activeSince(indexedThrough - Math.round(3600000 / Math.max(200, avgBlockMs)))
+      : null,
+  };
+  return true;
+}
+
+// Fall back to indexed history. Rebuilt from SQLite rather than freezing the last live
+// snapshot in place: the live-only figures (block time, throughput, gas) have to become null
+// instead of lingering as if they were just measured — an old number shown as current is a
+// wrong number, not a stale one.
+function degrade(err) {
+  snapshotFromDb();
+  if (live.snapshot.ok) live.snapshot.lastError = err;
+}
+
 async function tick() {
+  let latest, gasWei;
+  // The head fetch is its own step so a failure here can be attributed to the chain, while a
+  // failure below is ours. Reporting an upstream outage as an indexer fault is what made the
+  // terminal claim it was broken when the code was fine.
   try {
     const head = await rpc([
       { method: 'eth_blockNumber', params: [] },
       { method: 'eth_gasPrice', params: [] },
     ]);
-    const latest = parseInt(head.out[0], 16);
-    const gasWei = BigInt(head.out[1]);
+    latest = parseInt(head.out[0], 16);
+    gasWei = BigInt(head.out[1]);
+    noteHead(latest);
+  } catch (e) {
+    noteRpcFailure(e);
+    degrade(String(e.message || e));
+    console.error('[tick] chain unreachable:', e.message || e);
+    return;
+  }
 
+  try {
     const hFrom = latest - HEADER_WINDOW + 1;
     const headers = (await rpc(range(hFrom, latest).map((n) => ({ method: 'eth_getBlockByNumber', params: [hex(n), false] }))))
       .out.filter(Boolean).sort((a, b) => parseInt(a.number, 16) - parseInt(b.number, 16));
@@ -461,7 +616,8 @@ async function tick() {
 
     if (++tickCount % PRUNE_EVERY === 0) db.prune(Math.floor(Date.now() / 1000), latest, avgBlockMs);
   } catch (e) {
-    if (live.snapshot.ok) live.snapshot = { ...live.snapshot, stale: true, lastError: String(e.message || e) };
+    // The chain answered, so this one is on us — keep serving indexed history and say so.
+    degrade(String(e.message || e));
     console.error('[tick]', e.message || e);
   }
 }
@@ -469,17 +625,26 @@ async function tick() {
 let timer = null;
 
 export async function start() {
+  // Serve whatever is already on disk before touching the network. A restart during a chain
+  // outage used to leave `booting` set forever — every panel empty despite a database holding
+  // days of indexed history — because the snapshot was only ever built by a successful poll.
+  //
+  // Loading the flag set here also means a restart against an existing DB filters the backfill
+  // from known bots instead of re-learning them from scratch.
+  loadPersistedSupplies();
+  refreshNoisy();
+  snapshotFromDb();
+
   // Anchor first so backfilled timestamps are sane, then seed history.
   try {
     const { out } = await rpc([{ method: 'eth_blockNumber', params: [] }]);
     const latest = parseInt(out[0], 16);
     const hb = (await rpc([{ method: 'eth_getBlockByNumber', params: [hex(latest), false] }])).out[0];
     anchor = { block: latest, ts: parseInt(hb.timestamp, 16) };
-    // Load the flag set from whatever history the volume already holds, so a restart against
-    // an existing DB filters the backfill instead of re-learning the bots from scratch.
-    refreshNoisy();
+    noteHead(latest);
     await backfill(latest);
   } catch (e) {
+    noteRpcFailure(e);
     console.error('[start] backfill skipped:', e.message);
   }
   await tick();
