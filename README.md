@@ -145,5 +145,5 @@ must never claim to be something it isn't.**
 
 ## Author
 
-Built by [@mrlazeeem](https://github.com/mrlazeeem) — [@getStabledesk](https://x.com/getStabledesk) ·
-[stabledesk.xyz](https://stabledesk.xyz)
+Built by **Gaëtan Moreno** — [@moreno-g](https://github.com/moreno-g) ·
+[@getStabledesk](https://x.com/getStabledesk) · [studiomoreno@icloud.com](mailto:studiomoreno@icloud.com)
