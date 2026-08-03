@@ -4,7 +4,7 @@
 import { rpc, net, hex, topicAddr, toUnits, TOKENS, TOKEN_ADDRS, TRANSFER_TOPIC, ZERO } from './rpc.js';
 import * as db from './db.js';
 import { getLabel } from './labels.js';
-import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS } from './constants.js';
+import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES } from './constants.js';
 import { CHAIN } from './chains.js';
 
 const TOTAL_SUPPLY = '0x18160ddd'; // ERC-20 totalSupply() selector
@@ -44,9 +44,10 @@ export const live = { snapshot: { ok: false, booting: true } };
 // Chain liveness, tracked separately from indexer health. From a single failed poll the two are
 // indistinguishable, and collapsing them makes an upstream outage read as our bug — the terminal
 // says "offline" when the code is fine and the chain simply stopped producing blocks.
-//   live        — the head is advancing
-//   halted      — the RPC answers, but the head hasn't moved for CHAIN_HALT_MS
-//   unreachable — no endpoint answered at all
+//   live         — the head is advancing
+//   halted       — the RPC answers, but the head hasn't moved for CHAIN_HALT_MS
+//   unauthorized — every endpoint answered and refused our credentials (ours to fix)
+//   unreachable  — nobody answered at all
 export const chain = { state: 'unknown', head: null, headAt: 0, lastOkAt: 0, lastError: null };
 
 // Pure: the head-advancement rule on its own. A head that has not moved is only evidence of a
@@ -67,8 +68,18 @@ function noteHead(latest) {
   return chain.state;
 }
 
+// Pure: which chain state a failed poll implies. An endpoint answering 401/403 is not an outage,
+// it is us being refused — and calling that "the chain is unreachable" blames the chain for our
+// own configuration, which is the same mistake as blaming ourselves for its outage, inverted.
+// `allAuth` is set by the RPC layer once every endpoint has been tried; a bare status is only
+// consulted when the error never went through it.
+export function chainStateFromError(err) {
+  if (err?.allAuth != null) return err.allAuth ? 'unauthorized' : 'unreachable';
+  return RPC_AUTH_STATUSES.has(err?.status) ? 'unauthorized' : 'unreachable';
+}
+
 function noteRpcFailure(err) {
-  chain.state = 'unreachable';
+  chain.state = chainStateFromError(err);
   chain.lastError = String(err?.message || err);
 }
 
@@ -581,7 +592,9 @@ async function tick() {
   } catch (e) {
     noteRpcFailure(e);
     degrade(String(e.message || e));
-    console.error('[tick] chain unreachable:', e.message || e);
+    // Logged as whatever it was actually classified as — an operator grepping for the cause of a
+    // frozen terminal should not be told "unreachable" when the endpoint is refusing our key.
+    console.error(`[tick] chain ${chain.state}:`, e.message || e);
     return;
   }
 

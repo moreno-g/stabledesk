@@ -223,6 +223,26 @@ test('a stopped chain is told apart from a stopped indexer', async () => {
   assert.equal(chainStateFrom(100, 99, 1000), 'live', 'but still needs the dwell time before it counts');
 });
 
+test('a refused credential is our fault, not an outage', async () => {
+  const { chainStateFromError } = await import('../indexer.js');
+
+  // Every endpoint answered and refused us: the chain is fine, our key is not. Reporting this as
+  // an outage is what let four days of frozen production data pass as "Arc is down".
+  assert.equal(chainStateFromError({ allAuth: true, status: 401 }), 'unauthorized');
+  assert.equal(chainStateFromError({ allAuth: true, status: 403 }), 'unauthorized');
+
+  // Nobody answered, or only some refused us — the network is involved, so we can't pin it on the
+  // credentials alone.
+  assert.equal(chainStateFromError({ allAuth: false, status: 401 }), 'unreachable', 'a mixed failure is not a clean auth verdict');
+  assert.equal(chainStateFromError({ allAuth: false }), 'unreachable');
+  assert.equal(chainStateFromError(new Error('fetch failed')), 'unreachable');
+
+  // Errors that never went through the endpoint loop fall back to their own status.
+  assert.equal(chainStateFromError({ status: 403 }), 'unauthorized');
+  assert.equal(chainStateFromError({ status: 502 }), 'unreachable', 'a bad gateway is not a rejection of us');
+  assert.equal(chainStateFromError(undefined), 'unreachable', 'no error object at all is still not an auth claim');
+});
+
 // ---- network switch (testnet / mainnet) ----
 test('network profile: token parsing and mainnet fail-fast', async () => {
   const { parseTokens, CHAIN, NETWORK } = await import('../chains.js');
