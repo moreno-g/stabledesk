@@ -124,6 +124,28 @@
     the first pass has revealed the high-frequency addresses and rewrites the adjusted numbers.</p>
   </div>
 
+  <h2>Bridged liquidity vs. issuance</h2>
+  <div class="card">
+    <p style="margin-top:0"><strong>The problem.</strong> <a href="https://developers.circle.com/gateway" rel="noopener">Circle Gateway</a>
+    holds one USDC balance that is spendable across every chain it supports. Instead of pre-positioning liquidity chain by chain, an
+    operator draws it onto a chain on demand — Circle reports replenishment in under 500&nbsp;ms, and roughly
+    <strong>$410M</strong> of crosschain volume settled through Gateway between March and June 2026. On-chain, that arrives as a
+    <strong>mint</strong>. A naïve supply tracker reads that mint as new issuance and reports that demand for USDC on this chain grew.
+    It didn't: the same balance moved here, and it can move away again just as fast.</p>
+    <p><strong>What we do.</strong> Gateway's contracts are in our <a href="/ecosystem">registry</a>, and every block range is scanned
+    for logs they emit. Any mint, burn or transfer in a transaction that Gateway touched is attributed to it and reported separately.
+    Attribution is per <em>transaction</em>, not per counterparty: the <code>Transfer</code> event of a Gateway mint names the end
+    recipient rather than the minter, so matching on addresses alone would miss it entirely.</p>
+    <p><strong>Two figures, always both.</strong> <code>netIssuance24h</code> counts every mint minus every burn — unchanged, and what
+    you get if you scan the chain yourself, so our numbers stay reconcilable against yours. <code>organicNetIssuance24h</code> takes
+    Gateway's net out. Where they diverge, the gap <em>is</em> the bridged liquidity. Gateway's share of real volume is published the
+    same way, because a deposit into Gateway is a genuine transfer — it just isn't anyone paying anyone.</p>
+    <p style="margin-bottom:0"><strong>Where this applies.</strong> Arc testnet is a Gateway chain (domain 26) and is measured as
+    described. Arc mainnet is not on Circle's Gateway list yet; until it is, every bridge-adjusted figure is returned as
+    <code>null</code> rather than <code>0</code>. Nothing was measured, so nothing is claimed — a zero here would read as "we checked
+    and there was none".</p>
+  </div>
+
   <h2>Network fees &amp; economics</h2>
   <div class="card">
     <p style="margin-top:0">Gas on Arc is paid <strong>in USDC</strong>. That makes fee metrics unusually direct: a fee figure is
