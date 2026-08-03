@@ -200,6 +200,18 @@ must never claim to be something it isn't.**
 - **Attribute failure honestly, in both directions.** A halted chain is not our bug, and a rejected
   API key is not the chain's fault. Conflating either one sends people to fix the wrong system.
 
+## License
+
+[MIT](LICENSE). Use it, fork it, run your own — attribution appreciated, not required.
+
+Two separate things, since the repo mentions both: MIT covers *this code*. The hosted
+[stabledesk.xyz](https://stabledesk.xyz) API has its own free/Pro tiers, described on
+[/docs](https://stabledesk.xyz/docs). Running your own copy is governed by the licence above and by
+nothing else.
+
+Contributions to the protocol registry are welcome and documented in [`PROTOCOLS.md`](PROTOCOLS.md) —
+entries are curated, and every one has to be checkable against the chain.
+
 ## Author
 
 Built by **Gaëtan Moreno** — [@moreno-g](https://github.com/moreno-g) ·
