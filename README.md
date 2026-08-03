@@ -1,15 +1,27 @@
 # Stabledesk
 
-**Stabledesk** — a **live** analytics terminal for stablecoin flows on the **Arc testnet** (Circle's L1),
-plus a **data API**. Prototype v0, read-only, zero dependencies. [@getStabledesk](https://x.com/getStabledesk)
+**Stabledesk** measures every stablecoin on **Arc**, Circle's L1 — supply, real volume, TVL and
+flows — read straight from the chain, with a [published method](https://stabledesk.xyz/methodology)
+and a free data API.
 
-This is the project's wedge: not a generic explorer (Arcscan already exists), but the
-**stablecoin-finance analytics layer + API** that can be monetized (paid API, Pro/B2B).
+**[stabledesk.xyz](https://stabledesk.xyz)** · [@getStabledesk](https://x.com/getStabledesk)
 
-## What it shows (real data, live)
+Not another explorer — Arcscan already does blocks and transactions. Stabledesk is the
+**stablecoin-finance analytics layer**: what actually moved, how much of it was real economic
+activity rather than routing noise, what it cost the network to move it, and which protocols hold
+the value. Runs against Arc mainnet or testnet from the same code (`ARC_NETWORK`).
 
-- **Network** — current block, block time (~0.5s), throughput (tx/s), cost per transfer in USDC (~$0.0005), active addresses.
-- **Stablecoin flows** — volume + transfer count for **USDC / EURC / USYC**, measured from `Transfer` events over a rolling window; mint/burn for native USDC.
+Read-only. Zero dependencies — Node's native `fetch` and `node:sqlite`, nothing else.
+
+## What it measures
+
+- **Three volume measures, all published** — raw (every `Transfer` event), **real** (one largest
+  transfer per transaction per token, so routing hops and contract internals don't count twice),
+  and **adjusted** (real, minus infrastructure talking to infrastructure). Showing all three means
+  every filtering step is auditable rather than asserted.
+- **Network economics** — gas on Arc is paid in USDC, so fees are dollars read straight from
+  transaction receipts: no price feed, no oracle. Headline metric is *cost to move $1M*.
+- **Stablecoin supply, share and velocity** per token, plus mint/burn.
 - **Per-block activity** + **largest transfers**, in real time.
 - **Ecosystem** (`/ecosystem`) — every protocol on Arc with its **TVL**, flow, status and official links, plus
   the contracts holding balances nobody has named yet. TVL is measured as stablecoin balances held by
@@ -22,11 +34,11 @@ node server.js
 # → http://localhost:4317
 ```
 
-No install (Node ≥ 20, native `fetch` + native `node:sqlite`). On first run the indexer
-**backfills ~3,000 blocks** (~25 min of history), then keeps indexing forward and serves:
+No install step (Node ≥ 20). On first run the indexer backfills recent history, then keeps
+indexing forward and serves:
 
-- `GET /` — the dashboard
-- `GET /api/state` — live snapshot: network stats, 24h summary, top addresses, largest transfers ← **seed of the monetizable API**
+- `GET /` — the terminal
+- `GET /api/state` — live snapshot: network stats, 24h summary, top addresses, largest transfers
 - `GET /api/history?token=ALL|USDC|EURC|USYC&range=1h|24h|7d` — time series (volume, count, mint, burn)
 - `GET /api/top?limit=N` — top addresses by volume
 - `GET /api/health` — status: indexer health *and* chain liveness, reported separately
@@ -66,24 +78,38 @@ remedies, so they are tracked and reported as two separate things.
 - **Modules**: `rpc.js` (RPC + chain constants) · `db.js` (SQLite schema + queries) · `indexer.js` (backfill + live loop + snapshot) · `server.js` (HTTP + API).
 - **Trick**: blocks are ~0.5s with no reorgs, so a transfer's timestamp is derived from its block number against a rolling anchor — the indexer only needs `eth_getLogs`, sparing the rate-limited public RPC.
 
-## Technical notes
+## Networks
 
-- **RPC**: `https://rpc.testnet.arc.io` (Circle), with fallback to alternate endpoints.
-- **Chain ID**: `5042002`. EVM. Gas paid in USDC. No reorgs → simple indexing.
-- **Contracts** (testnet): USDC `0x3600…0000` (native, ERC-20 interface, 6 dec.), EURC `0x89B5…D72a`, USYC `0xe918…b86C`.
-- The poller is deliberately **light** (few calls, batched, tolerant of the public RPC rate limit).
+The same code runs against either network; `ARC_NETWORK` picks which, and each keeps its own
+database file so faucet volume can never be mixed into mainnet aggregates.
+
+| | Mainnet | Testnet |
+|---|---|---|
+| Chain ID | `5042` | `5042002` |
+| Config | `ARC_CHAIN_ID`, `ARC_RPC_URLS`, `ARC_TOKENS` (required) | built in |
+| DB file | `arc-mainnet.db` | `arc.db` |
+
+Mainnet **refuses to start** with any of its three variables missing, rather than falling back to
+testnet — serving faucet play-money as real value is the one failure worth crashing over.
+
+Both are EVM, gas is paid in USDC, and there are no reorgs. That last property is what keeps the
+indexer simple: a transfer's timestamp is derived from its block number against a rolling anchor,
+so the hot path only needs `eth_getLogs` and the rate-limited public RPC is spared.
 
 ## Roadmap
 
 1. ✅ **Historical indexer** (SQLite) → time series: volumes, mint/burn, top addresses.
 2. ✅ **Public API** — `/v1` with API keys, free/pro tiers, rate limiting, `/docs` developer page.
-3. **Deploy** to a public URL + managed DB (Neon/Supabase); split the indexer into a worker.
-4. **Billing** via Stripe (card) + USDC on-chain (pay on Arc).
-5. ✅ **Alerts** — live in-app feed + browser watchlist + Pro webhook alerts (`/v1/alerts`).
-6. ✅ **Ecosystem registry + TVL** — `protocols.js` (curated, contribution-based — see `PROTOCOLS.md`),
+3. ✅ **Deployed** on mainnet at [stabledesk.xyz](https://stabledesk.xyz).
+4. ✅ **Alerts** — live in-app feed + browser watchlist + Pro webhook alerts (`/v1/alerts`).
+5. ✅ **Ecosystem registry + TVL** — `protocols.js` (curated, contribution-based — see `PROTOCOLS.md`),
    `tvl.js` (balance scanner + unnamed-contract discovery), `/ecosystem`, `/protocol`, global search,
    CSV export, and `rankings.js` for the daily digest.
-7. Utility token (phase 3, optional) — access/stake + buyback, no revenue-share.
+6. ✅ **Honest degradation** — chain liveness separated from indexer health, indexed history served
+   through an outage (see *When the chain stops* above).
+7. **Chain uptime history** — persist the `live → halted → live` transitions the indexer already
+   detects, so Arc's availability since launch becomes a public record.
+8. **Billing** — USDC on Base is implemented (`payments.js`); card payment is not.
 
 ### Ecosystem endpoints
 
@@ -97,3 +123,27 @@ remedies, so they are tracked and reported as two separate things.
 
 Set `TVL_ENABLED=false` to stop the balance scanner; the pages then report it as disabled rather than
 showing stale figures.
+
+## Design principles
+
+The same rule keeps reappearing in this codebase, so it may as well be stated once: **a number
+must never claim to be something it isn't.**
+
+- **Publish the method, not just the result.** Every filter is documented and every threshold is
+  a published number, so a reader can disagree with a choice instead of having to trust it. Where
+  Stabledesk departs from an existing standard — dropping a transfer only when *both* ends are
+  flagged infrastructure, against Visa/Allium's "either end" — the reason is measured and stated.
+- **Extrapolations carry their sample size.** Fee figures rest on sampled blocks, so every derived
+  rate reports how many blocks it came from. An estimate is never presented as a measured total.
+- **Report what you can't name.** Contract balances no registry entry claims are counted in the
+  chain total and listed separately as *unattributed*. Hiding them would understate the chain;
+  assigning them to a plausible protocol would invent data.
+- **Absent beats stale.** When a figure can't be measured it goes null, not last-known. An old
+  number displayed as current is a wrong number, not an old one.
+- **Attribute failure honestly, in both directions.** A halted chain is not our bug, and a rejected
+  API key is not the chain's fault. Conflating either one sends people to fix the wrong system.
+
+## Author
+
+Built by [@mrlazeeem](https://github.com/mrlazeeem) — [@getStabledesk](https://x.com/getStabledesk) ·
+[stabledesk.xyz](https://stabledesk.xyz)
