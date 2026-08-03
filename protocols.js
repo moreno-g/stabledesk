@@ -41,6 +41,10 @@ export const CATEGORY_IDS = Object.keys(CATEGORIES);
 const STABLECOIN_ADDRS = Object.keys(CHAIN.tokens);
 const STABLECOIN_SYMBOLS = Object.values(CHAIN.tokens).map((t) => t.symbol);
 
+// Same idea for Gateway: the addresses live in the network profile, so this entry appears only on
+// a network where Gateway is actually deployed and never has to be updated in two places.
+const GATEWAY_ADDRS = CHAIN.gateway ? [CHAIN.gateway.wallet, CHAIN.gateway.minter] : [];
+
 // `networks` omitted means "same address on every Arc network" — true for deterministic
 // deployments and for anything derived from CHAIN.tokens. An entry that only exists on one
 // network must say so, or it would be listed as missing-in-action on the other.
@@ -57,6 +61,21 @@ const REGISTRY = [
     verified: true,
     added: '2026-07-26',
   },
+  // Present only where Gateway is deployed. On a network without it there is no entry at all,
+  // rather than an entry with no contracts — which validate() would reject, and which would read
+  // on the ecosystem page as a protocol we failed to measure instead of one that isn't there.
+  ...(GATEWAY_ADDRS.length ? [{
+    id: 'circle-gateway',
+    name: 'Circle Gateway',
+    vendor: 'Circle Internet Financial',
+    category: 'bridge',
+    desc: 'One USDC balance spendable across every supported chain. Liquidity is drawn onto a chain on demand instead of being pre-positioned, so the USDC it moves here is a treasury operation rather than new demand — the indexer reports it separately from issuance.',
+    links: { site: 'https://www.circle.com/gateway', docs: 'https://developers.circle.com/gateway' },
+    contracts: GATEWAY_ADDRS,
+    source: 'canonical',
+    verified: true,
+    added: '2026-08-03',
+  }] : []),
   {
     id: 'permit2',
     name: 'Permit2',

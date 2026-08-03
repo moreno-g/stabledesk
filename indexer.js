@@ -1,7 +1,7 @@
 // Historical indexer: walks Arc testnet blocks, stores stablecoin Transfer
 // aggregates in SQLite, and maintains the live snapshot served at /api/state.
 
-import { rpc, net, hex, topicAddr, toUnits, TOKENS, TOKEN_ADDRS, TRANSFER_TOPIC, ZERO } from './rpc.js';
+import { rpc, net, hex, topicAddr, toUnits, TOKENS, TOKEN_ADDRS, TRANSFER_TOPIC, ZERO, GATEWAY_ADDRS, HAS_GATEWAY } from './rpc.js';
 import * as db from './db.js';
 import { getLabel } from './labels.js';
 import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES } from './constants.js';
@@ -117,6 +117,18 @@ export function noiseLimits(observedSec) {
 // exchange, is real value delivered to a real party and is kept.
 export const isNoiseTransfer = (t, flagged = noisy) => flagged.has(t.frm) && flagged.has(t.too);
 
+// Pure: net issuance with Circle Gateway's cross-chain rebalancing taken out.
+//
+// Gateway mints are counted in `mint` *as well as* `bmint` — they are real mints, and a consumer
+// scanning the chain themselves must be able to reconcile against us. Subtracting the Gateway net
+// here is what separates "USDC was issued because someone wants to hold it on Arc" from "the same
+// unified balance moved onto Arc". `measured` is false on a network with no Gateway, where the
+// honest answer is null: nothing was measured, so nothing can be adjusted.
+export function organicIssuance(sm, measured) {
+  if (!measured || !sm) return null;
+  return (sm.mint - sm.burn) - ((sm.bmint || 0) - (sm.bburn || 0));
+}
+
 let noisyLimits = noiseLimits(0);
 function refreshNoisy() {
   const cov = db.getCoverage();
@@ -206,19 +218,24 @@ function largestPerTxToken(logs) {
     const minute = Math.floor(approxTs(parseInt(log.blockNumber, 16)) / 60) * 60;
     const k = log.transactionHash + '|' + meta.symbol;
     const cur = out.get(k);
-    if (!cur || amount > cur.amount) out.set(k, { amount, symbol: meta.symbol, minute, frm: from, too: to });
+    if (!cur || amount > cur.amount) out.set(k, { amount, symbol: meta.symbol, minute, frm: from, too: to, tx: log.transactionHash });
   }
   return out;
 }
 
-function processLogs(logs, opts = {}) {
+// Gateway attribution is by transaction, not by counterparty. The Transfer log of a Gateway mint
+// names the end recipient, not the minter, so an address test would miss it entirely; what is
+// always true is that the transaction also carries a log emitted by a Gateway contract. That set
+// of transaction hashes is fetched alongside the transfers and passed through here.
+function processLogs(logs, opts = {}, gatewayTxs = null) {
   const buckets = new Map(), addrs = new Map(), recents = [];
   const txMax = largestPerTxToken(logs);
+  const viaGateway = (tx) => !!gatewayTxs && gatewayTxs.has(tx);
 
   const getBk = (minute, symbol) => {
     const key = minute + '|' + symbol;
     let bk = buckets.get(key);
-    if (!bk) { bk = { minute, token: symbol, volume: 0, cnt: 0, mint: 0, burn: 0, rvolume: 0, rcnt: 0, avolume: 0, acnt: 0 }; buckets.set(key, bk); }
+    if (!bk) { bk = { minute, token: symbol, volume: 0, cnt: 0, mint: 0, burn: 0, rvolume: 0, rcnt: 0, avolume: 0, acnt: 0, bmint: 0, bburn: 0, bvolume: 0, bcnt: 0 }; buckets.set(key, bk); }
     return bk;
   };
 
@@ -236,12 +253,16 @@ function processLogs(logs, opts = {}) {
     const bk = getBk(minute, meta.symbol);
     bk.cnt += 1; bk.volume += amount;
 
+    const bridged = viaGateway(log.transactionHash);
+
     if (from === ZERO) {
       bk.mint += amount;
-      if (opts.live && amount >= NOTABLE_MIN) pushFeed({ ts, kind: 'mint', token: meta.symbol, amount, from, to, block });
+      if (bridged) bk.bmint += amount;
+      if (opts.live && amount >= NOTABLE_MIN) pushFeed({ ts, kind: 'mint', token: meta.symbol, amount, from, to, block, bridged });
     } else if (to === ZERO) {
       bk.burn += amount;
-      if (opts.live && amount >= NOTABLE_MIN) pushFeed({ ts, kind: 'burn', token: meta.symbol, amount, from, to, block });
+      if (bridged) bk.bburn += amount;
+      if (opts.live && amount >= NOTABLE_MIN) pushFeed({ ts, kind: 'burn', token: meta.symbol, amount, from, to, block, bridged });
     } else {
       bumpAddr(addrs, from, amount, block);
       bumpAddr(addrs, to, amount, block, from);
@@ -259,6 +280,9 @@ function processLogs(logs, opts = {}) {
     bk.rvolume += m.amount; bk.rcnt += 1;
     // "adjusted" volume: real volume, minus transfers where *both* ends are infrastructure.
     if (!isNoiseTransfer(m)) { bk.avolume += m.amount; bk.acnt += 1; }
+    // The Gateway slice of real volume, tracked alongside rather than subtracted from it: a
+    // deposit into Gateway is a genuine transfer, it just isn't someone paying someone.
+    if (viaGateway(m.tx)) { bk.bvolume += m.amount; bk.bcnt += 1; }
   }
 
   db.applyBatch(buckets, addrs, recents);
@@ -331,19 +355,35 @@ async function sampleFees(latest) {
   db.insertFeeSamples(rows);
 }
 
+// Transfers, plus the Gateway logs for the same range. Both go out in one `rpc()` call, which the
+// RPC layer sends as a single JSON-RPC batch — so identifying bridge flow costs one more entry in
+// an array, not one more HTTP round trip against a rate-limited public endpoint. No topic filter
+// on the Gateway side: any event it emits marks the transaction, and Gateway emits few enough
+// that fetching them all is cheaper than knowing their signatures.
 async function getLogsRange(from, to) {
-  const { out } = await rpc([{
+  const calls = [{
     method: 'eth_getLogs',
     params: [{ fromBlock: hex(from), toBlock: hex(to), address: TOKEN_ADDRS, topics: [TRANSFER_TOPIC] }],
-  }]);
-  return out[0];
+  }];
+  if (HAS_GATEWAY) {
+    calls.push({
+      method: 'eth_getLogs',
+      params: [{ fromBlock: hex(from), toBlock: hex(to), address: GATEWAY_ADDRS }],
+    });
+  }
+  const { out } = await rpc(calls);
+  // null, not an empty Set, when there is no Gateway on this network: downstream has to be able
+  // to tell "no bridge flow in this range" from "we never looked".
+  const gatewayTxs = HAS_GATEWAY ? new Set((out[1] || []).map((l) => l.transactionHash)) : null;
+  return { logs: out[0], gatewayTxs };
 }
 
 // Index a block range; advances checkpoint only on success.
 async function indexRange(from, to, opts = {}) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      processLogs(await getLogsRange(from, to), opts);
+      const { logs, gatewayTxs } = await getLogsRange(from, to);
+      processLogs(logs, opts, gatewayTxs);
       db.setCheckpoint(to);
       return true;
     } catch (e) {
@@ -374,7 +414,7 @@ async function adjustBackfill(from, to) {
   for (let start = from; start <= to; start += CHUNK) {
     const end = Math.min(to, start + CHUNK - 1);
     let logs;
-    try { logs = await getLogsRange(start, end); } catch (e) {
+    try { ({ logs } = await getLogsRange(start, end)); } catch (e) {
       console.error('[adjust] aborted:', e.message); // leave the first-pass values in place
       return;
     }
@@ -477,6 +517,21 @@ function dbDerived({ frozen = false } = {}) {
         // An address can breach both limits; name the one it breaches hardest, relatively.
         reason: r.volume / noisyLimits.maxVolume > r.transfers / noisyLimits.maxTransfers ? 'volume' : 'frequency',
       })),
+    },
+    // Circle Gateway keeps one USDC balance spendable across every chain it supports, so the USDC
+    // it moves onto Arc is liquidity being repositioned rather than demand to hold it here.
+    // `measured` is what separates "no bridge flow" from "this network has no Gateway" — without
+    // it a reader would take an absent figure for a measured zero.
+    bridge: {
+      measured: HAS_GATEWAY,
+      contracts: GATEWAY_ADDRS,
+      mint24h: HAS_GATEWAY ? summary.bmint : null,
+      burn24h: HAS_GATEWAY ? summary.bburn : null,
+      netIssuance24h: HAS_GATEWAY ? summary.bmint - summary.bburn : null,
+      volume24h: HAS_GATEWAY ? summary.bvolume : null,
+      transfers24h: HAS_GATEWAY ? summary.btransfers : null,
+      // What share of measured real volume is Gateway moving its own liquidity around.
+      volumeShare: HAS_GATEWAY && summary.rvolume ? summary.bvolume / summary.rvolume : null,
     },
     supply,
     totalSupply,

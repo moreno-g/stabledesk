@@ -147,8 +147,15 @@ db.exec(`
 // Migrations, safe on existing DBs:
 //   rvolume/rcnt — "real" volume (one transfer per tx per token)
 //   avolume/acnt — "adjusted" volume (real, minus transfers touching a high-frequency address)
+//   bmint/bburn   — the Circle Gateway share of mint/burn (cross-chain rebalancing, not issuance)
+//   bvolume/bcnt  — the Gateway share of real volume
+// Buckets written before this migration count Gateway flow inside mint/burn/rvolume with no way
+// to separate it, so they read as zero here. That is why this lands before Arc mainnet: the
+// aggregates are additive and a mixed history can't be unmixed afterwards.
 for (const col of ['rvolume REAL NOT NULL DEFAULT 0', 'rcnt INTEGER NOT NULL DEFAULT 0',
-                   'avolume REAL NOT NULL DEFAULT 0', 'acnt INTEGER NOT NULL DEFAULT 0']) {
+                   'avolume REAL NOT NULL DEFAULT 0', 'acnt INTEGER NOT NULL DEFAULT 0',
+                   'bmint REAL NOT NULL DEFAULT 0', 'bburn REAL NOT NULL DEFAULT 0',
+                   'bvolume REAL NOT NULL DEFAULT 0', 'bcnt INTEGER NOT NULL DEFAULT 0']) {
   try { db.exec(`ALTER TABLE buckets ADD COLUMN ${col}`); } catch { /* already present */ }
 }
 // Migration: Pro-tier expiry, so a lapsed subscription reverts to free automatically.
@@ -163,13 +170,15 @@ const RECENT_KEEP = 1200;
 const stmt = {
   getMeta: db.prepare('SELECT v FROM meta WHERE k = ?'),
   setMeta: db.prepare('INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v'),
-  upBucket: db.prepare(`INSERT INTO buckets(minute, token, volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt)
-    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  upBucket: db.prepare(`INSERT INTO buckets(minute, token, volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(minute, token) DO UPDATE SET
       volume = volume + excluded.volume, cnt = cnt + excluded.cnt,
       mint = mint + excluded.mint, burn = burn + excluded.burn,
       rvolume = rvolume + excluded.rvolume, rcnt = rcnt + excluded.rcnt,
-      avolume = avolume + excluded.avolume, acnt = acnt + excluded.acnt`),
+      avolume = avolume + excluded.avolume, acnt = acnt + excluded.acnt,
+      bmint = bmint + excluded.bmint, bburn = bburn + excluded.bburn,
+      bvolume = bvolume + excluded.bvolume, bcnt = bcnt + excluded.bcnt`),
   // first_from is written once and never overwritten — it records who funded the address first.
   upAddr: db.prepare(`INSERT INTO addr_stats(address, transfers, volume, last_block, first_from) VALUES(?, ?, ?, ?, ?)
     ON CONFLICT(address) DO UPDATE SET
@@ -206,7 +215,8 @@ export function applyBatch(buckets, addrs, recents) {
   try {
     // Columns added by migration default to 0 for callers that predate them.
     for (const b of buckets.values()) {
-      stmt.upBucket.run(b.minute, b.token, b.volume, b.cnt, b.mint, b.burn, b.rvolume || 0, b.rcnt || 0, b.avolume || 0, b.acnt || 0);
+      stmt.upBucket.run(b.minute, b.token, b.volume, b.cnt, b.mint, b.burn, b.rvolume || 0, b.rcnt || 0, b.avolume || 0, b.acnt || 0,
+        b.bmint || 0, b.bburn || 0, b.bvolume || 0, b.bcnt || 0);
     }
     for (const [addr, x] of addrs) stmt.upAddr.run(addr, x.transfers, x.volume, x.lastBlock, x.firstFrom || null);
     for (const r of recents) stmt.insRecent.run(r.block, r.ts, r.token, r.frm, r.too, r.amount);
@@ -230,32 +240,37 @@ export function getHistory(token, since, groupSec) {
   if (!ps) {
     ps = db.prepare(`SELECT (minute / ${g}) * ${g} AS t,
         SUM(volume) AS volume, SUM(cnt) AS cnt, SUM(mint) AS mint, SUM(burn) AS burn,
-        SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt, SUM(avolume) AS avolume, SUM(acnt) AS acnt
+        SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt, SUM(avolume) AS avolume, SUM(acnt) AS acnt,
+        SUM(bmint) AS bmint, SUM(bburn) AS bburn, SUM(bvolume) AS bvolume, SUM(bcnt) AS bcnt
       FROM buckets WHERE minute >= ? ${filter ? 'AND token = ?' : ''}
       GROUP BY t ORDER BY t`);
     histStmts.set(ck, ps);
   }
   const rows = filter ? ps.all(since, token) : ps.all(since);
-  return rows.map((r) => ({ t: r.t, volume: r.volume, cnt: r.cnt, mint: r.mint, burn: r.burn, rvolume: r.rvolume, rcnt: r.rcnt, avolume: r.avolume, acnt: r.acnt }));
+  return rows.map((r) => ({ t: r.t, volume: r.volume, cnt: r.cnt, mint: r.mint, burn: r.burn, rvolume: r.rvolume, rcnt: r.rcnt, avolume: r.avolume, acnt: r.acnt, bmint: r.bmint, bburn: r.bburn, bvolume: r.bvolume, bcnt: r.bcnt }));
 }
 
 // Per-token totals since `since` (defaults to a 24h window).
 export function getSummary(since) {
   const rows = db.prepare(`SELECT token, SUM(volume) AS volume, SUM(cnt) AS cnt, SUM(mint) AS mint, SUM(burn) AS burn,
-      SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt, SUM(avolume) AS avolume, SUM(acnt) AS acnt
+      SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt, SUM(avolume) AS avolume, SUM(acnt) AS acnt,
+      SUM(bmint) AS bmint, SUM(bburn) AS bburn, SUM(bvolume) AS bvolume, SUM(bcnt) AS bcnt
     FROM buckets WHERE minute >= ? GROUP BY token`).all(since);
   const byToken = {};
   let volume = 0, transfers = 0, rvolume = 0, rtransfers = 0, avolume = 0, atransfers = 0;
+  let bmint = 0, bburn = 0, bvolume = 0, btransfers = 0;
   for (const r of rows) {
     byToken[r.token] = {
       volume: r.volume, transfers: r.cnt, mint: r.mint, burn: r.burn,
       rvolume: r.rvolume, rtransfers: r.rcnt, avolume: r.avolume, atransfers: r.acnt,
+      bmint: r.bmint, bburn: r.bburn, bvolume: r.bvolume, btransfers: r.bcnt,
     };
     volume += r.volume; transfers += r.cnt;
     rvolume += r.rvolume; rtransfers += r.rcnt;
     avolume += r.avolume; atransfers += r.acnt;
+    bmint += r.bmint; bburn += r.bburn; bvolume += r.bvolume; btransfers += r.bcnt;
   }
-  return { byToken, volume, transfers, rvolume, rtransfers, avolume, atransfers };
+  return { byToken, volume, transfers, rvolume, rtransfers, avolume, atransfers, bmint, bburn, bvolume, btransfers };
 }
 
 // Addresses whose activity over the retained window exceeds the given absolute limits.
