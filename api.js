@@ -5,6 +5,7 @@ import * as db from './db.js';
 import { live, chainStatus } from './indexer.js';
 import * as tvl from './tvl.js';
 import * as rankings from './rankings.js';
+import * as chainuptime from './chainuptime.js';
 import { search } from './search.js';
 import { CATEGORIES } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS, TVL_HISTORY_COLUMNS } from './csv.js';
@@ -119,6 +120,15 @@ export async function handleV1(req, res, u) {
   const H = { 'x-ratelimit-limit': String(tier.rpm), 'x-ratelimit-remaining': String(lim.remaining) };
   if (!lim.ok) return json(res, { error: 'rate_limited', tier: rec.tier, limit_per_min: tier.rpm }, 429, { ...H, 'retry-after': '60' });
   db.bumpKey(key);
+
+  // Deliberately answered before the snapshot check below. The availability record is a fold over
+  // SQLite that needs no live snapshot, and the moment a consumer most wants it is precisely the
+  // moment the rest of this API is returning 503 — an endpoint that explains the outage must not
+  // be taken down by the outage.
+  if (path === '/v1/chain/uptime') {
+    const days = Math.min(365, Math.max(1, Number(u.searchParams.get('days')) || 30));
+    return json(res, chainuptime.record({ days }), 200, H);
+  }
 
   const s = live.snapshot;
   if (!s.ok) return json(res, { error: 'indexing', hint: 'Data warming up, retry shortly.' }, 503, H);

@@ -527,6 +527,118 @@ test('a chain-state change is announced once, with the blame pointed the right w
     'recovery has its own budget');
 });
 
+// ---- the availability record (chainuptime.js) ----
+// Every assertion here is really the same one: time we did not observe must never be published as
+// chain uptime. That is the only way this feature can lie, and it would lie in our favour, which
+// is the direction nobody checks.
+test('uptime is a share of observed time, never of the window', async () => {
+  const { uptimeFrom, incidents, VERDICT } = await import('../chainuptime.js');
+  const H = 3600e3;
+  const T = 1_700_000_000_000;
+  const win = (events, seen, hours = 10) => uptimeFrom(events, T, T + hours * H, seen);
+
+  // A plain halt: the one case where downtime is unambiguously the chain's.
+  const halt = win([
+    { at: T, state: 'live' },
+    { at: T + 4 * H, state: 'halted', head: 100 },
+    { at: T + 5 * H, state: 'live' },
+  ], T + 10 * H);
+  assert.equal(halt.upMs, 9 * H);
+  assert.equal(halt.downMs, H);
+  assert.equal(halt.uptimePct, 90);
+  assert.equal(halt.coveragePct, 100);
+
+  // The indexer was off for four hours. Uptime stays 100% — of what was seen — and coverage is what
+  // carries the gap. Reporting 60% here would blame the chain for our downtime; reporting 100% with
+  // no coverage figure would hide it. Both numbers, always.
+  const gap = win([
+    { at: T, state: 'live' },
+    { at: T + 2 * H, state: 'unobserved' },
+    { at: T + 6 * H, state: 'live' },
+  ], T + 10 * H);
+  assert.equal(gap.uptimePct, 100, 'a gap is not downtime');
+  assert.equal(gap.coveragePct, 60, 'and is not silently absorbed either');
+  assert.equal(gap.downMs, 0);
+  assert.equal(gap.unobservedMs, 4 * H);
+
+  // The outage that actually happened: our key refused for eight hours. Arc may have been perfectly
+  // healthy throughout, so this cannot appear as chain downtime — it is time we were not looking.
+  const refused = win([
+    { at: T, state: 'live' },
+    { at: T + H, state: 'unauthorized', error: 'HTTP 401' },
+    { at: T + 9 * H, state: 'live' },
+  ], T + 10 * H);
+  assert.equal(refused.downMs, 0, 'a rejected credential is never charged to the chain');
+  assert.equal(refused.byState.unauthorized, 8 * H, 'but it is still recorded, under our own name');
+  assert.equal(refused.uptimePct, 100);
+  assert.equal(refused.coveragePct, 20);
+
+  // Past the watermark nothing is claimed, including about the present. Without this the last known
+  // state extrapolates forward forever and a dead indexer publishes a perfect record.
+  const stale = win([{ at: T, state: 'live' }], T + 3 * H);
+  assert.equal(stale.upMs, 3 * H, 'the open segment ends where our knowledge does');
+  assert.equal(stale.coveragePct, 30);
+
+  // No watermark at all: decline to assume, rather than assume the best.
+  assert.equal(win([{ at: T, state: 'live' }], null).observedMs, 0);
+
+  // An empty record is not a perfect record.
+  const empty = win([], T + 10 * H);
+  assert.equal(empty.uptimePct, null, 'no observations yields null, never 100');
+  assert.equal(empty.coveragePct, 0);
+
+  // The state at the window's opening edge comes from the transition *before* it, or a healthy
+  // chain that last changed state months ago would read as entirely unobserved.
+  const leading = uptimeFrom([{ at: T - 500 * H, state: 'live' }], T, T + 2 * H, T + 2 * H);
+  assert.equal(leading.uptimePct, 100);
+  assert.equal(leading.coveragePct, 100);
+
+  // Episodes, for the half of a status page people actually read.
+  const eps = incidents([
+    { at: T, state: 'live' },
+    { at: T + 4 * H, state: 'halted', head: 100 },
+    { at: T + 5 * H, state: 'live' },
+    { at: T + 8 * H, state: 'unauthorized', error: 'HTTP 401' },
+  ], T, T + 10 * H, T + 10 * H);
+  assert.equal(eps.length, 2);
+  assert.equal(eps[0].state, 'unauthorized', 'most recent first');
+  assert.equal(eps[0].blame, 'stabledesk', 'our own outages are published, not filtered out');
+  assert.equal(eps[0].verdict, 'unobserved');
+  assert.ok(eps[0].ongoing, 'an episode with nothing after it has not been seen to end');
+  assert.equal(eps[1].blame, 'chain');
+  assert.equal(eps[1].ms, H);
+  assert.equal(eps[1].ongoing, false);
+
+  // A restart gap is dropped from the list but never from the arithmetic. Hiding it from both
+  // would be how an availability page quietly becomes a marketing page.
+  const restart = [
+    { at: T, state: 'live' },
+    { at: T + 5 * H, state: 'unobserved' },
+    { at: T + 5 * H + 20e3, state: 'live' },
+  ];
+  assert.equal(incidents(restart, T, T + 10 * H, T + 10 * H).length, 0, 'a 20-second redeploy is not an incident');
+  assert.equal(win(restart, T + 10 * H).byState.unobserved, 20e3, 'but it is still counted');
+  assert.ok(win(restart, T + 10 * H).coveragePct < 100, 'and still shows up as missing coverage');
+
+  // A brief halt, by contrast, is news at any length — the floor applies only to our own gaps.
+  const blip = incidents([
+    { at: T, state: 'live' },
+    { at: T + 5 * H, state: 'halted' },
+    { at: T + 5 * H + 20e3, state: 'live' },
+  ], T, T + 10 * H, T + 10 * H);
+  assert.equal(blip.length, 1, 'a 20-second halt is still reported');
+
+  // Drift guard: every state the indexer can reach has to be classified, or it silently falls into
+  // the unobserved bucket and quietly inflates uptime.
+  const { chainStateFrom, chainStateFromError } = await import('../indexer.js');
+  const reachable = new Set([
+    'unknown', 'unobserved',
+    chainStateFrom(null, 1, 0), chainStateFrom(5, 5, 99e3),
+    chainStateFromError({ allAuth: true }), chainStateFromError({ allAuth: false }),
+  ]);
+  for (const s of reachable) assert.ok(VERDICT[s], `state "${s}" has no verdict`);
+});
+
 // ---- the machine-readable surfaces (openapi.js) ----
 // The spec is generated so it can't be forgotten, but "generated" only guarantees it is *built* —
 // not that it still describes the API. The drift that matters is a route added to api.js and never
