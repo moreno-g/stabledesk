@@ -143,6 +143,16 @@ async function poll(){
       subline.textContent = 'The chain is halted' + (c.head != null ? ' at #' + nf.format(c.head) : '')
         + (c.stalledMs ? ' — no new block for ' + dur(c.stalledMs) : '')
         + '. Stabledesk is up and serving the history it indexed.';
+    } else if (c.state === 'unauthorized') {
+      // The one chain-side symptom that is actually our fault, so it gets the red dot: every
+      // endpoint answered and refused our credentials. Reported as an outage, this reads as
+      // "wait for Arc" — and nobody goes and looks at the key.
+      dot.className = 'dot bad';
+      headline.textContent = 'RPC access is being rejected';
+      subline.textContent = 'Arc is answering but refusing our credentials'
+        + (c.lastError ? ' (' + c.lastError + ')' : '')
+        + '. This is a configuration problem on our side, not a chain outage. Serving indexed history'
+        + (j.dataAt ? ', frozen at ' + ago(j.dataAt) : '') + '.';
     } else if (c.state === 'unreachable') {
       dot.className = 'dot warn';
       headline.textContent = 'Arc is unreachable';
@@ -170,7 +180,7 @@ async function poll(){
       subline.textContent = 'Live and fully caught up with the chain.';
     }
 
-    const frozen = c.state === 'halted' || c.state === 'unreachable';
+    const frozen = c.state === 'halted' || c.state === 'unreachable' || c.state === 'unauthorized';
     // Whenever we are serving indexed history the figure is the last block we read, not the head
     // of the chain — and while catching up those are millions of blocks apart.
     $('#block').textContent = j.block != null ? '#' + nf.format(j.block) : '—';
@@ -185,6 +195,7 @@ async function poll(){
       : lag === 0 ? 'Caught up' : nf.format(lag) + ' blocks';
     $('#chainState').textContent = c.state === 'live' ? 'Producing blocks'
       : c.state === 'halted' ? 'Halted'
+      : c.state === 'unauthorized' ? 'Refusing our key'
       : c.state === 'unreachable' ? 'Unreachable' : '—';
     $('#dataAge').textContent = j.dataAt ? ago(j.dataAt) : '—';
     $('#checked').textContent = ago(Date.now());
@@ -194,7 +205,7 @@ async function poll(){
     const err = c.lastError || j.lastError;
     if (err) {
       errbox.style.display = 'block';
-      errbox.textContent = (frozen ? 'chain rpc: ' : 'indexer: ') + err;
+      errbox.textContent = (c.state === 'unauthorized' ? 'rpc auth: ' : frozen ? 'chain rpc: ' : 'indexer: ') + err;
     } else { errbox.style.display = 'none'; }
   } catch (e) {
     $('#dot').className = 'dot bad';
