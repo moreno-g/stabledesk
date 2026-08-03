@@ -6,6 +6,7 @@ import * as db from './db.js';
 import { getLabel } from './labels.js';
 import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES } from './constants.js';
 import { CHAIN } from './chains.js';
+import * as chainalert from './chainalert.js';
 
 const TOTAL_SUPPLY = '0x18160ddd'; // ERC-20 totalSupply() selector
 const SUPPLY_TTL = 30000;          // refresh supplies at most this often
@@ -48,7 +49,7 @@ export const live = { snapshot: { ok: false, booting: true } };
 //   halted       — the RPC answers, but the head hasn't moved for CHAIN_HALT_MS
 //   unauthorized — every endpoint answered and refused our credentials (ours to fix)
 //   unreachable  — nobody answered at all
-export const chain = { state: 'unknown', head: null, headAt: 0, lastOkAt: 0, lastError: null };
+export const chain = { state: 'unknown', head: null, headAt: 0, lastOkAt: 0, lastError: null, downSince: 0 };
 
 // Pure: the head-advancement rule on its own. A head that has not moved is only evidence of a
 // halt once it has stood still longer than a block could plausibly take — below that threshold
@@ -58,12 +59,31 @@ export function chainStateFrom(prevHead, latest, sinceHeadMs, haltMs = CHAIN_HAL
   return sinceHeadMs > haltMs ? 'halted' : 'live';
 }
 
+// The single place chain.state is allowed to change, so that every transition is announced exactly
+// once. Assigning the field directly from two call sites is how the four-day outage stayed quiet:
+// the state was right, nothing was listening to it changing.
+function setChainState(next) {
+  const prev = chain.state;
+  if (prev === next) return next;
+  chain.state = next;
+  // When the outage began, so a recovery can report how long it lasted.
+  if (next !== 'live') { if (!chain.downSince) chain.downSince = Date.now(); }
+
+  const ctx = { ...chainStatus(), downMs: chain.downSince ? Date.now() - chain.downSince : null };
+  if (next === 'live') chain.downSince = 0;
+
+  // Fire and forget, and swallow its failures: an unreachable Telegram must never be able to stop
+  // the indexer. The alert is a report about the outage, not part of handling it.
+  chainalert.note(prev, next, ctx).catch((e) => console.error('[chainalert]', e.message || e));
+  return next;
+}
+
 function noteHead(latest) {
   const now = Date.now();
   chain.lastOkAt = now;
   chain.lastError = null;
   const advanced = chain.head == null || latest > chain.head;
-  chain.state = chainStateFrom(chain.head, latest, now - chain.headAt);
+  setChainState(chainStateFrom(chain.head, latest, now - chain.headAt));
   if (advanced) { chain.head = latest; chain.headAt = now; }
   return chain.state;
 }
@@ -79,8 +99,10 @@ export function chainStateFromError(err) {
 }
 
 function noteRpcFailure(err) {
-  chain.state = chainStateFromError(err);
+  // Recorded before the state change, so the alert built by setChainState can quote the error that
+  // caused it rather than the previous one.
   chain.lastError = String(err?.message || err);
+  setChainState(chainStateFromError(err));
 }
 
 // What the API and the pages report about the chain, with the "how long" the UI needs to say

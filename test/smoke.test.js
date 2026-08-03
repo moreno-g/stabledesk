@@ -467,6 +467,66 @@ test('rankings digest reports missing baselines instead of inventing 0%', async 
   assert.match(text, /haven't named yet/, 'the digest asks for help identifying unnamed contracts');
 });
 
+// ---- alerting on a chain-state change (chainalert.js) ----
+// The four-day outage is the specification here: the state was tracked correctly the whole time
+// and nobody was told. These assert the two ways this path can fail — staying silent when it
+// matters, and talking so much it stops being read.
+test('a chain-state change is announced once, with the blame pointed the right way', async () => {
+  const ca = await import('../chainalert.js');
+
+  // Silence where silence is right.
+  assert.equal(ca.transition('live', 'live'), null, 'no change is not an event');
+  assert.equal(ca.transition('unknown', 'live'), null, 'booting into a healthy chain is not news');
+  assert.equal(ca.transition('live', 'unknown'), null, 'learning less than we knew is not news');
+
+  // The case that actually happened: a refused key, on a redeploy, from a cold start.
+  const refused = ca.transition('unknown', 'unauthorized', { lastError: 'HTTP 401' });
+  assert.ok(refused, 'a rejected credential must alert even as the first state we ever see');
+  assert.match(refused.text, /our configuration to fix/i);
+  assert.match(refused.text, /not an Arc outage/i, 'a refused key must explicitly disclaim being an Arc outage');
+  assert.match(refused.text, /HTTP 401/, 'the alert quotes the error that caused it');
+  assert.match(refused.text, /absent, not stale/, 'says what the site is doing meanwhile');
+
+  // ...and the opposite direction: nobody answering is not our credential's fault.
+  const dark = ca.transition('live', 'unreachable', { lastError: 'fetch failed' });
+  assert.doesNotMatch(dark.text, /credential|configuration to fix/i);
+
+  // A halt is the chain's problem, and says so.
+  const halted = ca.transition('live', 'halted', { stalledMs: 252000, head: 12961063 });
+  assert.match(halted.text, /chain has halted/i);
+  assert.match(halted.text, /indexer is fine/i);
+  assert.match(halted.text, /4m/, 'reports how long the head has been frozen');
+
+  // Recovery closes the loop and reports the outage length.
+  const back = ca.transition('unauthorized', 'live', { head: 12961063, downMs: 4 * 3600e3 + 12 * 60e3 });
+  assert.match(back.text, /restored/i);
+  assert.match(back.text, /4h 12m/);
+
+  assert.equal(ca.humanDuration(45e3), '45s');
+  assert.equal(ca.humanDuration(90 * 60e3), '1h 30m');
+  assert.equal(ca.humanDuration(50 * 3600e3), '2d 2h');
+  assert.equal(ca.humanDuration(null), 'an unknown time', 'an unknown duration is never rendered as 0');
+
+  // Cooldown: a flapping endpoint must not turn into a hundred messages an hour. Telegram is
+  // unconfigured in tests, so note() reports the decision without sending anything.
+  ca.resetCooldowns();
+  const t0 = 1_000_000;
+  const ctx = { lastError: 'HTTP 401' };
+  assert.equal((await ca.note('live', 'unauthorized', ctx, t0)).reason, 'telegram_not_configured',
+    'first transition passes the cooldown and reaches delivery');
+  assert.equal((await ca.note('live', 'unauthorized', ctx, t0 + 60e3)).reason, 'cooldown',
+    'the same state again a minute later is suppressed');
+  assert.equal((await ca.note('live', 'unauthorized', ctx, t0 + ca.ALERT_COOLDOWN_MS)).reason, 'telegram_not_configured',
+    'and allowed again once the window has passed');
+
+  // A recovery must never be swallowed by the outage's own cooldown — that would leave the last
+  // message sent saying the site is broken after it came back.
+  ca.resetCooldowns();
+  await ca.note('live', 'unauthorized', ctx, t0);
+  assert.equal((await ca.note('unauthorized', 'live', { head: 1 }, t0 + 1000)).reason, 'telegram_not_configured',
+    'recovery has its own budget');
+});
+
 // ---- the machine-readable surfaces (openapi.js) ----
 // The spec is generated so it can't be forgotten, but "generated" only guarantees it is *built* —
 // not that it still describes the API. The drift that matters is a route added to api.js and never
