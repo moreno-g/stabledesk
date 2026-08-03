@@ -42,9 +42,15 @@ npm test   # smoke tests (node:test — no network, still zero deps)
 Arc halting and Stabledesk breaking have the same symptom — nothing updates — and opposite
 remedies, so they are tracked and reported as two separate things.
 
-- **Chain state** comes from head advancement: `live`, `halted` (the RPC answers but the head has
-  not moved for `CHAIN_HALT_MS`), or `unreachable` (no endpoint answered). Published on
-  `/api/health`, `/api/state` and `/v1/status` as `chain`.
+- **Chain state**: `live`, `halted` (the RPC answers but the head has not moved for
+  `CHAIN_HALT_MS`), `unauthorized` (every endpoint answered and refused our credentials — ours to
+  fix, not an outage), or `unreachable` (nobody answered). Published on `/api/health`,
+  `/api/state` and `/v1/status` as `chain`.
+- **A rejected key is not an outage.** A 401/403 means something *is* listening and is turning us
+  away, so it is reported as our configuration failing, with a red status — announcing it as
+  "Arc is unreachable" sends everyone to look at the wrong system. Only when every endpoint
+  refuses us is the verdict `unauthorized`; a single network-level failure among them keeps it
+  `unreachable`, because the network is then involved too.
 - **Degraded mode**: whenever the chain can't be read, the snapshot is rebuilt from SQLite alone
   and served with `degraded: true`. The terminal keeps showing indexed history — volumes, top
   addresses, largest transfers, fee economics — labelled with when it was measured, instead of

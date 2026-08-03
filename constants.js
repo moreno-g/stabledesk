@@ -43,6 +43,11 @@ export const NOISE_FILTER = {
 // moved for a full minute is the chain stopping, not the poll being slow.
 export const CHAIN_HALT_MS = 60 * 1000;
 
+// RPC statuses that mean "the endpoint answered and refused us", as opposed to "nobody answered".
+// The distinction decides who is at fault: a rejected credential is our configuration to fix,
+// and announcing it as a chain outage misdirects everyone — including us, for days.
+export const RPC_AUTH_STATUSES = new Set([401, 403, 407]);
+
 // Fee accounting. Exact fees only exist in transaction receipts, and fetching receipts for
 // every block (~172k/day at 0.5s blocks) would bury the rate-limited public RPC. Instead we
 // sample a few blocks each tick — exact for the blocks sampled — and report the sample size
