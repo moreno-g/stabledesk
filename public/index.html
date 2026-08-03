@@ -446,8 +446,8 @@ let chart = { token:'ALL', range:'24h', metric:'real' };
 // the terminal is broken and understanding that the chain stopped and this recorded it.
 function renderFrozen(d){
   const box=$('#frozen'), c=d.chain||{};
-  const halted = c.state==='halted', unreachable = c.state==='unreachable';
-  if(!d.degraded && !halted && !unreachable){ box.className='frozen'; return; }
+  const halted = c.state==='halted', unreachable = c.state==='unreachable', unauthorized = c.state==='unauthorized';
+  if(!d.degraded && !halted && !unreachable && !unauthorized){ box.className='frozen'; return; }
 
   const at = d.dataAt ? new Date(d.dataAt) : null;
   const asOf = at ? ' Figures below are as they stood '+ago(d.dataAt)+'.' : '';
@@ -455,6 +455,12 @@ function renderFrozen(d){
   if(halted){
     head = 'Arc has stopped producing blocks';
     sub = 'No new block for '+dur(c.stalledMs||0)+(c.head!=null?' — the chain is halted at #'+nf.format(c.head):'')+'.'+asOf;
+  } else if(unauthorized){
+    // Ours, not the chain's. Saying "Arc is unreachable" here would send everyone looking at the
+    // wrong system — which is exactly how four days of frozen data went unexplained.
+    head = 'Stabledesk cannot authenticate to Arc';
+    sub = 'The RPC endpoint is answering but rejecting our credentials'+(c.lastError?' ('+esc(c.lastError)+')':'')
+      + ' — a configuration problem on our side, not a chain outage.'+asOf;
   } else if(unreachable){
     head = 'Arc is unreachable';
     sub = 'No RPC endpoint is answering, so the chain cannot be read right now.'+asOf;
@@ -465,21 +471,24 @@ function renderFrozen(d){
   }
   $('#frozenHead').textContent = head;
   $('#frozenSub').innerHTML = sub+' <a href="/status">Status →</a>';
-  box.className = 'frozen on'+(unreachable?' bad':'');
+  // Red for the two states someone has to act on — ours to fix, or nobody answering at all.
+  box.className = 'frozen on'+(unreachable||unauthorized?' bad':'');
 }
 
 function renderState(d){
   const dot=$('#statusDot'), txt=$('#statusText');
   renderFrozen(d);
+  const label = (c)=> c.state==='halted' ? 'chain halted'
+    : c.state==='unauthorized' ? 'rpc rejected'
+    : c.state==='unreachable' ? 'chain unreachable' : null;
   if(!d.ok){
     dot.className='dot down';
-    const c=d.chain||{};
-    txt.textContent = d.booting ? 'indexing…' : (c.state==='unreachable'?'chain unreachable':'offline');
+    txt.textContent = d.booting ? 'indexing…' : (label(d.chain||{}) || 'offline');
     return;
   }
   const c=d.chain||{};
   dot.className = d.stale ? 'dot stale' : 'dot';
-  txt.textContent = c.state==='halted' ? 'chain halted' : c.state==='unreachable' ? 'chain unreachable' : d.stale ? 'slightly delayed' : 'live';
+  txt.textContent = label(c) || (d.stale ? 'slightly delayed' : 'live');
   $('#chainBadge').textContent='chain '+d.chainId;
   // On a frozen chain the block number is the last one indexed, not a current head — labelling
   // it as though it were live is the small lie the whole degraded mode exists to avoid.

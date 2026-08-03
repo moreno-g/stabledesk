@@ -1,6 +1,7 @@
 // Shared RPC layer for Arc. Which network it talks to comes from chains.js (ARC_NETWORK).
 
 import { CHAIN } from './chains.js';
+import { RPC_AUTH_STATUSES } from './constants.js';
 
 export const ENDPOINTS = CHAIN.endpoints;
 
@@ -22,7 +23,13 @@ async function rpcBatchOne(endpoint, calls, soft = false) {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15000),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    // The status rides along on the error: "refused us" and "did not answer" are the same
+    // symptom upstream and completely different faults, and only the code tells them apart.
+    const err = new Error(`HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   const json = await res.json();
   const arr = Array.isArray(json) ? json : [json];
   const out = new Array(calls.length);
@@ -41,13 +48,20 @@ async function rpcBatchOne(endpoint, calls, soft = false) {
 async function tryEndpoints(calls, soft) {
   const ordered = [net.endpoint, ...ENDPOINTS.filter((e) => e !== net.endpoint)];
   let lastErr;
+  // Only when *every* endpoint answered and refused us is this a credentials problem. If even one
+  // failed at the network level, the network is involved too and we can't blame the key alone.
+  let allAuth = true;
   for (const ep of ordered) {
     try {
       const out = await rpcBatchOne(ep, calls, soft);
       net.endpoint = ep;
       return { out, ep };
-    } catch (e) { lastErr = e; }
+    } catch (e) {
+      lastErr = e;
+      if (!RPC_AUTH_STATUSES.has(e?.status)) allAuth = false;
+    }
   }
+  if (lastErr) lastErr.allAuth = allAuth;
   throw lastErr;
 }
 
