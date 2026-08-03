@@ -146,6 +146,29 @@ function noteRpcFailure(err) {
   setChainState(chainStateFromError(err));
 }
 
+// Where the indexer actually is, read from the checkpoint and the live head rather than from the
+// snapshot. The snapshot is only rebuilt when a tick *completes*, so during a long catch-up — the
+// one time anybody is asking — every figure derived from it is frozen at the last completed pass,
+// and the reported lag is not merely stale but grows more wrong the more progress is made.
+//
+// The consequence, before this existed: replaying 830k blocks and hanging looked identical from
+// outside. That is the single distinction a health endpoint exists to make, and it was the one
+// thing /api/health could not tell you. `behind` shrinking between two polls is the progress
+// signal; two samples also give a rate, which is why no ETA is invented here.
+export function progressFrom(checkpoint, head, chunk = CHUNK) {
+  const behind = checkpoint != null && head != null ? Math.max(0, head - checkpoint) : null;
+  return {
+    checkpoint: checkpoint ?? null,
+    head: head ?? null,
+    behind,
+    // One live tick closes CHUNK blocks per request, so anything inside a single chunk is ordinary
+    // lag. Past it the indexer is replaying history, which is a different thing to report.
+    catchingUp: behind != null && behind > chunk,
+  };
+}
+
+export const indexProgress = () => progressFrom(db.getCheckpoint(), chain.head);
+
 // What the API and the pages report about the chain, with the "how long" the UI needs to say
 // something specific ("no new block for 4 min") instead of a bare status word.
 export function chainStatus() {

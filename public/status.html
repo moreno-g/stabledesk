@@ -230,8 +230,12 @@ async function poll(){
       // The chain is producing blocks and we are behind it — a backfill, or catching up after a
       // restart. Distinct from both failure modes above, and it resolves on its own.
       headline.textContent = c.state === 'live' ? 'Catching up' : 'Degraded';
+      // Says how much is left, because "catching up" with no number attached is indistinguishable
+      // from "stuck" — which is exactly the reading a frozen page invites.
+      const behind = (j.index || {}).behind;
       subline.textContent = c.state === 'live'
-        ? 'The chain is healthy; the index is reading its way to the head.'
+        ? 'The chain is healthy; the index is reading its way to the head'
+          + (behind ? ' — ' + nf.format(behind) + ' blocks to go.' : '.')
         : 'Serving the last known good data — a fresh update is delayed.';
     } else {
       dot.className = 'dot good';
@@ -245,9 +249,14 @@ async function poll(){
     $('#block').textContent = j.block != null ? '#' + nf.format(j.block) : '—';
     $('#blockLab').textContent = j.degraded ? 'Last indexed block' : 'Current block';
 
-    // Behind the head by however far the chain has run ahead of us. The indexer only publishes
-    // indexLag on a completed poll, so during a backfill it is derived from the two block numbers.
-    const lag = j.indexLag != null ? j.indexLag
+    // Behind the head by however far the chain has run ahead of us. Taken from the live index
+    // progress rather than from the snapshot: the snapshot is only rebuilt when a poll completes,
+    // so during a long replay `indexLag` and `block` are both frozen at the last completed pass —
+    // and the lag derived from them freezes with them, showing the gap as it was at the start
+    // however much of it has since been closed.
+    const ix = j.index || {};
+    const lag = ix.behind != null ? ix.behind
+      : j.indexLag != null ? j.indexLag
       : (c.head != null && j.block != null ? Math.max(0, c.head - j.block) : null);
     $('#lag').textContent = frozen ? '—'
       : lag == null ? '—'
