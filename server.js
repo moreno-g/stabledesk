@@ -14,6 +14,7 @@ import * as payments from './payments.js';
 import * as entities from './entities.js';
 import * as tvl from './tvl.js';
 import * as rankings from './rankings.js';
+import * as chainuptime from './chainuptime.js';
 import { search } from './search.js';
 import { CATEGORIES, PROTOCOLS, protocolById } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
@@ -282,6 +283,13 @@ const server = http.createServer(async (req, res) => {
   if (path === '/api/rankings') {
     const r = rankings.daily();
     return json(res, { ...r, digest: rankings.digest(r) });
+  }
+  // The availability record — what the chain did over time, as opposed to what it is doing now.
+  // Bounded server-side: the record is permanent, so an unclamped ?days would let a caller ask for
+  // a fold over the whole history on every request.
+  if (path === '/api/uptime') {
+    const days = Math.min(365, Math.max(1, Number(u.searchParams.get('days')) || 30));
+    return json(res, chainuptime.record({ days }));
   }
   if (path === '/api/health') {
     return json(res, {

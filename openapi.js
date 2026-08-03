@@ -157,6 +157,34 @@ function build() {
       },
 
       // ---- network ----
+      '/v1/chain/uptime': {
+        get: {
+          tags: ['Status'], operationId: 'getChainUptime',
+          summary: 'Chain availability record',
+          description: [
+            'What the chain has done over time, folded from the log of state transitions.',
+            '',
+            '**Read `coveragePct` before `uptimePct`.** Uptime is a share of *observed* time, not of',
+            'the window: hours when Stabledesk was not running, or was being refused by the RPC,',
+            'are not counted as chain uptime, because they are not evidence about the chain at all.',
+            'A 99.9% uptime over 4% coverage is a statement about four percent of the period.',
+            '`uptimePct` is `null` when nothing at all was observed, never 100.',
+            '',
+            'For the same reason `unauthorized` time — our credentials being rejected — is booked as',
+            'unobserved rather than as downtime. The chain may well have been producing blocks',
+            'throughout. `unreachable` is counted as down, but our own host losing connectivity is',
+            'indistinguishable from the chain going dark, so the full `byState` breakdown is returned',
+            'and a consumer who reads that boundary differently can recompute from it.',
+            '',
+            'Check `recordBegan` before trusting a long window: a 30-day figure from a log that',
+            'started a week ago is a seven-day figure.',
+          ].join('\n'),
+          parameters: [
+            { name: 'days', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 365, default: 30 } },
+          ],
+          responses: { 200: ok('Availability totals and recent episodes.', schema('ChainUptime')), ...COMMON },
+        },
+      },
       '/v1/network': {
         get: {
           tags: ['Network'], operationId: 'getNetwork',
@@ -808,6 +836,55 @@ function build() {
             protocol: { type: 'string' },
             days: { type: 'integer' },
             series: schema('TvlSeries'),
+          },
+        },
+
+        ChainUptime: {
+          type: 'object',
+          description: 'Availability over a window, with the observed share it was computed from.',
+          properties: {
+            window: {
+              type: 'object',
+              properties: { from: { type: 'integer' }, to: { type: 'integer' }, days: { type: 'integer' } },
+            },
+            recordBegan: {
+              type: ['integer', 'null'],
+              description: 'When the transition log starts (unix ms). A window reaching before this is only partly covered.',
+            },
+            windowMs: { type: 'integer' },
+            upMs: { type: 'integer', description: 'Observed time the head was advancing.' },
+            downMs: { type: 'integer', description: 'Observed time the chain was halted or unreachable.' },
+            observedMs: { type: 'integer', description: 'upMs + downMs — the only time any percentage here is computed over.' },
+            unobservedMs: { type: 'integer', description: 'Time we were not watching, including while our own credentials were refused.' },
+            byState: {
+              type: 'object',
+              description: 'Milliseconds per state, so the up/down boundary can be redrawn by the consumer.',
+              properties: Object.fromEntries(
+                ['live', 'halted', 'unreachable', 'unauthorized', 'unobserved', 'unknown']
+                  .map((s) => [s, { type: 'integer' }]),
+              ),
+            },
+            uptimePct: num('upMs as a share of observedMs. Null when nothing was observed — never 100.'),
+            coveragePct: num('observedMs as a share of windowMs. Read this first.'),
+            seenThrough: num('How far the record extends (unix ms). Past this, nothing is claimed.'),
+            incidents: { type: 'array', items: schema('ChainIncident') },
+          },
+        },
+
+        ChainIncident: {
+          type: 'object',
+          description: 'One non-live episode, most recent first.',
+          properties: {
+            state: { type: 'string', enum: ['halted', 'unreachable', 'unauthorized', 'unobserved', 'unknown'] },
+            verdict: { type: 'string', enum: ['down', 'unobserved'], description: 'Whether this episode counts against the chain.' },
+            blame: {
+              type: 'string', enum: ['chain', 'stabledesk', 'unknown'],
+              description: 'Whose failure it was. `stabledesk` covers our own outages and rejected credentials, published rather than hidden.',
+            },
+            from: { type: 'integer' }, to: { type: 'integer' }, ms: { type: 'integer' },
+            ongoing: { type: 'boolean', description: 'The episode had not ended by the edge of what we observed.' },
+            head: { type: ['integer', 'null'] },
+            error: { type: ['string', 'null'] },
           },
         },
 
