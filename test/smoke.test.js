@@ -199,6 +199,52 @@ test('fee sampling and the address noise filter', async () => {
   assert.equal(fs.txs, 10);
 });
 
+// ---- Circle Gateway: rebalancing separated from issuance ----
+test('gateway rebalancing is not counted as issuance', async () => {
+  const db = await import('../db.js');
+  const { organicIssuance } = await import('../indexer.js');
+  const { CHAIN } = await import('../chains.js');
+  const { protocolForAddress } = await import('../protocols.js');
+
+  // Arc testnet is a Gateway chain (domain 26), so the profile carries the contract pair and the
+  // registry claims both addresses — which is what makes them show up labelled everywhere.
+  assert.ok(CHAIN.gateway, 'testnet profile knows about Gateway');
+  assert.equal(protocolForAddress(CHAIN.gateway.wallet)?.id, 'circle-gateway');
+  assert.equal(protocolForAddress(CHAIN.gateway.minter)?.id, 'circle-gateway');
+
+  // The headline case: a day where every mint came from Gateway. Raw net issuance says USDC on
+  // Arc grew; organic says nobody actually chose to hold more of it, the balance just moved here.
+  assert.equal(organicIssuance({ mint: 1000, burn: 0, bmint: 1000, bburn: 0 }, true), 0,
+    'a day of pure rebalancing is zero organic issuance');
+
+  // Gateway flowing out while real demand comes in — the two must not cancel by accident.
+  assert.equal(organicIssuance({ mint: 500, burn: 800, bmint: 0, bburn: 800 }, true), 500,
+    'a Gateway withdrawal does not read as USDC leaving Arc');
+
+  // Mixed: 900 minted, 600 of it Gateway.
+  assert.equal(organicIssuance({ mint: 900, burn: 100, bmint: 600, bburn: 0 }, true), 200);
+
+  // Without Gateway on the network there is nothing to subtract, and the honest answer is the
+  // absence of a measurement — never a zero, which would read as "we checked and it was none".
+  assert.equal(organicIssuance({ mint: 900, burn: 100, bmint: 0, bburn: 0 }, false), null);
+  assert.equal(organicIssuance(null, true), null);
+
+  // Bridge columns round-trip through the aggregates, and sit *alongside* the raw ones rather
+  // than replacing them: a consumer reconciling against their own chain scan needs both.
+  const minute = Math.floor(Date.now() / 1000 / 60) * 60 - 600;
+  db.applyBatch(new Map([[`${minute}|USYC`, {
+    minute, token: 'USYC', volume: 700, cnt: 7, mint: 400, burn: 100,
+    rvolume: 700, rcnt: 7, avolume: 700, acnt: 7,
+    bmint: 300, bburn: 0, bvolume: 250, bcnt: 2,
+  }]]), new Map(), []);
+  const sum = db.getSummary(minute - 60);
+  assert.equal(sum.byToken.USYC.mint, 400, 'the raw mint total still counts the Gateway mint');
+  assert.equal(sum.byToken.USYC.bmint, 300);
+  assert.equal(sum.byToken.USYC.bvolume, 250);
+  assert.equal(organicIssuance(sum.byToken.USYC, true), 0, '400 − 100 minted, 300 of it bridged');
+  assert.equal(db.getHistory('USYC', minute - 60, 60).at(-1).bmint, 300, 'and it survives into the series');
+});
+
 // ---- chain liveness ----
 test('a stopped chain is told apart from a stopped indexer', async () => {
   const { chainStateFrom } = await import('../indexer.js');

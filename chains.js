@@ -30,11 +30,27 @@ export function parseTokens(spec) {
   return Object.keys(out).length ? out : null;
 }
 
+// Circle Gateway contracts, from Circle's published deployment list. Gateway holds one USDC
+// balance spendable across every supported chain, so the USDC it moves onto Arc is liquidity
+// being repositioned — not somebody choosing to hold USDC here. Counting it as issuance would
+// report a treasury operation as demand, which is the single most misleading thing this index
+// could say. The addresses are deterministic per environment: one pair across every testnet,
+// a different pair across every mainnet.
+//
+// Arc testnet is a Gateway chain (domain 26). Arc mainnet is not — it does not exist yet — so
+// the mainnet pair is read from the environment rather than written in: publishing an address
+// Circle has not deployed would attribute flows to a contract that isn't there.
+const GATEWAY_TESTNET = {
+  wallet: '0x0077777d7eba4688bdef3e311b846f25870a19b9',
+  minter: '0x0022222abe238cc2c7bb1f21003f0a260052475b',
+};
+
 const TESTNET = {
   id: 'testnet',
   isTestnet: true,
   chainId: 5042002,
   label: 'Arc testnet',
+  gateway: GATEWAY_TESTNET,
   endpoints: [
     'https://rpc.testnet.arc.io',
     'https://rpc.drpc.testnet.arc.io',
@@ -69,6 +85,19 @@ function mainnetProfile() {
   try { tokens = parseTokens(process.env.ARC_TOKENS); } catch (e) { throw new Error(`Arc mainnet config — ${e.message}`); }
   if (!tokens) missing.push('ARC_TOKENS');
 
+  // Gateway is optional, and its absence is a fact rather than a misconfiguration: Arc is not on
+  // Circle's mainnet Gateway list today. Unset means "no Gateway on this network", and every
+  // bridge-adjusted figure is then reported as null rather than as a measured zero.
+  let gateway = null;
+  const gwWallet = String(process.env.ARC_GATEWAY_WALLET || '').toLowerCase();
+  const gwMinter = String(process.env.ARC_GATEWAY_MINTER || '').toLowerCase();
+  if (gwWallet || gwMinter) {
+    if (!ADDR.test(gwWallet) || !ADDR.test(gwMinter)) {
+      throw new Error('ARC_GATEWAY_WALLET and ARC_GATEWAY_MINTER must both be set to 0x-prefixed addresses, or both left unset.');
+    }
+    gateway = { wallet: gwWallet, minter: gwMinter };
+  }
+
   if (missing.length) {
     throw new Error(
       `ARC_NETWORK=mainnet but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not set. `
@@ -84,6 +113,7 @@ function mainnetProfile() {
     label: 'Arc',
     endpoints,
     tokens,
+    gateway,
     // Real money: what deserves attention is orders of magnitude higher, and a longer backfill
     // is worth the RPC cost so the terminal isn't empty on day one.
     notableMin: Number(process.env.ARC_NOTABLE_MIN) || 100000,

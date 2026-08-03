@@ -2,7 +2,7 @@
 
 import { randomBytes } from 'node:crypto';
 import * as db from './db.js';
-import { live, chainStatus } from './indexer.js';
+import { live, chainStatus, organicIssuance } from './indexer.js';
 import * as tvl from './tvl.js';
 import * as rankings from './rankings.js';
 import * as chainuptime from './chainuptime.js';
@@ -188,9 +188,18 @@ export async function handleV1(req, res, u) {
     const token = path.slice('/v1/stablecoins/'.length).toUpperCase();
     if (!TOKEN_SYMBOLS.has(token)) return json(res, { error: 'bad_token', hint: `token must be one of: ${TOKEN_LIST}.` }, 400, H);
     const sm = s.summary24h?.byToken?.[token] || null;
+    // Two issuance figures, deliberately both. `netIssuance24h` is every mint minus every burn —
+    // unchanged, and what a consumer comparing us against a raw chain scan expects. `organic`
+    // removes Circle Gateway's cross-chain rebalancing, which is the same unified balance moving
+    // onto Arc rather than anyone deciding to hold more USDC here. Null, not zero, on a network
+    // with no Gateway: there is nothing to subtract and no measurement to report.
+    const bridged = s.bridge?.measured && sm;
     return json(res, {
       token, supply: s.supply?.[token] || null, summary24h: sm,
       netIssuance24h: sm ? sm.mint - sm.burn : null,
+      bridgeMint24h: bridged ? sm.bmint : null,
+      bridgeBurn24h: bridged ? sm.bburn : null,
+      organicNetIssuance24h: organicIssuance(sm, !!s.bridge?.measured),
       distribution: db.sizeDistribution(token), updatedAt: s.updatedAt,
     }, 200, H);
   }
