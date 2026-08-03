@@ -14,12 +14,14 @@ import * as payments from './payments.js';
 import * as entities from './entities.js';
 import * as tvl from './tvl.js';
 import * as rankings from './rankings.js';
+import * as chainuptime from './chainuptime.js';
 import { search } from './search.js';
 import { CATEGORIES, PROTOCOLS, protocolById } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
-import { RANGES, ADDR_RE, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED } from './constants.js';
+import { specJson, llmsTxt } from './openapi.js';
+import { RANGES, ADDR_RE, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED, SITE_ORIGIN } from './constants.js';
 import { CHAIN, NETWORK } from './chains.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -127,6 +129,26 @@ async function serveTemplated(req, res, name, key, vars) {
     return res.end(p.gz);
   }
   res.writeHead(200, h); res.end(p.buf);
+}
+
+// Generated text documents (openapi.json, llms.txt). Built once at boot like the static assets,
+// so they get the same treatment — cached buffer, gzip, ETag revalidation — without going through
+// the filesystem. Kept public-cacheable: these are meant to be fetched by crawlers and agents.
+const textCache = new Map();
+function sendText(req, res, name, body, type) {
+  let a = textCache.get(name);
+  if (!a) {
+    const buf = Buffer.from(body, 'utf8');
+    a = { buf, gz: gzipSync(buf), etag: '"' + createHash('sha1').update(buf).digest('base64').slice(0, 22) + '"' };
+    textCache.set(name, a);
+  }
+  const h = { 'content-type': type, 'cache-control': 'public, max-age=3600', etag: a.etag, ...SEC };
+  if (req.headers['if-none-match'] === a.etag) { res.writeHead(304, h); return res.end(); }
+  if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+    res.writeHead(200, { ...h, 'content-encoding': 'gzip', vary: 'Accept-Encoding' });
+    return res.end(a.gz);
+  }
+  res.writeHead(200, h); res.end(a.buf);
 }
 
 const redirect = (res, to) => { res.writeHead(301, { location: to, 'cache-control': 'no-cache', ...SEC }); res.end(); };
@@ -262,6 +284,13 @@ const server = http.createServer(async (req, res) => {
     const r = rankings.daily();
     return json(res, { ...r, digest: rankings.digest(r) });
   }
+  // The availability record — what the chain did over time, as opposed to what it is doing now.
+  // Bounded server-side: the record is permanent, so an unclamped ?days would let a caller ask for
+  // a fold over the whole history on every request.
+  if (path === '/api/uptime') {
+    const days = Math.min(365, Math.max(1, Number(u.searchParams.get('days')) || 30));
+    return json(res, chainuptime.record({ days }));
+  }
   if (path === '/api/health') {
     return json(res, {
       ok: live.snapshot.ok,
@@ -280,12 +309,24 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // ---- machine-readable surfaces ----
+  // The spec is what an agent reads instead of parsing /docs, and it is what an agent marketplace
+  // requires before it will list an API at all. Generated from the live config for the same reason
+  // the sitemap below is: a hand-written copy of the token list is a copy that goes stale.
+  // Both are text/plain-ish and generated once at boot, so a plain cached response is enough.
+  if (path === '/openapi.json') {
+    return sendText(req, res, 'openapi', specJson(), 'application/json; charset=utf-8');
+  }
+  if (path === '/llms.txt') {
+    return sendText(req, res, 'llms', llmsTxt(), 'text/plain; charset=utf-8');
+  }
+
   // SEO
   if (path === '/robots.txt') return serveFile(req, res, 'robots.txt', 'text/plain; charset=utf-8');
   // Generated rather than a static file, so adding a protocol to the registry lists it for
   // crawlers with no second step — a hand-maintained sitemap is a hand-maintained omission.
   if (path === '/sitemap.xml') {
-    const url = (loc, freq, pri) => `  <url><loc>https://stabledesk.xyz${loc}</loc><changefreq>${freq}</changefreq><priority>${pri}</priority></url>`;
+    const url = (loc, freq, pri) => `  <url><loc>${SITE_ORIGIN}${loc}</loc><changefreq>${freq}</changefreq><priority>${pri}</priority></url>`;
     const body = ['<?xml version="1.0" encoding="UTF-8"?>',
       '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
       url('/', 'hourly', '1.0'),

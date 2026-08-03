@@ -467,6 +467,233 @@ test('rankings digest reports missing baselines instead of inventing 0%', async 
   assert.match(text, /haven't named yet/, 'the digest asks for help identifying unnamed contracts');
 });
 
+// ---- alerting on a chain-state change (chainalert.js) ----
+// The four-day outage is the specification here: the state was tracked correctly the whole time
+// and nobody was told. These assert the two ways this path can fail — staying silent when it
+// matters, and talking so much it stops being read.
+test('a chain-state change is announced once, with the blame pointed the right way', async () => {
+  const ca = await import('../chainalert.js');
+
+  // Silence where silence is right.
+  assert.equal(ca.transition('live', 'live'), null, 'no change is not an event');
+  assert.equal(ca.transition('unknown', 'live'), null, 'booting into a healthy chain is not news');
+  assert.equal(ca.transition('live', 'unknown'), null, 'learning less than we knew is not news');
+
+  // The case that actually happened: a refused key, on a redeploy, from a cold start.
+  const refused = ca.transition('unknown', 'unauthorized', { lastError: 'HTTP 401' });
+  assert.ok(refused, 'a rejected credential must alert even as the first state we ever see');
+  assert.match(refused.text, /our configuration to fix/i);
+  assert.match(refused.text, /not an Arc outage/i, 'a refused key must explicitly disclaim being an Arc outage');
+  assert.match(refused.text, /HTTP 401/, 'the alert quotes the error that caused it');
+  assert.match(refused.text, /absent, not stale/, 'says what the site is doing meanwhile');
+
+  // ...and the opposite direction: nobody answering is not our credential's fault.
+  const dark = ca.transition('live', 'unreachable', { lastError: 'fetch failed' });
+  assert.doesNotMatch(dark.text, /credential|configuration to fix/i);
+
+  // A halt is the chain's problem, and says so.
+  const halted = ca.transition('live', 'halted', { stalledMs: 252000, head: 12961063 });
+  assert.match(halted.text, /chain has halted/i);
+  assert.match(halted.text, /indexer is fine/i);
+  assert.match(halted.text, /4m/, 'reports how long the head has been frozen');
+
+  // Recovery closes the loop and reports the outage length.
+  const back = ca.transition('unauthorized', 'live', { head: 12961063, downMs: 4 * 3600e3 + 12 * 60e3 });
+  assert.match(back.text, /restored/i);
+  assert.match(back.text, /4h 12m/);
+
+  assert.equal(ca.humanDuration(45e3), '45s');
+  assert.equal(ca.humanDuration(90 * 60e3), '1h 30m');
+  assert.equal(ca.humanDuration(50 * 3600e3), '2d 2h');
+  assert.equal(ca.humanDuration(null), 'an unknown time', 'an unknown duration is never rendered as 0');
+
+  // Cooldown: a flapping endpoint must not turn into a hundred messages an hour. Telegram is
+  // unconfigured in tests, so note() reports the decision without sending anything.
+  ca.resetCooldowns();
+  const t0 = 1_000_000;
+  const ctx = { lastError: 'HTTP 401' };
+  assert.equal((await ca.note('live', 'unauthorized', ctx, t0)).reason, 'telegram_not_configured',
+    'first transition passes the cooldown and reaches delivery');
+  assert.equal((await ca.note('live', 'unauthorized', ctx, t0 + 60e3)).reason, 'cooldown',
+    'the same state again a minute later is suppressed');
+  assert.equal((await ca.note('live', 'unauthorized', ctx, t0 + ca.ALERT_COOLDOWN_MS)).reason, 'telegram_not_configured',
+    'and allowed again once the window has passed');
+
+  // A recovery must never be swallowed by the outage's own cooldown — that would leave the last
+  // message sent saying the site is broken after it came back.
+  ca.resetCooldowns();
+  await ca.note('live', 'unauthorized', ctx, t0);
+  assert.equal((await ca.note('unauthorized', 'live', { head: 1 }, t0 + 1000)).reason, 'telegram_not_configured',
+    'recovery has its own budget');
+});
+
+// ---- the availability record (chainuptime.js) ----
+// Every assertion here is really the same one: time we did not observe must never be published as
+// chain uptime. That is the only way this feature can lie, and it would lie in our favour, which
+// is the direction nobody checks.
+test('uptime is a share of observed time, never of the window', async () => {
+  const { uptimeFrom, incidents, VERDICT } = await import('../chainuptime.js');
+  const H = 3600e3;
+  const T = 1_700_000_000_000;
+  const win = (events, seen, hours = 10) => uptimeFrom(events, T, T + hours * H, seen);
+
+  // A plain halt: the one case where downtime is unambiguously the chain's.
+  const halt = win([
+    { at: T, state: 'live' },
+    { at: T + 4 * H, state: 'halted', head: 100 },
+    { at: T + 5 * H, state: 'live' },
+  ], T + 10 * H);
+  assert.equal(halt.upMs, 9 * H);
+  assert.equal(halt.downMs, H);
+  assert.equal(halt.uptimePct, 90);
+  assert.equal(halt.coveragePct, 100);
+
+  // The indexer was off for four hours. Uptime stays 100% — of what was seen — and coverage is what
+  // carries the gap. Reporting 60% here would blame the chain for our downtime; reporting 100% with
+  // no coverage figure would hide it. Both numbers, always.
+  const gap = win([
+    { at: T, state: 'live' },
+    { at: T + 2 * H, state: 'unobserved' },
+    { at: T + 6 * H, state: 'live' },
+  ], T + 10 * H);
+  assert.equal(gap.uptimePct, 100, 'a gap is not downtime');
+  assert.equal(gap.coveragePct, 60, 'and is not silently absorbed either');
+  assert.equal(gap.downMs, 0);
+  assert.equal(gap.unobservedMs, 4 * H);
+
+  // The outage that actually happened: our key refused for eight hours. Arc may have been perfectly
+  // healthy throughout, so this cannot appear as chain downtime — it is time we were not looking.
+  const refused = win([
+    { at: T, state: 'live' },
+    { at: T + H, state: 'unauthorized', error: 'HTTP 401' },
+    { at: T + 9 * H, state: 'live' },
+  ], T + 10 * H);
+  assert.equal(refused.downMs, 0, 'a rejected credential is never charged to the chain');
+  assert.equal(refused.byState.unauthorized, 8 * H, 'but it is still recorded, under our own name');
+  assert.equal(refused.uptimePct, 100);
+  assert.equal(refused.coveragePct, 20);
+
+  // Past the watermark nothing is claimed, including about the present. Without this the last known
+  // state extrapolates forward forever and a dead indexer publishes a perfect record.
+  const stale = win([{ at: T, state: 'live' }], T + 3 * H);
+  assert.equal(stale.upMs, 3 * H, 'the open segment ends where our knowledge does');
+  assert.equal(stale.coveragePct, 30);
+
+  // No watermark at all: decline to assume, rather than assume the best.
+  assert.equal(win([{ at: T, state: 'live' }], null).observedMs, 0);
+
+  // An empty record is not a perfect record.
+  const empty = win([], T + 10 * H);
+  assert.equal(empty.uptimePct, null, 'no observations yields null, never 100');
+  assert.equal(empty.coveragePct, 0);
+
+  // The state at the window's opening edge comes from the transition *before* it, or a healthy
+  // chain that last changed state months ago would read as entirely unobserved.
+  const leading = uptimeFrom([{ at: T - 500 * H, state: 'live' }], T, T + 2 * H, T + 2 * H);
+  assert.equal(leading.uptimePct, 100);
+  assert.equal(leading.coveragePct, 100);
+
+  // Episodes, for the half of a status page people actually read.
+  const eps = incidents([
+    { at: T, state: 'live' },
+    { at: T + 4 * H, state: 'halted', head: 100 },
+    { at: T + 5 * H, state: 'live' },
+    { at: T + 8 * H, state: 'unauthorized', error: 'HTTP 401' },
+  ], T, T + 10 * H, T + 10 * H);
+  assert.equal(eps.length, 2);
+  assert.equal(eps[0].state, 'unauthorized', 'most recent first');
+  assert.equal(eps[0].blame, 'stabledesk', 'our own outages are published, not filtered out');
+  assert.equal(eps[0].verdict, 'unobserved');
+  assert.ok(eps[0].ongoing, 'an episode with nothing after it has not been seen to end');
+  assert.equal(eps[1].blame, 'chain');
+  assert.equal(eps[1].ms, H);
+  assert.equal(eps[1].ongoing, false);
+
+  // A restart gap is dropped from the list but never from the arithmetic. Hiding it from both
+  // would be how an availability page quietly becomes a marketing page.
+  const restart = [
+    { at: T, state: 'live' },
+    { at: T + 5 * H, state: 'unobserved' },
+    { at: T + 5 * H + 20e3, state: 'live' },
+  ];
+  assert.equal(incidents(restart, T, T + 10 * H, T + 10 * H).length, 0, 'a 20-second redeploy is not an incident');
+  assert.equal(win(restart, T + 10 * H).byState.unobserved, 20e3, 'but it is still counted');
+  assert.ok(win(restart, T + 10 * H).coveragePct < 100, 'and still shows up as missing coverage');
+
+  // A brief halt, by contrast, is news at any length — the floor applies only to our own gaps.
+  const blip = incidents([
+    { at: T, state: 'live' },
+    { at: T + 5 * H, state: 'halted' },
+    { at: T + 5 * H + 20e3, state: 'live' },
+  ], T, T + 10 * H, T + 10 * H);
+  assert.equal(blip.length, 1, 'a 20-second halt is still reported');
+
+  // Drift guard: every state the indexer can reach has to be classified, or it silently falls into
+  // the unobserved bucket and quietly inflates uptime.
+  const { chainStateFrom, chainStateFromError } = await import('../indexer.js');
+  const reachable = new Set([
+    'unknown', 'unobserved',
+    chainStateFrom(null, 1, 0), chainStateFrom(5, 5, 99e3),
+    chainStateFromError({ allAuth: true }), chainStateFromError({ allAuth: false }),
+  ]);
+  for (const s of reachable) assert.ok(VERDICT[s], `state "${s}" has no verdict`);
+});
+
+// ---- the machine-readable surfaces (openapi.js) ----
+// The spec is generated so it can't be forgotten, but "generated" only guarantees it is *built* —
+// not that it still describes the API. The drift that matters is a route added to api.js and never
+// described, so that is what this asserts, by reading the routes out of the source rather than
+// from a list someone has to remember to update.
+test('the OpenAPI spec describes every route the API actually serves', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { spec, llmsTxt } = await import('../openapi.js');
+  const doc = spec();
+
+  const src = await readFile(new URL('../api.js', import.meta.url), 'utf8');
+  const literal = [...src.matchAll(/path === '(\/v1[^']*)'/g)].map((m) => m[1]);
+  const prefixes = [...src.matchAll(/path\.startsWith\('(\/v1[^']*)'\)/g)].map((m) => m[1]);
+  const described = Object.keys(doc.paths);
+
+  for (const route of literal) {
+    assert.ok(described.includes(route), `${route} is served but not described in the spec`);
+  }
+  // Prefix routes appear templated ("/v1/address/{address}"), so they match by their stem.
+  for (const stem of prefixes) {
+    assert.ok(
+      described.some((p) => p.startsWith(stem) && p.includes('{')),
+      `${stem}… is served but has no templated path in the spec`,
+    );
+  }
+  // And the reverse: nothing described that isn't served, or the spec invents an endpoint.
+  for (const p of described) {
+    const served = literal.includes(p) || (p.includes('{') && prefixes.some((s) => p.startsWith(s)));
+    assert.ok(served, `${p} is described in the spec but no route serves it`);
+  }
+
+  // A dangling $ref makes the document unusable to every consumer that resolves them.
+  const refs = [];
+  (function walk(node) {
+    if (!node || typeof node !== 'object') return;
+    if (typeof node.$ref === 'string') refs.push(node.$ref);
+    for (const v of Object.values(node)) walk(v);
+  })(doc);
+  assert.ok(refs.length > 0);
+  for (const ref of refs) {
+    const target = ref.replace(/^#\//, '').split('/').reduce((o, k) => o?.[k], doc);
+    assert.notEqual(target, undefined, `dangling $ref: ${ref}`);
+  }
+
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(doc)), 'the spec must serialise');
+
+  // Both documents are network-derived on purpose: a hardcoded token list would render USYC on a
+  // network that doesn't carry it, which is the failure the generation exists to prevent.
+  const tokens = [...TOKEN_SYMBOLS];
+  const tokenEnum = doc.paths['/v1/stablecoins/{token}'].get.parameters[0].schema.enum;
+  assert.deepEqual(tokenEnum, tokens, 'the token enum must come from the active network profile');
+  assert.match(llmsTxt(), new RegExp(tokens.join(', ')), 'llms.txt states the tracked assets');
+  assert.match(llmsTxt(), /openapi\.json/, 'llms.txt points an agent at the spec');
+});
+
 // ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----
 test('whalewatch: threshold filtering, drafting, and dedupe', async () => {
   const db = await import('../db.js');

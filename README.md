@@ -42,6 +42,9 @@ indexing forward and serves:
 - `GET /api/history?token=ALL|USDC|EURC|USYC&range=1h|24h|7d` — time series (volume, count, mint, burn)
 - `GET /api/top?limit=N` — top addresses by volume
 - `GET /api/health` — status: indexer health *and* chain liveness, reported separately
+- `GET /api/uptime?days=30` — the availability record: uptime over observed time, plus coverage
+- `GET /openapi.json` — OpenAPI 3.1 description of the whole `/v1` surface
+- `GET /llms.txt` — short index of the site and its data, for language models and agents
 
 State (SQLite) is written to `arc.db` (gitignored). Delete it to re-index from scratch.
 
@@ -72,10 +75,48 @@ remedies, so they are tracked and reported as two separate things.
 - **Rolling windows re-anchor**: frozen, the 24h windows end at the last indexed minute
   (`windowEnd`) rather than at now — a trailing-24h-from-now window on a halted chain would
   report "24h volume: 0" and state the chain sat idle when in fact it stopped.
+- **The verdict is pushed, not just published** (`chainalert.js`). A refused credential once sat in
+  production for four days — correctly diagnosed and correctly displayed, on a page nobody was
+  watching. State *changes* are announced to Telegram (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`,
+  optional) and always logged; the condition is not, because alerting every poll would send hundreds
+  of identical messages an hour and train the reader to ignore them. Recovery has its own cooldown
+  budget so it can never be swallowed by the outage's.
+
+### Machine-readable surfaces
+
+`/openapi.json` and `/llms.txt` are **generated from the live configuration**, for the same reason
+`sitemap.xml` is: a hand-maintained document is a hand-maintained omission, and the parts most
+likely to rot — the tracked token symbols, the chain id, the per-tier rate limits — are exactly the
+parts that differ per network. A smoke test reads the routes back out of `api.js` and fails if the
+API serves something the spec doesn't describe, or describes something it doesn't serve.
+
+### The availability record
+
+Every transition is kept (`chain_events`, never pruned), so "was Arc up last Tuesday" stops
+depending on someone's memory of an alert. Published on `/status` and `/v1/chain/uptime`.
+
+The arithmetic is the whole feature, because the obvious version of it lies. Computing
+`live_ms / wall_clock_ms` books every second the indexer wasn't running as whatever state it last
+saw — leave it off for a week and it publishes a week of Arc uptime it never witnessed.
+
+- **Uptime is a share of observed time, and coverage is published beside it, always.** 99.9% over
+  4% coverage is a statement about four percent of the month. A watermark is written while the
+  indexer runs and a gap marker at boot, so time nobody was watching is a fact in the record rather
+  than an absence that reads as continuity.
+- **A refused credential is not chain downtime.** Our own four-day 401 counts as time we weren't
+  looking, not as Arc being down — the chain may have been perfectly healthy throughout. Booking it
+  against Arc would be the same misattribution the `unauthorized` state was introduced to prevent,
+  in the one place where the error flatters us.
+- **`unreachable` is counted as down, and the caveat is published with it**: our host losing
+  connectivity is indistinguishable from the chain going dark. The full per-state breakdown is
+  returned so a reader who draws that line differently can recompute without us.
+- **Incidents name who was at fault**, including when it was us. Our outages appear in the list
+  under our own name rather than being filtered out.
+- Nothing observed yields `null`, not 100%.
 
 ### How it works
 
-- **Modules**: `rpc.js` (RPC + chain constants) · `db.js` (SQLite schema + queries) · `indexer.js` (backfill + live loop + snapshot) · `server.js` (HTTP + API).
+- **Modules**: `rpc.js` (RPC + chain constants) · `db.js` (SQLite schema + queries) · `indexer.js` (backfill + live loop + snapshot) · `server.js` (HTTP + API) · `openapi.js` (generated spec + `llms.txt`).
 - **Trick**: blocks are ~0.5s with no reorgs, so a transfer's timestamp is derived from its block number against a rolling anchor — the indexer only needs `eth_getLogs`, sparing the rate-limited public RPC.
 
 ## Networks
@@ -107,8 +148,8 @@ so the hot path only needs `eth_getLogs` and the rate-limited public RPC is spar
    CSV export, and `rankings.js` for the daily digest.
 6. ✅ **Honest degradation** — chain liveness separated from indexer health, indexed history served
    through an outage (see *When the chain stops* above).
-7. **Chain uptime history** — persist the `live → halted → live` transitions the indexer already
-   detects, so Arc's availability since launch becomes a public record.
+7. ✅ **Chain uptime history** — the transitions are persisted, so Arc's availability since launch
+   is a public record (`/status`, `/v1/chain/uptime` — see *The availability record* below).
 8. **Billing** — USDC on Base is implemented (`payments.js`); card payment is not.
 
 ### Ecosystem endpoints
@@ -145,5 +186,5 @@ must never claim to be something it isn't.**
 
 ## Author
 
-Built by [@mrlazeeem](https://github.com/mrlazeeem) — [@getStabledesk](https://x.com/getStabledesk) ·
-[stabledesk.xyz](https://stabledesk.xyz)
+Built by **Gaëtan Moreno** — [@moreno-g](https://github.com/moreno-g) ·
+[@getStabledesk](https://x.com/getStabledesk) · [studiomoreno@icloud.com](mailto:studiomoreno@icloud.com)

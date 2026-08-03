@@ -142,6 +142,21 @@ db.exec(`
     PRIMARY KEY (day, protocol)
   );
   CREATE INDEX IF NOT EXISTS idx_tvlh_proto ON tvl_history(protocol, day);
+
+  -- The chain-availability record: one row per state change, forever. See chainuptime.js.
+  -- Deliberately absent from prune(): every other table here is a rolling window because its rows
+  -- are per-minute or per-address and grow without bound, whereas a row lands here only when the
+  -- chain's state actually changes. Pruning the one table whose entire purpose is to be a
+  -- permanent record would delete the feature. Rows include the synthetic 'unobserved' state,
+  -- written at boot to mark where the previous session stopped watching.
+  CREATE TABLE IF NOT EXISTS chain_events (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    at    INTEGER NOT NULL,               -- unix ms
+    state TEXT    NOT NULL,
+    head  INTEGER,                        -- head block at the transition, when known
+    error TEXT                            -- the error that caused it, for non-live states
+  );
+  CREATE INDEX IF NOT EXISTS idx_chain_events_at ON chain_events(at);
 `);
 
 // Migrations, safe on existing DBs:
@@ -534,6 +549,32 @@ export function volumeForAddresses(addrs) {
     found += r?.found || 0;
   }
   return { volume, transfers, addressesSeen: found };
+}
+
+// ---- chain availability record (see chainuptime.js) ----
+
+const cestmt = {
+  ins: db.prepare('INSERT INTO chain_events(at, state, head, error) VALUES(?, ?, ?, ?)'),
+  last: db.prepare('SELECT at, state, head, error FROM chain_events ORDER BY at DESC, id DESC LIMIT 1'),
+  first: db.prepare('SELECT at FROM chain_events ORDER BY at ASC, id ASC LIMIT 1'),
+  since: db.prepare('SELECT at, state, head, error FROM chain_events WHERE at >= ? ORDER BY at ASC, id ASC'),
+  before: db.prepare('SELECT at, state, head, error FROM chain_events WHERE at < ? ORDER BY at DESC, id DESC LIMIT 1'),
+};
+
+export const recordChainEvent = (at, state, head = null, error = null) =>
+  cestmt.ins.run(at, state, head ?? null, error ? String(error).slice(0, 300) : null);
+
+export const lastChainEvent = () => cestmt.last.get() ?? null;
+export const firstChainEventAt = () => cestmt.first.get()?.at ?? null;
+
+// The window, plus the one transition that precedes it. Without that leading row the state at the
+// window's opening edge is unknown, and every window would open with a stretch of false "unobserved"
+// running until the next time the chain happened to change state — which on a healthy chain could
+// be the entire window.
+export function chainEventsSince(from) {
+  const prior = cestmt.before.get(from);
+  const rows = cestmt.since.all(from);
+  return prior ? [prior, ...rows] : rows;
 }
 
 export function prune(nowSec, latestBlock, blockMs) {
