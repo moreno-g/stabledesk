@@ -12,6 +12,13 @@ export const ZERO = '0x0000000000000000000000000000000000000000';
 export const TOKENS = CHAIN.tokens;
 export const TOKEN_ADDRS = Object.keys(TOKENS);
 
+// Circle Gateway, or null on a network where it isn't deployed. Empty rather than absent so
+// callers can iterate unconditionally; `HAS_GATEWAY` is what decides whether a bridge-adjusted
+// figure is a measurement at all.
+export const GATEWAY = CHAIN.gateway || null;
+export const GATEWAY_ADDRS = GATEWAY ? [GATEWAY.wallet, GATEWAY.minter] : [];
+export const HAS_GATEWAY = GATEWAY_ADDRS.length > 0;
+
 // Shared, mutable network status (endpoint currently answering).
 export const net = { endpoint: ENDPOINTS[0] };
 
