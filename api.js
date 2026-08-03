@@ -2,7 +2,7 @@
 
 import { randomBytes } from 'node:crypto';
 import * as db from './db.js';
-import { live, chainStatus, organicIssuance } from './indexer.js';
+import { live, chainStatus, organicIssuance, indexProgress } from './indexer.js';
 import * as tvl from './tvl.js';
 import * as rankings from './rankings.js';
 import * as chainuptime from './chainuptime.js';
@@ -83,6 +83,10 @@ export async function handleV1(req, res, u) {
       // whose fault that is — otherwise a halted chain looks like a broken API.
       degraded: !!live.snapshot.degraded,
       chain: chainStatus(),
+      // How far the indexer is from the head, read live. `block` and `indexLag` below come from
+      // the snapshot and freeze during a long catch-up, so this is the only field here that keeps
+      // moving while history is being replayed — poll it twice to get a rate.
+      index: indexProgress(),
       chainId: CHAIN.chainId,
       network: CHAIN.id,
       block: live.snapshot.network?.block ?? null,

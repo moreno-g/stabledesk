@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 
 import * as db from './db.js';
-import { live, alertFeed, chainStatus, start, stop } from './indexer.js';
+import { live, alertFeed, chainStatus, indexProgress, start, stop } from './indexer.js';
 import * as payments from './payments.js';
 import * as entities from './entities.js';
 import * as tvl from './tvl.js';
@@ -302,6 +302,11 @@ const server = http.createServer(async (req, res) => {
       // fault on our side — the two have identical symptoms and opposite remedies. Read live,
       // not from the snapshot, which is only rebuilt when a poll completes.
       chain: chainStatus(),
+      // Read live for the same reason `chain` is: everything below comes from the snapshot, which
+      // is only rebuilt when a tick completes. During a long catch-up that is precisely never, so
+      // `block` and `indexLag` freeze while the indexer works — and a health endpoint that cannot
+      // tell "replaying history" from "hung" is not reporting health.
+      index: indexProgress(),
       block: live.snapshot.network?.block ?? null,
       indexLag: live.snapshot.indexLag ?? null,
       dataAt: live.snapshot.dataAt ?? null,
