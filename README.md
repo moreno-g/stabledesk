@@ -74,6 +74,12 @@ remedies, so they are tracked and reported as two separate things.
 - **Rolling windows re-anchor**: frozen, the 24h windows end at the last indexed minute
   (`windowEnd`) rather than at now — a trailing-24h-from-now window on a halted chain would
   report "24h volume: 0" and state the chain sat idle when in fact it stopped.
+- **The verdict is pushed, not just published** (`chainalert.js`). A refused credential once sat in
+  production for four days — correctly diagnosed and correctly displayed, on a page nobody was
+  watching. State *changes* are announced to Telegram (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`,
+  optional) and always logged; the condition is not, because alerting every poll would send hundreds
+  of identical messages an hour and train the reader to ignore them. Recovery has its own cooldown
+  budget so it can never be swallowed by the outage's.
 
 ### Machine-readable surfaces
 
