@@ -37,6 +37,12 @@ export const NOISE_FILTER = {
   volumePerDay: 10e6 / 30,   // ≈ $333k/day
 };
 
+// Chain liveness. A halted chain and a broken indexer produce the same symptom — no fresh
+// data — and reporting both as "the indexer is down" blames us for an upstream outage. The
+// head block advancing is the discriminator: Arc targets ~0.5s blocks, so a head that hasn't
+// moved for a full minute is the chain stopping, not the poll being slow.
+export const CHAIN_HALT_MS = 60 * 1000;
+
 // Fee accounting. Exact fees only exist in transaction receipts, and fetching receipts for
 // every block (~172k/day at 0.5s blocks) would bury the rate-limited public RPC. Instead we
 // sample a few blocks each tick — exact for the blocks sampled — and report the sample size

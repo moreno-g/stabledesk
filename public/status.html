@@ -89,8 +89,10 @@
 
   <div class="grid">
     <div class="kpi"><div class="lab">Chain</div><div class="val">{{NET}} · {{CHAIN_ID}}</div></div>
-    <div class="kpi"><div class="lab">Current block</div><div class="val" id="block">—</div></div>
+    <div class="kpi"><div class="lab">Chain state</div><div class="val" id="chainState">—</div></div>
+    <div class="kpi"><div class="lab" id="blockLab">Current block</div><div class="val" id="block">—</div></div>
     <div class="kpi"><div class="lab">Index lag</div><div class="val" id="lag">—</div></div>
+    <div class="kpi"><div class="lab">Data as of</div><div class="val" id="dataAge">—</div></div>
     <div class="kpi"><div class="lab">Last checked</div><div class="val" id="checked">—</div></div>
   </div>
 
@@ -113,7 +115,16 @@
 <script>
 const $ = (s) => document.querySelector(s);
 const nf = new Intl.NumberFormat('en-US');
-function ago(ts){ const s = Math.max(0, Math.round((Date.now()-ts)/1000)); return s<2?'just now':s+'s ago'; }
+// Ages here are now measured against a chain that can be halted for hours, so seconds alone
+// stopped being readable.
+function dur(ms){
+  const s = Math.max(0, Math.round(ms/1000));
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.round(s/60) + ' min';
+  if (s < 86400) return (s/3600).toFixed(s < 7200 ? 1 : 0) + ' h';
+  return (s/86400).toFixed(s < 172800 ? 1 : 0) + ' d';
+}
+function ago(ts){ const s = Math.max(0, Math.round((Date.now()-ts)/1000)); return s<2?'just now':dur(Date.now()-ts)+' ago'; }
 
 async function poll(){
   try{
@@ -121,26 +132,70 @@ async function poll(){
     const j = await r.json();
     const dot = $('#dot'), headline = $('#headline'), subline = $('#subline'), errbox = $('#errbox');
 
-    if (!j.ok) {
+    // Two independent things can be wrong — the chain, or us — and the old page reported both
+    // as "the indexer is not reporting healthy data", taking the blame for upstream outages.
+    // Chain state is checked first because it explains our state, not the other way round.
+    const c = j.chain || {};
+
+    if (c.state === 'halted') {
+      dot.className = 'dot warn';
+      headline.textContent = 'Arc has stopped producing blocks';
+      subline.textContent = 'The chain is halted' + (c.head != null ? ' at #' + nf.format(c.head) : '')
+        + (c.stalledMs ? ' — no new block for ' + dur(c.stalledMs) : '')
+        + '. Stabledesk is up and serving the history it indexed.';
+    } else if (c.state === 'unreachable') {
+      dot.className = 'dot warn';
+      headline.textContent = 'Arc is unreachable';
+      subline.textContent = 'No RPC endpoint is answering. Stabledesk is up and serving the history it indexed'
+        + (j.dataAt ? ', frozen at ' + ago(j.dataAt) : '') + '.';
+    } else if (j.booting) {
+      dot.className = 'dot warn';
+      headline.textContent = 'Indexing';
+      subline.textContent = 'Building the first pass of history — figures appear as blocks are read.';
+    } else if (!j.ok) {
       dot.className = 'dot bad';
       headline.textContent = 'Down';
       subline.textContent = 'The indexer is not reporting healthy data right now.';
-    } else if (j.stale) {
+    } else if (j.degraded || j.stale) {
       dot.className = 'dot warn';
-      headline.textContent = 'Degraded';
-      subline.textContent = 'Serving the last known good data — a fresh update is delayed.';
+      // The chain is producing blocks and we are behind it — a backfill, or catching up after a
+      // restart. Distinct from both failure modes above, and it resolves on its own.
+      headline.textContent = c.state === 'live' ? 'Catching up' : 'Degraded';
+      subline.textContent = c.state === 'live'
+        ? 'The chain is healthy; the index is reading its way to the head.'
+        : 'Serving the last known good data — a fresh update is delayed.';
     } else {
       dot.className = 'dot good';
       headline.textContent = 'All systems operational';
       subline.textContent = 'Live and fully caught up with the chain.';
     }
 
+    const frozen = c.state === 'halted' || c.state === 'unreachable';
+    // Whenever we are serving indexed history the figure is the last block we read, not the head
+    // of the chain — and while catching up those are millions of blocks apart.
     $('#block').textContent = j.block != null ? '#' + nf.format(j.block) : '—';
-    $('#lag').textContent = j.indexLag != null ? (j.indexLag === 0 ? 'Caught up' : j.indexLag + ' blocks') : '—';
+    $('#blockLab').textContent = j.degraded ? 'Last indexed block' : 'Current block';
+
+    // Behind the head by however far the chain has run ahead of us. The indexer only publishes
+    // indexLag on a completed poll, so during a backfill it is derived from the two block numbers.
+    const lag = j.indexLag != null ? j.indexLag
+      : (c.head != null && j.block != null ? Math.max(0, c.head - j.block) : null);
+    $('#lag').textContent = frozen ? '—'
+      : lag == null ? '—'
+      : lag === 0 ? 'Caught up' : nf.format(lag) + ' blocks';
+    $('#chainState').textContent = c.state === 'live' ? 'Producing blocks'
+      : c.state === 'halted' ? 'Halted'
+      : c.state === 'unreachable' ? 'Unreachable' : '—';
+    $('#dataAge').textContent = j.dataAt ? ago(j.dataAt) : '—';
     $('#checked').textContent = ago(Date.now());
 
-    if (j.lastError) { errbox.style.display = 'block'; errbox.textContent = j.lastError; }
-    else { errbox.style.display = 'none'; }
+    // Kept visible — the raw error is the point of a status page — but attributed, so a chain-side
+    // failure isn't read as ours just because we are the one reporting it.
+    const err = c.lastError || j.lastError;
+    if (err) {
+      errbox.style.display = 'block';
+      errbox.textContent = (frozen ? 'chain rpc: ' : 'indexer: ') + err;
+    } else { errbox.style.display = 'none'; }
   } catch (e) {
     $('#dot').className = 'dot bad';
     $('#headline').textContent = 'Unreachable';

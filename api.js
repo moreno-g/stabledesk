@@ -2,7 +2,7 @@
 
 import { randomBytes } from 'node:crypto';
 import * as db from './db.js';
-import { live } from './indexer.js';
+import { live, chainStatus } from './indexer.js';
 import * as tvl from './tvl.js';
 import * as rankings from './rankings.js';
 import { search } from './search.js';
@@ -78,11 +78,16 @@ export async function handleV1(req, res, u) {
   if (path === '/v1/status') {
     return json(res, {
       ok: live.snapshot.ok,
+      // A consumer polling this needs to know whether the figures are advancing, and if not,
+      // whose fault that is — otherwise a halted chain looks like a broken API.
+      degraded: !!live.snapshot.degraded,
+      chain: chainStatus(),
       chainId: CHAIN.chainId,
       network: CHAIN.id,
       block: live.snapshot.network?.block ?? null,
       indexLag: live.snapshot.indexLag ?? null,
       updatedAt: live.snapshot.updatedAt ?? null,
+      dataAt: live.snapshot.dataAt ?? null,
       billingEnabled: BILLING_ENABLED,
     });
   }
@@ -160,8 +165,12 @@ export async function handleV1(req, res, u) {
   if (path === '/v1/stablecoins/history') {
     const token = (u.searchParams.get('token') || 'ALL').toUpperCase();
     const r = RANGES[u.searchParams.get('range')] || RANGES['24h'];
-    const since = Math.floor(Date.now() / 1000) - r.span;
-    return json(res, { token, group: r.group, series: db.getHistory(token, since, r.group) }, 200, H);
+    // Same anchoring as the internal endpoint: while the chain is frozen the range ends at the
+    // last indexed minute, and `windowEnd` states which instant that is so a consumer is never
+    // left to assume the series runs up to the moment they called.
+    const endSec = Math.floor((s.windowEnd || Date.now()) / 1000);
+    const since = endSec - r.span;
+    return json(res, { token, group: r.group, windowEnd: endSec * 1000, series: db.getHistory(token, since, r.group) }, 200, H);
   }
 
   // per-token detail: supply/velocity + 24h summary + net issuance + size distribution
