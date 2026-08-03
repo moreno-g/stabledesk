@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stabledesk · Status</title>
-<meta name="description" content="Live status of the Stabledesk indexer and API — current block, index lag, last check.">
+<meta name="description" content="Live status of the Stabledesk indexer and API, plus Arc's availability record — uptime measured against observed time, with coverage stated.">
 <meta name="robots" content="noindex">
 <link rel="canonical" href="https://stabledesk.xyz/status">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%230FA79E'/%3E%3Cstop offset='.5' stop-color='%2325C4B8'/%3E%3Cstop offset='1' stop-color='%239B7EDE'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M22 10L10 10L10 22L22 22' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round' transform='rotate(-45 16 16)'/%3E%3C/svg%3E">
@@ -55,6 +55,39 @@
 
   .errbox{background:color-mix(in srgb,var(--bad) 10%,var(--panel)); border:1px solid color-mix(in srgb,var(--bad) 35%,var(--line)); border-radius:12px; padding:14px 16px; font-family:var(--mono); font-size:12.5px; color:var(--ink); margin-bottom:16px; display:none}
 
+  /* Availability record. The stacked bar exists so the unobserved share is impossible to skip
+     past: an uptime percentage read without its coverage is the one misreading this whole
+     feature is built to prevent, and a caveat in small print under a big green number does not
+     prevent it. */
+  .sec{display:flex; align-items:baseline; gap:10px; margin:26px 0 12px}
+  .sec h2{font-size:14px; margin:0; letter-spacing:-.01em}
+  .sec .ranges{margin-left:auto; display:flex; gap:4px}
+  .sec button{font:inherit; font-size:11.5px; padding:3px 9px; border-radius:7px; border:1px solid var(--line-2); background:var(--panel); color:var(--ink-3); cursor:pointer}
+  .sec button[aria-pressed="true"]{color:var(--ink); border-color:var(--accent)}
+  .rec{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 18px; box-shadow:var(--shadow)}
+  .rec-head{display:flex; flex-wrap:wrap; gap:6px 26px; align-items:baseline}
+  .rec-head .big{font-family:var(--mono); font-size:28px; font-weight:650; font-variant-numeric:tabular-nums; letter-spacing:-.02em}
+  .rec-head .lab{font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3); font-weight:600}
+  .rec-head .cov{font-family:var(--mono); font-size:15px; font-weight:600; color:var(--ink-2); font-variant-numeric:tabular-nums}
+  .bar{display:flex; height:9px; border-radius:5px; overflow:hidden; background:var(--inset); margin:14px 0 10px}
+  .bar span{display:block; min-width:0}
+  .bar .s-live{background:var(--good)} .bar .s-halted{background:var(--warn)}
+  .bar .s-unreachable{background:color-mix(in srgb,var(--warn) 55%,var(--ink-3))}
+  .bar .s-unauthorized{background:var(--bad)}
+  .bar .s-unobserved{background:repeating-linear-gradient(135deg,var(--line-2) 0 4px,transparent 4px 8px)}
+  .key{display:flex; flex-wrap:wrap; gap:6px 16px; font-size:11.5px; color:var(--ink-3)}
+  .key i{display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:5px; vertical-align:0}
+  .note{font-size:11.5px; color:var(--ink-3); margin-top:11px; padding-top:11px; border-top:1px solid var(--line)}
+  .inc{display:flex; gap:10px; align-items:baseline; padding:9px 0; border-top:1px solid var(--line); font-size:12.5px}
+  .inc:first-child{border-top:0}
+  .inc .when{font-family:var(--mono); color:var(--ink-3); font-size:11.5px; flex:none; min-width:112px}
+  .inc .what{flex:1; min-width:0}
+  .inc .len{font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--ink-2); flex:none}
+  .tag{font-size:9.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; border-radius:4px; padding:1px 5px; margin-left:6px; vertical-align:1px; border:1px solid}
+  .tag.chain{color:var(--warn); border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
+  .tag.stabledesk{color:var(--bad); border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
+  .tag.unknown{color:var(--ink-3); border-color:var(--line-2)}
+
   .site-foot{margin-top:26px; border-top:1px solid var(--line); padding-top:16px; font-size:12px; color:var(--ink-3)}
   .sf-cols{display:flex; flex-wrap:wrap; gap:10px 24px; align-items:center; justify-content:space-between}
   .sf-brand{display:flex; align-items:center; gap:8px; font-weight:700; color:var(--ink-2); letter-spacing:.02em}
@@ -96,6 +129,31 @@
     <div class="kpi"><div class="lab">Last checked</div><div class="val" id="checked">—</div></div>
   </div>
 
+  <div class="sec">
+    <h2>Arc availability</h2>
+    <div class="ranges" id="ranges">
+      <button type="button" data-days="7">7d</button>
+      <button type="button" data-days="30" aria-pressed="true">30d</button>
+      <button type="button" data-days="90">90d</button>
+    </div>
+  </div>
+  <div class="rec">
+    <div class="rec-head">
+      <div>
+        <div class="lab">Uptime, of time observed</div>
+        <div class="big" id="upPct">—</div>
+      </div>
+      <div>
+        <div class="lab">Observed</div>
+        <div class="cov" id="covPct">—</div>
+      </div>
+    </div>
+    <div class="bar" id="bar"></div>
+    <div class="key" id="key"></div>
+    <div class="note" id="recNote"></div>
+    <div id="incidents"></div>
+  </div>
+
   <footer class="site-foot">
     <div class="sf-cols">
       <div class="sf-brand"><span class="sf-logo"></span> Stabledesk</div>
@@ -107,7 +165,7 @@
         <a href="/status">Status</a>
         <a href="/entities">Entities <span class="beta-dot">beta</span></a>
         <a href="https://x.com/getStabledesk">@getStabledesk</a>
-        <a href="https://github.com/mrlazeeem/stabledesk">Source</a>
+        <a href="https://github.com/moreno-g/stabledesk">Source</a>
       </nav>
     </div>
   </footer>
@@ -214,8 +272,77 @@ async function poll(){
     $('#subline').textContent = 'Could not reach the API from your browser.';
   }
 }
+// ---- availability record ----
+// The pairing of uptime with coverage is load-bearing, not decorative: the number above is a share
+// of what we watched, and every stretch we did not watch — including the eight-hour window our own
+// key was refused — sits in the striped segment rather than being quietly credited to Arc.
+const STATE_LABEL = {
+  live: 'Producing blocks', halted: 'Halted', unreachable: 'Unreachable',
+  unauthorized: 'Our key refused', unobserved: 'Not watching', unknown: 'Unknown',
+};
+const BLAME_LABEL = { chain: 'Arc', stabledesk: 'Stabledesk', unknown: 'Unattributed' };
+const ORDER = ['live', 'halted', 'unreachable', 'unauthorized', 'unobserved', 'unknown'];
+const pct1 = (n) => (n >= 99.995 ? '100' : n.toFixed(n < 99.9 ? 1 : 2));
+// Pinned to en-US like the number formatter above, rather than following the browser: the rest of
+// this page is in English, and a French month next to an English label reads as a bug.
+const when = (ts) => new Date(ts).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+let recDays = 30;
+
+async function pollRecord(){
+  try{
+    const j = await (await fetch('/api/uptime?days=' + recDays, { cache: 'no-store' })).json();
+
+    // Null, not "100%", when nothing was observed — a percentage computed from no measurements is
+    // a fabrication with a decimal point, and this page exists to not do that.
+    $('#upPct').textContent = j.uptimePct == null ? 'No data' : pct1(j.uptimePct) + '%';
+    $('#covPct').textContent = j.coveragePct == null ? '—' : pct1(j.coveragePct) + '% of ' + recDays + 'd';
+
+    const total = j.windowMs || 1;
+    $('#bar').innerHTML = ORDER
+      .filter((s) => (j.byState?.[s] || 0) > 0)
+      .map((s) => `<span class="s-${s}" style="flex:${(j.byState[s] / total) * 100}" title="${STATE_LABEL[s]}: ${dur(j.byState[s])}"></span>`)
+      .join('');
+    $('#key').innerHTML = ORDER
+      .filter((s) => (j.byState?.[s] || 0) > 0)
+      .map((s) => `<span><i class="s-${s}" style="background:${s === 'unobserved' ? 'repeating-linear-gradient(135deg,var(--line-2) 0 3px,transparent 3px 6px)' : ''}"></i>${STATE_LABEL[s]} ${dur(j.byState[s])}</span>`)
+      .join('');
+
+    // Stated in prose because the caveats are the measurement. A reader who takes only the big
+    // number away should still not be able to take away a wrong one.
+    const notes = ['Uptime is measured against observed time only.'];
+    if (j.byState?.unauthorized > 0) {
+      notes.push('The ' + dur(j.byState.unauthorized) + ' our RPC credentials were refused is counted as time not observed, not as Arc downtime — the chain may well have been healthy throughout.');
+    }
+    if (j.recordBegan && j.recordBegan > j.window.from) {
+      notes.push('The record begins ' + when(j.recordBegan) + ', so this window is only partly covered.');
+    }
+    $('#recNote').textContent = notes.join(' ');
+
+    $('#incidents').innerHTML = (j.incidents || []).length
+      ? j.incidents.map((i) => `<div class="inc">
+          <span class="when">${when(i.from)}</span>
+          <span class="what">${STATE_LABEL[i.state] || i.state}<span class="tag ${i.blame}">${BLAME_LABEL[i.blame] || i.blame}</span>${i.ongoing ? ' <span style="color:var(--ink-3)">· ongoing</span>' : ''}</span>
+          <span class="len">${dur(i.ms)}</span>
+        </div>`).join('')
+      : '<div class="inc" style="color:var(--ink-3)">No interruptions recorded in this window.</div>';
+  } catch { /* the banner above already reports an unreachable API; no need to say it twice */ }
+}
+
+$('#ranges').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-days]');
+  if (!b) return;
+  recDays = Number(b.dataset.days);
+  for (const el of $('#ranges').children) el.setAttribute('aria-pressed', String(el === b));
+  pollRecord();
+});
+
 poll();
 setInterval(poll, 5000);
+pollRecord();
+// The record moves on the timescale of incidents, not of blocks — polling it as often as the
+// banner would be a request a minute to redraw an identical bar.
+setInterval(pollRecord, 60000);
 </script>
 </body>
 </html>

@@ -6,6 +6,8 @@ import * as db from './db.js';
 import { getLabel } from './labels.js';
 import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES } from './constants.js';
 import { CHAIN } from './chains.js';
+import * as chainalert from './chainalert.js';
+import { SEEN_KEY, UNOBSERVED } from './chainuptime.js';
 
 const TOTAL_SUPPLY = '0x18160ddd'; // ERC-20 totalSupply() selector
 const SUPPLY_TTL = 30000;          // refresh supplies at most this often
@@ -48,7 +50,7 @@ export const live = { snapshot: { ok: false, booting: true } };
 //   halted       — the RPC answers, but the head hasn't moved for CHAIN_HALT_MS
 //   unauthorized — every endpoint answered and refused our credentials (ours to fix)
 //   unreachable  — nobody answered at all
-export const chain = { state: 'unknown', head: null, headAt: 0, lastOkAt: 0, lastError: null };
+export const chain = { state: 'unknown', head: null, headAt: 0, lastOkAt: 0, lastError: null, downSince: 0 };
 
 // Pure: the head-advancement rule on its own. A head that has not moved is only evidence of a
 // halt once it has stood still longer than a block could plausibly take — below that threshold
@@ -58,12 +60,71 @@ export function chainStateFrom(prevHead, latest, sinceHeadMs, haltMs = CHAIN_HAL
   return sinceHeadMs > haltMs ? 'halted' : 'live';
 }
 
+// The single place chain.state is allowed to change, so that every transition is announced exactly
+// once. Assigning the field directly from two call sites is how the four-day outage stayed quiet:
+// the state was right, nothing was listening to it changing.
+function setChainState(next) {
+  const prev = chain.state;
+  if (prev === next) return next;
+  chain.state = next;
+  // When the outage began, so a recovery can report how long it lasted.
+  if (next !== 'live') { if (!chain.downSince) chain.downSince = Date.now(); }
+
+  const ctx = { ...chainStatus(), downMs: chain.downSince ? Date.now() - chain.downSince : null };
+  if (next === 'live') chain.downSince = 0;
+
+  // Written before anything is announced, and unconditionally — the record keeps transitions the
+  // alert deliberately stays quiet about (a boot straight into a healthy chain is not worth paging
+  // anyone, but it is exactly the row that opens an observed interval). Newsworthiness is a
+  // property of the message, not of the history.
+  try {
+    db.recordChainEvent(Date.now(), next, chain.head, next === 'live' ? null : chain.lastError);
+    markSeen(Date.now(), true);
+  } catch (e) {
+    console.error('[uptime] could not record transition:', e.message || e);
+  }
+
+  // Fire and forget, and swallow its failures: an unreachable Telegram must never be able to stop
+  // the indexer. The alert is a report about the outage, not part of handling it.
+  chainalert.note(prev, next, ctx).catch((e) => console.error('[chainalert]', e.message || e));
+  return next;
+}
+
+// How often the "we were watching" watermark is written. One row update, so not free, and the
+// resolution only has to be fine enough that an unclean shutdown forfeits a negligible slice of
+// the record rather than an hour of it.
+const SEEN_TTL = 30000;
+let seenAt = 0;
+
+// The watermark is what stops the last known state from being extrapolated forward forever. It
+// records that we were *looking*, not that the chain was well — so it is written on the failure
+// path too: an outage we sat and watched is measured downtime, and the most valuable rows in the
+// record are precisely the ones written while things were broken.
+function markSeen(now = Date.now(), force = false) {
+  if (!force && now - seenAt < SEEN_TTL) return;
+  seenAt = now;
+  try { db.setMetaValue(SEEN_KEY, now); } catch (e) { console.error('[uptime]', e.message || e); }
+}
+
+// Close the previous session's segment before opening this one. Without this marker the gap
+// between the last thing we saw and this boot reads as "the chain stayed in that state
+// throughout" — leave the indexer off for a week and it publishes a week of Arc uptime it never
+// witnessed. A gap has to be a fact in the record, not an absence that looks like continuity.
+function openObservationWindow() {
+  const last = db.lastChainEvent();
+  if (!last) return;                      // nothing was ever observed: the record simply starts here
+  if (last.state === UNOBSERVED) return;  // already closed — a crash between this marker and the first poll
+  const through = Number(db.getMetaValue(SEEN_KEY)) || 0;
+  // Never before the transition it closes: a stale watermark must not reorder the log.
+  db.recordChainEvent(Math.max(through, last.at), UNOBSERVED, null, 'indexer not running');
+}
+
 function noteHead(latest) {
   const now = Date.now();
   chain.lastOkAt = now;
   chain.lastError = null;
   const advanced = chain.head == null || latest > chain.head;
-  chain.state = chainStateFrom(chain.head, latest, now - chain.headAt);
+  setChainState(chainStateFrom(chain.head, latest, now - chain.headAt));
   if (advanced) { chain.head = latest; chain.headAt = now; }
   return chain.state;
 }
@@ -79,8 +140,10 @@ export function chainStateFromError(err) {
 }
 
 function noteRpcFailure(err) {
-  chain.state = chainStateFromError(err);
+  // Recorded before the state change, so the alert built by setChainState can quote the error that
+  // caused it rather than the previous one.
   chain.lastError = String(err?.message || err);
+  setChainState(chainStateFromError(err));
 }
 
 // What the API and the pages report about the chain, with the "how long" the UI needs to say
@@ -589,8 +652,12 @@ async function tick() {
     latest = parseInt(head.out[0], 16);
     gasWei = BigInt(head.out[1]);
     noteHead(latest);
+    markSeen();
   } catch (e) {
     noteRpcFailure(e);
+    // Watched, and therefore measured. Skipping this on the failure path would quietly convert
+    // every outage into a hole in the record — the record would then only ever contain good news.
+    markSeen();
     degrade(String(e.message || e));
     // Logged as whatever it was actually classified as — an operator grepping for the cause of a
     // frozen terminal should not be told "unreachable" when the endpoint is refusing our key.
@@ -644,6 +711,10 @@ export async function start() {
   //
   // Loading the flag set here also means a restart against an existing DB filters the backfill
   // from known bots instead of re-learning them from scratch.
+  // Before any poll can record a state, so the gap since the last session is closed in the right
+  // order and this session's first transition lands after it rather than on top of it.
+  openObservationWindow();
+
   loadPersistedSupplies();
   refreshNoisy();
   snapshotFromDb();
@@ -664,5 +735,9 @@ export async function start() {
   timer = setInterval(tick, POLL_MS);
 }
 
-// Stop the live poll loop (used for a clean shutdown).
-export function stop() { if (timer) { clearInterval(timer); timer = null; } }
+// Stop the live poll loop (used for a clean shutdown). The watermark is flushed on the way out so
+// an orderly restart costs the record nothing, rather than the up-to-SEEN_TTL the crash path does.
+export function stop() {
+  if (timer) { clearInterval(timer); timer = null; }
+  markSeen(Date.now(), true);
+}
