@@ -91,6 +91,18 @@
   .iconbtn:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
   .iconbtn svg{width:16px; height:16px; display:block}
 
+  /* Frozen-data notice. Shown when the chain has stopped or is unreachable: the figures below
+     are real but no longer moving, and saying so is what separates "measured, then the chain
+     halted" from "this dashboard is broken". */
+  .frozen{display:none; gap:11px; align-items:flex-start; background:color-mix(in srgb,var(--warn) 9%,var(--panel)); border:1px solid color-mix(in srgb,var(--warn) 34%,var(--line)); border-radius:12px; padding:13px 15px; margin-bottom:14px}
+  .frozen.on{display:flex}
+  .frozen.bad{background:color-mix(in srgb,var(--bad) 9%,var(--panel)); border-color:color-mix(in srgb,var(--bad) 34%,var(--line))}
+  .frozen .fi{width:8px; height:8px; border-radius:50%; background:var(--warn); flex:none; margin-top:6px}
+  .frozen.bad .fi{background:var(--bad)}
+  .frozen .fh{font-size:13.5px; font-weight:650; color:var(--ink)}
+  .frozen .fs{font-size:12.5px; color:var(--ink-2); margin-top:2px}
+  .frozen .fs a{color:var(--ink-2)}
+
   .kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:14px}
 
   /* Positioning statement — replaces an sr-only, keyword-stuffed h1 that no visitor ever saw. */
@@ -251,6 +263,11 @@
   data with a <a href="/methodology">published method</a>. Free <a href="/docs">API</a> and
   <a href="/docs">webhook alerts</a>.<!--testnet-only--> <b class="tnwarn">Figures below are {{NET}} — faucet money, not real value.</b><!--/testnet-only--></p>
 
+  <div class="frozen" id="frozen">
+    <span class="fi"></span>
+    <div><div class="fh" id="frozenHead"></div><div class="fs" id="frozenSub"></div></div>
+  </div>
+
   <div class="kpis" id="kpis"></div>
 
   <!-- Answers the ten-second test: a visitor arriving from a link should see, without scrolling,
@@ -402,7 +419,16 @@ function compact(n){
   if(a>=1e3) return (n/1e3).toFixed(1)+'K';
   return money(n, a<10?2:0);
 }
-const ago = (ts)=>{ const s=Math.max(0,Math.round((Date.now()-ts)/1000)); return s<2?'just now':s+'s ago'; };
+// Durations have to stay readable well past a minute now: when the chain halts, the age of the
+// data is the headline figure, and "14203s ago" is not a thing anyone reads.
+function dur(ms){
+  const s=Math.max(0,Math.round(ms/1000));
+  if(s<60) return s+'s';
+  if(s<3600) return Math.round(s/60)+' min';
+  if(s<86400) return (s/3600).toFixed(s<7200?1:0)+' h';
+  return (s/86400).toFixed(s<172800?1:0)+' d';
+}
+const ago = (ts)=>{ const s=Math.max(0,Math.round((Date.now()-ts)/1000)); return s<2?'just now':dur(Date.now()-ts)+' ago'; };
 const tAgo = (sec)=>{ const s=Math.max(0,Math.floor(Date.now()/1000-sec)); return s<60?s+'s':(s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'); };
 // watchlist — browser-local
 const WKEY='arc-watch';
@@ -415,24 +441,64 @@ const TCOLOR={ALL:'--accent',USDC:'--usdc',EURC:'--eurc',USYC:'--usyc'};
 let chart = { token:'ALL', range:'24h', metric:'real' };
 
 // ---- live state (KPIs, flows, tables) ----
+// Chain trouble and indexer trouble look identical from the outside — nothing is updating — but
+// only one of them is ours. Naming which is which is the difference between a visitor concluding
+// the terminal is broken and understanding that the chain stopped and this recorded it.
+function renderFrozen(d){
+  const box=$('#frozen'), c=d.chain||{};
+  const halted = c.state==='halted', unreachable = c.state==='unreachable';
+  if(!d.degraded && !halted && !unreachable){ box.className='frozen'; return; }
+
+  const at = d.dataAt ? new Date(d.dataAt) : null;
+  const asOf = at ? ' Figures below are as they stood '+ago(d.dataAt)+'.' : '';
+  let head, sub;
+  if(halted){
+    head = 'Arc has stopped producing blocks';
+    sub = 'No new block for '+dur(c.stalledMs||0)+(c.head!=null?' — the chain is halted at #'+nf.format(c.head):'')+'.'+asOf;
+  } else if(unreachable){
+    head = 'Arc is unreachable';
+    sub = 'No RPC endpoint is answering, so the chain cannot be read right now.'+asOf;
+  } else {
+    // Chain fine, us behind — a backfill on first run, or catching up after a restart.
+    head = 'Catching up with the chain';
+    sub = 'Blocks are being read now; the figures fill in as the index reaches the head.'+asOf;
+  }
+  $('#frozenHead').textContent = head;
+  $('#frozenSub').innerHTML = sub+' <a href="/status">Status →</a>';
+  box.className = 'frozen on'+(unreachable?' bad':'');
+}
+
 function renderState(d){
   const dot=$('#statusDot'), txt=$('#statusText');
-  if(!d.ok){ dot.className='dot down'; txt.textContent = d.booting?'indexing…':'offline'; return; }
+  renderFrozen(d);
+  if(!d.ok){
+    dot.className='dot down';
+    const c=d.chain||{};
+    txt.textContent = d.booting ? 'indexing…' : (c.state==='unreachable'?'chain unreachable':'offline');
+    return;
+  }
+  const c=d.chain||{};
   dot.className = d.stale ? 'dot stale' : 'dot';
-  txt.textContent = d.stale ? 'slightly delayed' : 'live';
+  txt.textContent = c.state==='halted' ? 'chain halted' : c.state==='unreachable' ? 'chain unreachable' : d.stale ? 'slightly delayed' : 'live';
   $('#chainBadge').textContent='chain '+d.chainId;
-  $('#metaLine').textContent='block #'+nf.format(d.network.block)+' · upd. '+ago(d.updatedAt);
+  // On a frozen chain the block number is the last one indexed, not a current head — labelling
+  // it as though it were live is the small lie the whole degraded mode exists to avoid.
+  const blk = d.network && d.network.block!=null ? (d.degraded?'last block #':'block #')+nf.format(d.network.block) : 'no block data';
+  $('#metaLine').textContent = blk+' · upd. '+ago(d.updatedAt);
   $('#epLine').textContent=(d.endpoint||'').replace('https://','');
 
   const n=d.network, s=d.summary24h||{byToken:{},volume:0,transfers:0};
   // Money first. The chain-plumbing figures (block time, throughput, gas) are real and still on the
   // page below — but they answer "is this chain fast", and a first-time visitor is asking "is there
   // anything here". Four tiles, because six stops being a glance.
+  // Frozen, the 24h window ends at the last block indexed rather than at now, so the tiles have
+  // to say so — an unqualified "24h volume" on week-old data claims to describe today.
+  const win = d.degraded && d.windowEnd ? 'real · 24h to '+ago(d.windowEnd) : 'real';
   const kpis=[
     ['Total stable supply',compact(d.totalSupply),'{{TOKENS_PLUS}}'],
     ['TVL',compact(d.tvl),'held by contracts'],
-    ['24h volume',compact(s.rvolume),'real'],
-    ['Active addresses · 1h',compact(d.activeAddresses1h),''],
+    ['24h volume',compact(s.rvolume),win],
+    ['Active addresses · 1h',compact(d.activeAddresses1h),d.degraded?'last indexed hour':''],
   ].map(([l,v,u])=>`<div class="kpi"><div class="lab">${l}</div><div class="val">${v}<span class="unit">${u}</span></div></div>`).join('');
   $('#kpis').innerHTML=kpis;
 
@@ -452,12 +518,22 @@ function renderState(d){
 
   const cov=d.coverage||{minutes:0};
   $('#coverage').textContent = cov.minutes
-    ? `History indexed: ${cov.minutes>=120? (cov.minutes/60).toFixed(1)+' h':cov.minutes+' min'} · grows as it runs`
+    ? `History indexed: ${cov.minutes>=120? (cov.minutes/60).toFixed(1)+' h':cov.minutes+' min'}`
+      + (d.degraded ? ' · frozen while the chain is down' : ' · grows as it runs')
     : 'History: warming up…';
 
-  const maxTx=Math.max(1,...d.liveBlocks.map(b=>b.tx));
-  $('#strip').innerHTML=d.liveBlocks.map(b=>`<div class="blk" style="height:${Math.max(4,b.tx/maxTx*100)}%" title="block #${b.n} · ${b.tx} tx"></div>`).join('');
-  $('#striplab').innerHTML=`<span>#${nf.format(d.liveBlocks[0].n)}</span><span>transactions / block</span><span>#${nf.format(d.liveBlocks.at(-1).n)}</span>`;
+  // Per-block activity is the one panel with no meaningful degraded form: it plots the head of
+  // the chain, and a halted chain has no head to plot. Say that, rather than drawing the last
+  // bars we happened to see as if they were still arriving.
+  const lb=d.liveBlocks||[];
+  if(lb.length){
+    const maxTx=Math.max(1,...lb.map(b=>b.tx));
+    $('#strip').innerHTML=lb.map(b=>`<div class="blk" style="height:${Math.max(4,b.tx/maxTx*100)}%" title="block #${b.n} · ${b.tx} tx"></div>`).join('');
+    $('#striplab').innerHTML=`<span>#${nf.format(lb[0].n)}</span><span>transactions / block</span><span>#${nf.format(lb.at(-1).n)}</span>`;
+  } else {
+    $('#strip').innerHTML='';
+    $('#striplab').innerHTML='<span></span><span style="color:var(--ink-3)">no blocks being produced</span><span></span>';
+  }
 
   const acell=(addr,label)=> label? `<span class="lblchip">${esc(label)}</span>` : `<span class="addr">${short(addr)}</span>`;
   $('#largest').innerHTML = (d.largest&&d.largest.length)? d.largest.map(x=>`<tr>
@@ -488,9 +564,12 @@ function renderFees(f){
     <div class="e"><div class="lab">Avg fee / tx</div><div class="val">${usd(f.perTx,5)}</div></div>
     <div class="e"><div class="lab">Fees / day</div><div class="val">${usd(f.perDay,2)}</div><div class="sub">run rate</div></div>
     <div class="e"><div class="lab">Avg gas / tx</div><div class="val">${f.avgGasPerTx!=null?compact(f.avgGasPerTx):'—'}</div></div>`;
+  // Gas price is read live, so it is absent whenever the chain can't be reached — the sampled
+  // fees behind it still stand, and they are what this panel is actually reporting.
   basis.textContent=`Exact from ${nf.format(f.sampledBlocks)} sampled blocks`
     + (f.sampleCoverage!=null? ` (${(f.sampleCoverage*100).toFixed(1)}% of the window)`:'')
-    + ` · ${nf.format(f.sampledTxs)} transactions · gas ${f.gasGwei.toFixed(1)} gwei`;
+    + ` · ${nf.format(f.sampledTxs)} transactions`
+    + (f.gasGwei!=null? ` · gas ${f.gasGwei.toFixed(1)} gwei`:'');
 }
 
 // ---- address-level noise filter ----

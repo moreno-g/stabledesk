@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 
 import * as db from './db.js';
-import { live, alertFeed, start, stop } from './indexer.js';
+import { live, alertFeed, chainStatus, start, stop } from './indexer.js';
 import * as payments from './payments.js';
 import * as entities from './entities.js';
 import * as tvl from './tvl.js';
@@ -180,13 +180,20 @@ const server = http.createServer(async (req, res) => {
   }
   // TVL is merged in here rather than computed by the indexer: it comes from a separate scan loop on
   // its own cadence, and tvl.total() is a single summed query so the dashboard's polling stays cheap.
-  if (path === '/api/state') return json(res, { ...live.snapshot, tvl: TVL_ENABLED ? tvl.total() : null });
+  // Chain state is read live rather than taken from the snapshot: the snapshot is only rebuilt on
+  // a poll, so a copy taken at boot would still read "unknown" minutes into a long backfill.
+  if (path === '/api/state') return json(res, { ...live.snapshot, chain: chainStatus(), tvl: TVL_ENABLED ? tvl.total() : null });
   if (path === '/api/alerts') return json(res, { feed: alertFeed });
   if (path === '/api/history') {
     const token = (u.searchParams.get('token') || 'ALL').toUpperCase();
     const r = RANGES[u.searchParams.get('range')] || RANGES['24h'];
-    const since = Math.floor(Date.now() / 1000) - r.span;
-    return json(res, { token, group: r.group, series: db.getHistory(token, since, r.group) });
+    // Anchored to the same instant the snapshot's windows end at — now while live, the last
+    // indexed minute once frozen. Charting a span that runs up to now on a halted chain draws an
+    // empty plot next to KPIs that show figures, which reads as a broken chart rather than a
+    // stopped chain.
+    const endSec = Math.floor((live.snapshot.windowEnd || Date.now()) / 1000);
+    const since = endSec - r.span;
+    return json(res, { token, group: r.group, windowEnd: endSec * 1000, series: db.getHistory(token, since, r.group) });
   }
   if (path === '/api/top') {
     const limit = Math.min(50, Number(u.searchParams.get('limit')) || 10);
@@ -259,8 +266,16 @@ const server = http.createServer(async (req, res) => {
     return json(res, {
       ok: live.snapshot.ok,
       stale: !!live.snapshot.stale,
+      // Serving valid history that is no longer advancing, as opposed to serving nothing.
+      degraded: !!live.snapshot.degraded,
+      booting: !!live.snapshot.booting,
+      // The chain's own state, reported separately so an upstream halt is never read as a
+      // fault on our side — the two have identical symptoms and opposite remedies. Read live,
+      // not from the snapshot, which is only rebuilt when a poll completes.
+      chain: chainStatus(),
       block: live.snapshot.network?.block ?? null,
       indexLag: live.snapshot.indexLag ?? null,
+      dataAt: live.snapshot.dataAt ?? null,
       lastError: live.snapshot.lastError ?? null,
     });
   }
