@@ -119,9 +119,17 @@
     That window is floored at one full day, so a freshly-restarted indexer can't brand an ordinary address a bot off a handful of
     transfers. The flag set is recomputed every minute, and the <a href="/">terminal</a> lists the currently flagged addresses —
     the filter is auditable, not a black box.</p>
-    <p style="margin-bottom:0">Flags are derived from the same history they filter, so on a <em>cold</em> start the initial backfill
+    <p>Flags are derived from the same history they filter, so on a <em>cold</em> start the initial backfill
     is indexed before any address has been flagged. Rather than ship a figure we know is wrong, the indexer re-reads that range once
     the first pass has revealed the high-frequency addresses and rewrites the adjusted numbers.</p>
+    <p style="margin-bottom:0"><strong>The flag set is capped at 5,000 addresses</strong>, ordered by volume, so a pathological
+    window cannot load an unbounded set into memory. This is a threshold like any other and it belongs here: when more than 5,000
+    addresses meet the rate limits above, <em>which</em> addresses get flagged stops being decided by those limits and starts being
+    decided by the cap and the ordering. Adjusted volume is then a <em>lower bound</em> on what the published rule would exclude —
+    the lowest-volume qualifying addresses fall outside the set and their bot-to-bot transfers stay counted. Raw and real volume are
+    unaffected. Whether the cap is currently binding is published on every response:
+    <code>/v1/addresses/filtered</code> reports <code>qualifying</code> (selected by the thresholds), <code>flagged</code> (actually
+    used), <code>cap</code> and <code>atCap</code>, and carries an explicit warning while the two differ.</p>
   </div>
 
   <h2>Bridged liquidity vs. issuance</h2>

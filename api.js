@@ -164,12 +164,21 @@ export async function handleV1(req, res, u) {
     const n = s.noise || {};
     return json(res, {
       flagged: n.flagged ?? 0,
+      // The set size limit, and what the thresholds would have selected without it. When
+      // `atCap` is true the flag set is truncated by `cap` — so which addresses are flagged is
+      // decided by the cap and a volume ordering, not by the thresholds below.
+      qualifying: n.qualifying ?? null,
+      cap: n.cap ?? null,
+      atCap: !!n.atCap,
       thresholds: { transfersPerDay: n.txPerDay, volumePerDay: n.volumePerDay },
       window: { days: n.windowDays, maxTransfers: n.maxTransfers, maxVolume: n.maxVolume },
       excludedVolume24h: n.excludedVolume24h ?? null,
       excludedShare: n.excludedShare ?? null,
       addresses: n.top || [],
       note: 'Addresses whose activity rate exceeds the thresholds are treated as infrastructure. A transfer is excluded from adjusted volume only when both of its ends are flagged; see /methodology.',
+      ...(n.atCap ? {
+        warning: `The flag set is truncated: ${n.qualifying} addresses meet the thresholds but only the top ${n.cap} by volume are flagged. Adjusted volume is therefore a lower bound on what the published rule would exclude, and the cap — not the thresholds — is the binding constraint. Raw and real volume are unaffected.`,
+      } : {}),
       updatedAt: s.updatedAt,
     }, 200, H);
   }

@@ -54,6 +54,10 @@ function applyNetwork(html) {
   const out = html
     .replaceAll('{{NET}}', CHAIN.label)
     .replaceAll('{{CHAIN_ID}}', String(CHAIN.chainId))
+    // Lets the page reason about the network in JS, not only in markup: some caveats belong on a
+    // rendered value ("faucet-inflated" next to a supply figure) rather than in a block of copy
+    // that a testnet-only comment could wrap.
+    .replaceAll('{{IS_TESTNET}}', String(CHAIN.isTestnet))
     .replaceAll('{{TOKENS_JSON}}', JSON.stringify(symbols))
     .replaceAll('{{TOKENS_PLUS}}', symbols.join('+'))
     .replaceAll('{{TOKENS_SLASH}}', symbols.join(' / '))

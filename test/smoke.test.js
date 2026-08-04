@@ -161,6 +161,20 @@ test('fee sampling and the address noise filter', async () => {
   assert.equal(m.sampleCoverage, 0.1);
   assert.equal(feeMetrics({ blocks: 1, fees: 1, txs: 0, gasUsed: 0 }, 1, 1, 0).perMillionMoved, null, 'no volume → no ratio');
 
+  // The flag set is capped for memory safety, and the cap is a published threshold like any
+  // other. It was found binding in production — exactly 5,000 flagged, which meant the adjusted
+  // figure was governed by the cap rather than by the documented rate limits, with nothing on the
+  // page or in the API saying so. Both counts are now reported so the difference is visible.
+  assert.ok(db.NOISE_SET_MAX > 0, 'the cap is a named, exported number rather than a literal in a query');
+  const capLim = noiseLimits(7 * 86400);
+  const capped = db.noisyAddresses(capLim.maxTransfers, capLim.maxVolume);
+  const qualifying = db.noisyAddressCount(capLim.maxTransfers, capLim.maxVolume);
+  assert.ok(capped.length <= db.NOISE_SET_MAX, 'the flag set never exceeds the cap');
+  assert.ok(qualifying >= capped.length, 'the uncapped count is never smaller than the capped set');
+  // Below the cap the two must agree exactly, or `atCap` would fire on a healthy chain and cry
+  // wolf about a truncation that never happened.
+  if (qualifying < db.NOISE_SET_MAX) assert.equal(qualifying, capped.length);
+
   // Only infrastructure-to-infrastructure movement is noise. On a hub-and-spoke chain like Arc
   // almost every transfer touches a router or faucet, so dropping on "either end" (the Visa rule)
   // would delete genuine payments too — measured at 99.9% of testnet volume.

@@ -182,6 +182,14 @@ try { db.exec('ALTER TABLE addr_stats ADD COLUMN first_from TEXT'); } catch { /*
 
 const RECENT_KEEP = 1200;
 
+// Ceiling on the high-frequency address set, so a pathological window can't load an unbounded
+// set into memory. Exported and published rather than buried, because of what happens when it
+// binds: past this many qualifying addresses, which ones get flagged stops being decided by the
+// published thresholds and starts being decided by this number plus an ORDER BY. Adjusted volume
+// currently drops ~76% of real volume, so a reader who is not told the cap is active cannot audit
+// the figure they are being shown — and "every threshold is published" would be false.
+export const NOISE_SET_MAX = 5000;
+
 const stmt = {
   getMeta: db.prepare('SELECT v FROM meta WHERE k = ?'),
   setMeta: db.prepare('INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v'),
@@ -209,8 +217,11 @@ const stmt = {
   pruneBuckets: db.prepare('DELETE FROM buckets WHERE minute < ?'),
   pruneAddrs: db.prepare('DELETE FROM addr_stats WHERE last_block < ?'),
   // Addresses busy enough to be treated as infrastructure rather than economic actors.
-  // Capped so a pathological window can't load an unbounded set into memory.
-  noisy: db.prepare('SELECT address, transfers, volume FROM addr_stats WHERE transfers > ? OR volume > ? ORDER BY volume DESC LIMIT 5000'),
+  noisy: db.prepare(`SELECT address, transfers, volume FROM addr_stats WHERE transfers > ? OR volume > ? ORDER BY volume DESC LIMIT ${NOISE_SET_MAX}`),
+  // How many the thresholds actually select, uncapped. Kept as its own query so the difference
+  // between "selected by the published rule" and "flagged after the cap" is a measured number
+  // rather than an inference from the set landing suspiciously round.
+  noisyCount: db.prepare('SELECT COUNT(*) AS c FROM addr_stats WHERE transfers > ? OR volume > ?'),
   zeroAdj: db.prepare('UPDATE buckets SET avolume = 0, acnt = 0 WHERE minute BETWEEN ? AND ?'),
   setAdj: db.prepare('UPDATE buckets SET avolume = ?, acnt = ? WHERE minute = ? AND token = ?'),
   insFee: db.prepare('INSERT OR IGNORE INTO fee_samples(block, minute, fees, txs, gas_used) VALUES(?, ?, ?, ?, ?)'),
@@ -291,6 +302,7 @@ export function getSummary(since) {
 // Addresses whose activity over the retained window exceeds the given absolute limits.
 // The indexer scales the per-day thresholds by how many days of history it actually holds.
 export const noisyAddresses = (maxTransfers, maxVolume) => stmt.noisy.all(maxTransfers, maxVolume);
+export const noisyAddressCount = (maxTransfers, maxVolume) => stmt.noisyCount.get(maxTransfers, maxVolume).c;
 
 // ---- fee samples (exact per-block fees, sampled) ----
 export function insertFeeSamples(rows) {

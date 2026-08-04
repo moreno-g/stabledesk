@@ -216,10 +216,15 @@ export function organicIssuance(sm, measured) {
 }
 
 let noisyLimits = noiseLimits(0);
+let noisyQualifying = 0;
 function refreshNoisy() {
   const cov = db.getCoverage();
   noisyLimits = noiseLimits(cov.a && cov.b ? cov.b - cov.a : 0);
   noisyRows = db.noisyAddresses(noisyLimits.maxTransfers, noisyLimits.maxVolume);
+  // How many addresses the published thresholds select, before the cap is applied. When the two
+  // numbers differ the flag set is no longer the set the method describes, and saying so is the
+  // difference between a documented limitation and an undocumented one.
+  noisyQualifying = db.noisyAddressCount(noisyLimits.maxTransfers, noisyLimits.maxVolume);
   noisy = new Set(noisyRows.map((r) => r.address));
   noisyAt = Date.now();
 }
@@ -590,6 +595,12 @@ function dbDerived({ frozen = false } = {}) {
     fees: fees ? { ...fees, windowSec: feeWindowSec } : null,
     noise: {
       flagged: noisyRows.length,
+      // What the thresholds select vs what was actually used. Equal in the ordinary case; when
+      // the cap binds, `flagged` is decided by NOISE_SET_MAX and an ORDER BY rather than by the
+      // published rule, and every consumer of adjusted volume needs to be able to see that.
+      qualifying: noisyQualifying,
+      cap: db.NOISE_SET_MAX,
+      atCap: noisyQualifying > noisyRows.length,
       txPerDay: NOISE_FILTER.txPerDay,
       volumePerDay: NOISE_FILTER.volumePerDay,
       windowDays: noisyLimits.days,
