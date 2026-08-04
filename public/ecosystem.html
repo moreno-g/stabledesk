@@ -180,8 +180,11 @@
     <div class="cardhead">
       <div class="grow">
         <h2>Unnamed contracts</h2>
-        <p class="cap">Contracts holding stablecoin balances that no registry entry claims. Their value is in the
-        chain total above — this is the work queue, not a rounding error.</p>
+        <p class="cap">Contracts holding stablecoin balances that no registry entry claims. Their value is counted in the
+        chain total above — hiding them would understate the chain, and assigning them to a plausible protocol would invent
+        data. This is the work queue, not a rounding error: today it holds most of the value on Arc.
+        <b>Recognise one?</b> <a href="https://github.com/moreno-g/stabledesk/blob/main/PROTOCOLS.md" rel="noopener">Open a PR</a>
+        — every entry has to be checkable against the chain.</p>
       </div>
       <a class="dl" href="/api/ecosystem/candidates?format=csv" download>↓ CSV</a>
     </div>
@@ -275,10 +278,15 @@ function renderRows(){
 function render(d){
   state.data = d;
   const t = d.totals || {}, reg = d.registry || {};
+  // Unattributed value leads. It is by far the largest number on this page and the only one that
+  // is actually a finding — a registry of six utility contracts holding a few thousand dollars
+  // was burying the fact that almost all the value on the chain sits in contracts nobody has
+  // named yet. That gap is the interesting thing here, and it is also the ask.
   $('#kpis').innerHTML = [
     ['Total TVL', compact(t.tvl), 'stablecoins held by contracts'],
+    ['Held by unnamed contracts', compact(t.unattributed),
+      ((1-(t.attributedShare||0))*100).toFixed(1)+'% of TVL — help us name them'],
     ['Protocols listed', nf.format(reg.total||0), (reg.verified||0)+' verified · '+(reg.unverified||0)+' observed'],
-    ['Named share of TVL', ((t.attributedShare||0)*100).toFixed(1)+'%', compact(t.unattributed)+' unattributed'],
     ['Contracts holding', nf.format(t.holders||0), 'addresses with a balance'],
   ].map(([l,v,s])=>'<div class="kpi"><div class="lab">'+l+'</div><div class="val">'+v+'</div><div class="sub2">'+s+'</div></div>').join('');
 

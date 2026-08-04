@@ -336,7 +336,7 @@
 
     <div class="card">
       <h2>Stablecoins</h2>
-      <p class="cap">Supply, 24h real volume, share &amp; velocity.<!--testnet-only--> Testnet supply is inflated by faucet mints.<!--/testnet-only--></p>
+      <p class="cap">Supply, 24h real volume, share &amp; velocity.<!--testnet-only--> Testnet supply is inflated by faucet mints, and <strong>velocity is derived from it</strong>, so both columns are distorted — a single mint moves supply by orders of magnitude without any economic activity behind it. Volume and share are measured from transfers and are unaffected.<!--/testnet-only--></p>
       <table class="stbl"><thead><tr><th>Asset</th><th>Supply</th><th>24h vol</th><th>Share</th><th>Vel.</th></tr></thead>
         <tbody id="stbl"></tbody></table>
       <div class="cov" id="coverage"></div>
@@ -407,6 +407,7 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
+const IS_TESTNET = {{IS_TESTNET}};
 const nf = new Intl.NumberFormat('en-US');
 const short = (a) => a ? a.slice(0,6)+'…'+a.slice(-4) : '—';
 const esc = (s) => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -504,11 +505,15 @@ function renderState(d){
   // Frozen, the 24h window ends at the last block indexed rather than at now, so the tiles have
   // to say so — an unqualified "24h volume" on week-old data claims to describe today.
   const win = d.degraded && d.windowEnd ? 'real · 24h to '+ago(d.windowEnd) : 'real';
+  // Ordered by how much each figure actually describes the network. Supply used to lead, and on
+  // testnet that put a faucet artefact in the first tile: a single mint makes total supply four
+  // orders of magnitude larger than daily volume, so the number is correct, meaningless, and the
+  // first thing anyone reads. Measured flow goes first; supply goes last, labelled.
   const kpis=[
-    ['Total stable supply',compact(d.totalSupply),'{{TOKENS_PLUS}}'],
-    ['TVL',compact(d.tvl),'held by contracts'],
     ['24h volume',compact(s.rvolume),win],
+    ['TVL',compact(d.tvl),'held by contracts'],
     ['Active addresses · 1h',compact(d.activeAddresses1h),d.degraded?'last indexed hour':''],
+    ['Total stable supply',compact(d.totalSupply),IS_TESTNET?'faucet-inflated':'{{TOKENS_PLUS}}'],
   ].map(([l,v,u])=>`<div class="kpi"><div class="lab">${l}</div><div class="val">${v}<span class="unit">${u}</span></div></div>`).join('');
   $('#kpis').innerHTML=kpis;
 
@@ -597,6 +602,15 @@ function renderNoise(n){
   foot.textContent=`${nf.format(n.flagged)} address${n.flagged===1?'':'es'} flagged · limits over ${n.windowDays.toFixed(1)}d: `
     + `${compact(n.maxTransfers)} transfers or ${compact(n.maxVolume)} volume · removes `
     + `${compact(n.excludedVolume24h)} (${(n.excludedShare*100).toFixed(1)}%) of 24h real volume`;
+  // Said on the page, not just in the API. Once the cap binds, which addresses are flagged is
+  // decided by the cap rather than by the thresholds printed right above it — leaving that to a
+  // JSON field nobody opens would make the line above quietly misleading.
+  if(n.atCap){
+    foot.insertAdjacentHTML('beforeend',
+      `<div style="margin-top:6px;color:var(--warn)">Flag set truncated: ${nf.format(n.qualifying)} addresses meet the limits, `
+      + `only the top ${nf.format(n.cap)} by volume are flagged. Adjusted volume is a lower bound; raw and real are unaffected. `
+      + `<a href="/methodology" style="color:var(--warn);text-decoration:underline">Why →</a></div>`);
+  }
 }
 
 // ---- chart ----
