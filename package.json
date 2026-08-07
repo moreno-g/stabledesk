@@ -11,6 +11,6 @@
     "test": "node --test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5.0"
   }
 }

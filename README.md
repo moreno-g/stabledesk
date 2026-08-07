@@ -3,7 +3,7 @@
 ![Stabledesk Banner](brand/stabledesk-banner.png)
 
 [![CI](https://github.com/moreno-g/stabledesk/actions/workflows/ci.yml/badge.svg)](https://github.com/moreno-g/stabledesk/actions)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D20-22c55e.svg)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22.5.0-22c55e.svg)](https://nodejs.org)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-success.svg)](https://github.com/moreno-g/stabledesk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Network: Arc Testnet](https://img.shields.io/badge/network-Arc_Testnet-9B7EDE.svg)](https://stabledesk.xyz)
