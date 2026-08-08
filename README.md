@@ -15,11 +15,13 @@ and a free data API.
 **[stabledesk.xyz](https://stabledesk.xyz)** · [@getStabledesk](https://x.com/getStabledesk) ·
 [how we publish numbers](COMMS.md)
 
-**Running against the Arc public testnet.** Arc mainnet has not launched publicly — Circle's
-whitepaper targets a summer 2026 beta — so the figures on the live site are faucet-funded testnet
-volume and represent no real value. That caveat is repeated on every page that shows a number,
-not just here. Mainnet support is built and has been exercised against the pre-launch network;
-it is one environment variable away (see [Networks](#networks)).
+**Running against the Arc public testnet.** Arc mainnet has not launched publicly yet — Circle has
+[announced September 16, 2026](https://www.circle.com/pressroom/circle-announces-founding-validator-cohort-and-major-integrations-for-arc-ahead-of-september-16-mainnet-launch)
+for the public launch, with a founding validator cohort and 100+ builders already on a private
+mainnet. Until that date the figures on the live site are faucet-funded testnet volume and
+represent no real value. That caveat is repeated on every page that shows a number, not just here.
+Mainnet support is built and has been exercised against the pre-launch network; it is one
+environment variable away (see [Networks](#networks)).
 
 Not another explorer — Arcscan already does blocks and transactions. Stabledesk is the
 **stablecoin-finance analytics layer**: what actually moved, how much of it was real economic
@@ -161,8 +163,10 @@ database file so faucet volume can never be mixed into mainnet aggregates.
 Mainnet **refuses to start** with any of its three variables missing, rather than falling back to
 testnet — serving faucet play-money as real value is the one failure worth crashing over. Nothing
 in the mainnet profile is hardcoded because, as of this writing, there is no public mainnet to
-hardcode: chain 5042 produces blocks, but access is gated and Circle has not opened it. Anything
-built into the source today would be a guess shipped as a fact.
+hardcode: chain 5042 produces blocks, but access is gated and Circle has not opened it — public
+launch is announced for September 16, 2026. Anything built into the source before then would be a
+guess shipped as a fact, and it stays out of the source even now that the date is known: a date is
+not an endpoint, a token list, or a Gateway deployment.
 
 Testnet endpoints are public and need no credentials, which is the practical difference: a
 mainnet deployment depends on an access grant that can be withdrawn, and was. The site currently
@@ -181,7 +185,8 @@ timestamps.
 1. ✅ **Historical indexer** (SQLite) → time series: volumes, mint/burn, top addresses.
 2. ✅ **Public API** — `/v1` with API keys, free/pro tiers, rate limiting, `/docs` developer page.
 3. ✅ **Deployed** at [stabledesk.xyz](https://stabledesk.xyz), on the Arc public testnet. Mainnet
-   is implemented and was run against the pre-launch network; it resumes when Arc opens publicly.
+   is implemented and was run against the pre-launch network; it resumes when Arc opens publicly,
+   announced for September 16, 2026.
 4. ✅ **Alerts** — live in-app feed + browser watchlist + Pro webhook alerts (`/v1/alerts`).
 5. ✅ **Ecosystem registry + TVL** — `protocols.js` (curated, contribution-based — see `PROTOCOLS.md`),
    `tvl.js` (balance scanner + unnamed-contract discovery), `/ecosystem`, `/protocol`, global search,
