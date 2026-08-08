@@ -25,10 +25,17 @@ let rulesAt = 0;
 
 const POLL_MS = 7000;       // steady-state poll interval
 const HEADER_WINDOW = 15;   // blocks for live TPS / block-time / activity strip
+// How far back to look when measuring block time at boot, before anything is indexed. Wide enough
+// that a couple of slow or fast blocks don't set the rate for a whole backfill.
+const HEADER_SPAN = 2000;
 const MAX_BACKFILL = CHAIN.maxBackfill; // blocks of history to seed on first run
 const CHUNK = 500;          // blocks per backfill request
 const CHUNK_DELAY = 450;    // ms between backfill chunks (respect rate limit)
 const PRUNE_EVERY = 120;    // prune roughly every N ticks
+// How many times a failing range may be halved before it is treated as a real failure. Nine gets a
+// 500-block chunk down to a single block, which is as far as splitting can help: past that the range
+// is not the problem.
+const MAX_SPLIT_DEPTH = 9;
 
 let avgBlockMs = 500;
 let anchor = { block: 0, ts: 0 };          // (block -> timestamp) reference
@@ -185,14 +192,43 @@ export function chainStatus() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const range = (a, b) => { const o = []; for (let n = a; n <= b; n++) o.push(n); return o; };
+
+// Last-resort timestamp: extrapolate from the rolling anchor at the current average block time.
+// Only used when a range's own boundary headers could not be read — see chunkClock, which is what
+// normally decides a transfer's timestamp.
 const approxTs = (block) => anchor.ts - (anchor.block - block) * (avgBlockMs / 1000);
 
-// Pure: scales the per-day noise thresholds to however much history is retained. The window
-// is floored at a full day so a freshly-started indexer — which may only hold ~25 minutes of
-// backfill — can't brand an ordinary address a bot off a handful of transfers.
-export function noiseLimits(observedSec) {
-  const days = Math.max(1, (Number(observedSec) || 0) / 86400);
-  return { days, maxTransfers: NOISE_FILTER.txPerDay * days, maxVolume: NOISE_FILTER.volumePerDay * days };
+// Pure: a timestamp function for one indexed range, interpolated between the *real* timestamps of
+// its first and last block.
+//
+// Every minute bucket is keyed by a derived timestamp, and this is what derives it. It used to be
+// approxTs alone — the head anchor extrapolated backwards at `avgBlockMs`, which starts at a
+// hardcoded 500 and is only measured once the first live tick fetches block headers. That tick runs
+// *after* the cold backfill, so an entire seeded history was timestamped at an assumed half-second
+// block time: on a chain that turned out to run at 1s, the far end of a 20,000-block backfill landed
+// nearly three hours away from where it happened. Buckets are additive and keyed by minute, so that
+// is not a figure that can be corrected afterwards — the same reason mainnet gets its own file.
+//
+// Two headers per chunk bounds the error to whatever the block time varies by *within* 500 blocks,
+// and they ride in the same JSON-RPC batch as the logs, so it costs no extra round trip.
+export function chunkClock(from, to, fromTs, toTs) {
+  if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || to <= from) return null;
+  const per = (toTs - fromTs) / (to - from);
+  return (block) => fromTs + (block - from) * per;
+}
+
+// Pure: the per-day thresholds applied to one address's own observation window, floored at a full
+// day. The floor is why a freshly-seen address cannot be branded a bot off a handful of transfers in
+// a single block — with no floor its window is near zero and any activity is an infinite rate.
+export function noiseLimitsFor(days) {
+  const d = Math.max(1, Number(days) || 0);
+  return { days: d, maxTransfers: NOISE_FILTER.txPerDay * d, maxVolume: NOISE_FILTER.volumePerDay * d };
+}
+
+// Pure: how many days of observation an address's block span represents.
+export function noiseWindowDays(firstBlock, lastBlock, blockMs) {
+  const span = Math.max(0, (Number(lastBlock) || 0) - (Number(firstBlock ?? lastBlock) || 0));
+  return Math.max(1, (span * Math.max(1, blockMs)) / 86400000);
 }
 
 // A transfer counts as noise only when *both* ends are flagged infrastructure — bot talking to
@@ -215,16 +251,20 @@ export function organicIssuance(sm, measured) {
   return (sm.mint - sm.burn) - ((sm.bmint || 0) - (sm.bburn || 0));
 }
 
-let noisyLimits = noiseLimits(0);
 let noisyQualifying = 0;
 function refreshNoisy() {
-  const cov = db.getCoverage();
-  noisyLimits = noiseLimits(cov.a && cov.b ? cov.b - cov.a : 0);
-  noisyRows = db.noisyAddresses(noisyLimits.maxTransfers, noisyLimits.maxVolume);
+  // The thresholds are rates, and each address is judged against its own observed span rather than
+  // against the retained bucket window. Those were quietly different quantities: `addr_stats` totals
+  // accumulate from the first time an address is seen and only reset if it goes inactive for a week,
+  // while the limit was pro-rated to the bucket window, which prune() caps at seven days. So an
+  // address active for two months was measured over two months and judged against seven days, and
+  // the same behaviour was flagged or not depending on how long this process had been up — adjusted
+  // volume drifting downwards over a deployment's lifetime, with nothing saying so.
+  noisyRows = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, avgBlockMs);
   // How many addresses the published thresholds select, before the cap is applied. When the two
   // numbers differ the flag set is no longer the set the method describes, and saying so is the
   // difference between a documented limitation and an undocumented one.
-  noisyQualifying = db.noisyAddressCount(noisyLimits.maxTransfers, noisyLimits.maxVolume);
+  noisyQualifying = db.noisyAddressCount(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, avgBlockMs);
   noisy = new Set(noisyRows.map((r) => r.address));
   noisyAt = Date.now();
 }
@@ -256,10 +296,13 @@ export function feeMetrics(sample, blocksInWindow, blocksPerDay, volumeMoved) {
 
 // `from` is recorded only for the receiving side, and the DB keeps the first value it ever sees:
 // the cheapest edge of the funding graph, used to tie an operational wallet back to its funder.
+// `firstBlock` is kept for a different reason: it is the denominator of the noise filter's rate, and
+// without it a total over an unknown span was being compared against a per-day limit.
 function bumpAddr(map, a, amount, block, from) {
   let x = map.get(a);
-  if (!x) { x = { transfers: 0, volume: 0, lastBlock: 0, firstFrom: null }; map.set(a, x); }
+  if (!x) { x = { transfers: 0, volume: 0, lastBlock: 0, firstBlock: block, firstFrom: null }; map.set(a, x); }
   x.transfers += 1; x.volume += amount; x.lastBlock = Math.max(x.lastBlock, block);
+  x.firstBlock = Math.min(x.firstBlock ?? block, block);
   if (from && !x.firstFrom) x.firstFrom = from;
 }
 
@@ -297,7 +340,7 @@ function checkRules(ev) {
 // (txHash, token) -> largest organic transfer of that token in that transaction. Keyed per
 // token, not per transaction — a swap moves two different assets in one tx, and collapsing it
 // to a single leg would erase the smaller asset's volume entirely.
-function largestPerTxToken(logs) {
+function largestPerTxToken(logs, tsAt = approxTs) {
   const out = new Map();
   for (const log of logs || []) {
     const meta = TOKENS[log.address.toLowerCase()];
@@ -306,7 +349,7 @@ function largestPerTxToken(logs) {
     try { amount = toUnits(log.data, meta.decimals); } catch { continue; }
     const from = topicAddr(log.topics[1]), to = topicAddr(log.topics[2]);
     if (from === ZERO || to === ZERO) continue; // mints and burns aren't economic transfers
-    const minute = Math.floor(approxTs(parseInt(log.blockNumber, 16)) / 60) * 60;
+    const minute = Math.floor(tsAt(parseInt(log.blockNumber, 16)) / 60) * 60;
     const k = log.transactionHash + '|' + meta.symbol;
     const cur = out.get(k);
     if (!cur || amount > cur.amount) out.set(k, { amount, symbol: meta.symbol, minute, frm: from, too: to, tx: log.transactionHash });
@@ -318,9 +361,9 @@ function largestPerTxToken(logs) {
 // names the end recipient, not the minter, so an address test would miss it entirely; what is
 // always true is that the transaction also carries a log emitted by a Gateway contract. That set
 // of transaction hashes is fetched alongside the transfers and passed through here.
-function processLogs(logs, opts = {}, gatewayTxs = null) {
+function processLogs(logs, opts = {}, gatewayTxs = null, tsAt = approxTs) {
   const buckets = new Map(), addrs = new Map(), recents = [];
-  const txMax = largestPerTxToken(logs);
+  const txMax = largestPerTxToken(logs, tsAt);
   const viaGateway = (tx) => !!gatewayTxs && gatewayTxs.has(tx);
 
   const getBk = (minute, symbol) => {
@@ -336,7 +379,7 @@ function processLogs(logs, opts = {}, gatewayTxs = null) {
     let amount;
     try { amount = toUnits(log.data, meta.decimals); } catch { continue; }
     const block = parseInt(log.blockNumber, 16);
-    const ts = Math.floor(approxTs(block));
+    const ts = Math.floor(tsAt(block));
     const minute = Math.floor(ts / 60) * 60;
     const from = topicAddr(log.topics[1]);
     const to = topicAddr(log.topics[2]);
@@ -462,25 +505,52 @@ async function getLogsRange(from, to) {
       params: [{ fromBlock: hex(from), toBlock: hex(to), address: GATEWAY_ADDRS }],
     });
   }
+  // The range's own boundary headers, so every transfer in it is timestamped between two measured
+  // points instead of extrapolated from the head. Same batch, so no extra HTTP round trip.
+  const clockAt = calls.length;
+  calls.push({ method: 'eth_getBlockByNumber', params: [hex(from), false] });
+  if (to !== from) calls.push({ method: 'eth_getBlockByNumber', params: [hex(to), false] });
+
   const { out } = await rpc(calls);
   // null, not an empty Set, when there is no Gateway on this network: downstream has to be able
   // to tell "no bridge flow in this range" from "we never looked".
   const gatewayTxs = HAS_GATEWAY ? new Set((out[1] || []).map((l) => l.transactionHash)) : null;
-  return { logs: out[0], gatewayTxs };
+
+  const ts = (h) => (h && h.timestamp != null ? parseInt(h.timestamp, 16) : NaN);
+  const fromTs = ts(out[clockAt]);
+  const toTs = to === from ? fromTs : ts(out[clockAt + 1]);
+  // Falls back to the anchor if either header came back empty, rather than dropping the range: a
+  // slightly-worse timestamp is a far smaller error than a hole in the volume series.
+  const tsAt = chunkClock(from, to, fromTs, toTs) || approxTs;
+  return { logs: out[0], gatewayTxs, tsAt, measuredClock: tsAt !== approxTs };
 }
 
 // Index a block range; advances checkpoint only on success.
-async function indexRange(from, to, opts = {}) {
+//
+// On failure the range is halved before being given up on. Providers cap eth_getLogs by the number
+// of *results*, not by the number of blocks, so a fixed 500-block chunk is not a fixed-size request:
+// it is anodyne on a quiet testnet and can be far over the cap on a busy mainnet. Without the split,
+// one over-large range failed three times, indexThrough gave up, the checkpoint stopped advancing,
+// and the next tick retried exactly the same too-large range — a stall that looks like an outage and
+// never resolves on its own.
+async function indexRange(from, to, opts = {}, depth = 0) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const { logs, gatewayTxs } = await getLogsRange(from, to);
-      processLogs(logs, opts, gatewayTxs);
+      const { logs, gatewayTxs, tsAt } = await getLogsRange(from, to);
+      processLogs(logs, opts, gatewayTxs, tsAt);
       db.setCheckpoint(to);
       return true;
     } catch (e) {
       console.error(`[index] ${from}-${to} attempt ${attempt + 1}: ${e.message}`);
       await sleep(1500);
     }
+  }
+  if (to > from && depth < MAX_SPLIT_DEPTH) {
+    const mid = from + Math.floor((to - from) / 2);
+    console.error(`[index] ${from}-${to} failed at ${to - from + 1} blocks — splitting`);
+    // Sequential and in order, so the checkpoint only ever advances over ground actually covered.
+    if (!(await indexRange(from, mid, opts, depth + 1))) return false;
+    return indexRange(mid + 1, to, opts, depth + 1);
   }
   return false;
 }
@@ -502,14 +572,21 @@ async function adjustBackfill(from, to) {
   refreshNoisy();
   if (!noisy.size) return;
   const buckets = new Map();
+  // Tracked from the ranges' own clocks, so the span that gets zeroed is the span that was written.
+  // Recomputing the edges from the anchor afterwards would zero a different set of minutes than the
+  // first pass filled, and the adjusted column would end up cleared where no replacement lands.
+  let firstMinute = null, lastMinute = null;
   for (let start = from; start <= to; start += CHUNK) {
     const end = Math.min(to, start + CHUNK - 1);
-    let logs;
-    try { ({ logs } = await getLogsRange(start, end)); } catch (e) {
+    let logs, tsAt;
+    try { ({ logs, tsAt } = await getLogsRange(start, end)); } catch (e) {
       console.error('[adjust] aborted:', e.message); // leave the first-pass values in place
       return;
     }
-    for (const m of largestPerTxToken(logs).values()) {
+    const lo = Math.floor(tsAt(start) / 60) * 60, hi = Math.floor(tsAt(end) / 60) * 60;
+    firstMinute = firstMinute == null ? lo : Math.min(firstMinute, lo);
+    lastMinute = lastMinute == null ? hi : Math.max(lastMinute, hi);
+    for (const m of largestPerTxToken(logs, tsAt).values()) {
       if (isNoiseTransfer(m)) continue;
       const key = m.minute + '|' + m.symbol;
       let bk = buckets.get(key);
@@ -518,8 +595,9 @@ async function adjustBackfill(from, to) {
     }
     if (end < to) await sleep(CHUNK_DELAY);
   }
+  if (firstMinute == null) return;
   // Zero the whole re-scanned span, not just the buckets that survived the filter.
-  const changed = db.setAdjusted(buckets, Math.floor(approxTs(from) / 60) * 60, Math.floor(approxTs(to) / 60) * 60);
+  const changed = db.setAdjusted(buckets, firstMinute, lastMinute);
   console.log(`[adjust] backfill re-scored against ${noisy.size} flagged addresses (${changed} buckets)`);
 }
 
@@ -540,15 +618,28 @@ async function backfill(latest) {
 // Every part of the snapshot that comes from SQLite alone — no RPC, no live headers. Shared by
 // the live path and the degraded path, so a frozen terminal reports exactly what a live one
 // would rather than running a second, subtly different implementation that drifts from it.
+// Pure: which instant the rolling windows end at.
+//
+// Bucket minutes are keyed by *chain* time — a block's timestamp, not the wall clock. The window used
+// to end at `Date.now()` whenever the chain was live, which silently assumed the two clocks agree.
+// When they don't, `minute >= now - 86400` selects nothing at all and the terminal reports "24h
+// volume: 0" over a database holding days of transfers. Not hypothetical: the local testnet database
+// has buckets ending six days behind its own event log.
+//
+// So the window always ends at the newest measured minute, and never in a future the data has not
+// reached. On a healthy chain that is within a minute of now and the behaviour is unchanged; when the
+// clocks diverge, the 24h window is the last 24h that were actually measured, which is the only 24h
+// anyone can be shown. `windowEnd` states which instant it is and `clockSkewSec` how far that is from
+// the wall clock, so the anchoring is visible rather than something to be discovered.
+export function windowEndSec(nowSec, covB, frozen = false) {
+  if (!covB) return nowSec;
+  return frozen ? covB : Math.min(nowSec, covB);
+}
+
 function dbDerived({ frozen = false } = {}) {
   const nowSec = Math.floor(Date.now() / 1000);
   const cov = db.getCoverage();
-  // Which instant the rolling windows end at. Live, that is now. Frozen, it has to be the newest
-  // indexed minute: the trailing 24h from *now* contains nothing once the chain has been down a
-  // day, and publishing "24h volume: 0" would state the chain sat idle when what happened is that
-  // it stopped. Anchoring to the last data point reports the last 24h that were actually measured,
-  // and `windowEnd` tells the pages what to label it.
-  const asOf = frozen && cov.b ? cov.b : nowSec;
+  const asOf = windowEndSec(nowSec, cov.b, frozen);
   const summary = db.getSummary(asOf - 86400);
   const covSec = cov.a ? Math.max(60, asOf - cov.a) : 0;
 
@@ -576,7 +667,10 @@ function dbDerived({ frozen = false } = {}) {
 
   const lbl = (a) => { const l = getLabel(a); return l ? l.name : null; };
   const top = db.getTop(8).map((r) => ({ ...r, label: lbl(r.address), contract: codeCache.get(r.address) || false }));
-  const largest = db.getLargest(8).map((r) => ({ ...r, fromLabel: lbl(r.frm), toLabel: lbl(r.too) }));
+  // Over the last seven days, from the retained per-day set — not over whatever is still in the raw
+  // transfer table, which at real throughput is a couple of minutes.
+  const largestSince = asOf - 7 * 86400;
+  const largest = db.getLargest(8, largestSince).map((r) => ({ ...r, fromLabel: lbl(r.frm), toLabel: lbl(r.too) }));
 
   // Fee economics. Both the sampled fees and the volume they're divided by are measured over
   // the same effective window — the shorter of 24h and however much history we hold — so a
@@ -603,18 +697,25 @@ function dbDerived({ frozen = false } = {}) {
       atCap: noisyQualifying > noisyRows.length,
       txPerDay: NOISE_FILTER.txPerDay,
       volumePerDay: NOISE_FILTER.volumePerDay,
-      windowDays: noisyLimits.days,
-      maxTransfers: noisyLimits.maxTransfers,
-      maxVolume: noisyLimits.maxVolume,
+      // The thresholds are rates, and each address is judged over its own observed span. There is
+      // therefore no single window to publish — the limits an address was actually measured against
+      // ride on its own row below. `blockMs` is how a block span becomes days, and it is the one
+      // input to that conversion, so it is published too.
+      blockMs: avgBlockMs,
+      minWindowDays: 1,
       excludedVolume24h: Math.max(0, summary.rvolume - summary.avolume),
       excludedShare: summary.rvolume ? Math.max(0, 1 - summary.avolume / summary.rvolume) : 0,
       top: noisyRows.slice(0, 8).map((r) => ({
         ...r,
         label: lbl(r.address),
         // An address can breach both limits; name the one it breaches hardest, relatively.
-        reason: r.volume / noisyLimits.maxVolume > r.transfers / noisyLimits.maxTransfers ? 'volume' : 'frequency',
+        reason: r.volume / r.maxVolume > r.transfers / r.maxTransfers ? 'volume' : 'frequency',
       })),
     },
+    // The span the raw transfer table covers, which is what the size distribution, the per-token
+    // recent lists and an address's recent activity are all describing. Measured, because a row cap
+    // makes that span a function of throughput rather than a constant.
+    transferWindow: db.recentWindow(),
     // Circle Gateway keeps one USDC balance spendable across every chain it supports, so the USDC
     // it moves onto Arc is liquidity being repositioned rather than demand to hold it here.
     // `measured` is what separates "no bridge flow" from "this network has no Gateway" — without
@@ -644,9 +745,15 @@ function dbDerived({ frozen = false } = {}) {
     // assembled. On a frozen chain the two are hours apart, and the pages need the former to
     // say how stale the figures are.
     dataAt: cov.b ? cov.b * 1000 : null,
-    // The instant the 24h windows above end at — equal to now while live, and to `dataAt` once
-    // frozen. Published so a caller can label the window instead of assuming it is trailing-now.
+    // The instant the 24h windows above end at — the newest measured minute, which on a healthy
+    // chain is within a minute of now. Published so a caller can label the window instead of
+    // assuming it is trailing-now.
     windowEnd: asOf * 1000,
+    // How far the newest measured minute sits behind the wall clock. Zero-ish in normal operation.
+    // Large means chain time and wall-clock time have diverged, which is worth knowing *because*
+    // every rolling window is now anchored to the former: without this the anchoring would be
+    // invisible and a reader could not tell a quiet day from a diverged clock.
+    clockSkewSec: cov.b ? nowSec - cov.b : null,
   };
 }
 
@@ -667,7 +774,9 @@ function buildSnapshot(latest, gasWei, headers) {
     // page, just quieter.
     stale: chain.state !== 'live', degraded: chain.state !== 'live',
     chain: chainStatus(),
-    endpoint: net.endpoint, chainId: CHAIN.chainId, network: CHAIN.id,
+    // `networkId`, not `network`: the key below holds the live chain-plumbing object, and an object
+    // literal with the same key twice keeps only the last one — so this was silently dropped.
+    endpoint: net.endpoint, chainId: CHAIN.chainId, networkId: CHAIN.id,
     indexLag: indexedThrough != null ? Math.max(0, latest - indexedThrough) : null,
     network: {
       block: latest,
@@ -703,7 +812,9 @@ function snapshotFromDb() {
     ok: true, booting: false, stale: true, degraded: true,
     updatedAt: base.dataAt || Date.now(),
     chain: chainStatus(),
-    endpoint: net.endpoint, chainId: CHAIN.chainId, network: CHAIN.id,
+    // `networkId`, not `network`: the key below holds the live chain-plumbing object, and an object
+    // literal with the same key twice keeps only the last one — so this was silently dropped.
+    endpoint: net.endpoint, chainId: CHAIN.chainId, networkId: CHAIN.id,
     indexLag: null,
     // No live headers to measure against, so the chain-plumbing figures are null rather than
     // carried over — a stale block time presented as current is a wrong number, not an old one.
@@ -839,8 +950,24 @@ export async function start() {
   try {
     const { out } = await rpc([{ method: 'eth_blockNumber', params: [] }]);
     const latest = parseInt(out[0], 16);
-    const hb = (await rpc([{ method: 'eth_getBlockByNumber', params: [hex(latest), false] }])).out[0];
-    anchor = { block: latest, ts: parseInt(hb.timestamp, 16) };
+    // Two headers, not one: the head to anchor on, and one HEADER_SPAN behind it to measure the
+    // block time. `avgBlockMs` starts at a hardcoded 500 and was otherwise not measured until the
+    // first live tick, which runs *after* the backfill — so the seeded history was timestamped at an
+    // assumption, and the noise filter's rates were computed against one too. Both need a real
+    // number before any block is indexed, and it costs one extra entry in a batch that was already
+    // going out.
+    const span = Math.min(HEADER_SPAN, latest);
+    const hb = await rpc([
+      { method: 'eth_getBlockByNumber', params: [hex(latest), false] },
+      { method: 'eth_getBlockByNumber', params: [hex(latest - span), false] },
+    ]);
+    const headTs = parseInt(hb.out[0].timestamp, 16);
+    anchor = { block: latest, ts: headTs };
+    const backTs = hb.out[1]?.timestamp != null ? parseInt(hb.out[1].timestamp, 16) : null;
+    if (backTs != null && span > 0 && headTs > backTs) {
+      avgBlockMs = Math.max(200, ((headTs - backTs) / span) * 1000);
+      console.log(`[start] measured block time ${Math.round(avgBlockMs)}ms over ${span} blocks`);
+    }
     noteHead(latest);
     await backfill(latest);
   } catch (e) {

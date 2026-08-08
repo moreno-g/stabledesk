@@ -11,7 +11,7 @@ import { CATEGORIES } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS, TVL_HISTORY_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { RANGES, TIERS, TOKEN_SYMBOLS, TOKEN_LIST, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
-import { validateWebhook } from './validate.js';
+import { validateWebhookHost } from './validate.js';
 import { CHAIN } from './chains.js';
 
 // fixed-window in-memory rate limiter, per key per minute
@@ -43,10 +43,30 @@ setInterval(() => {
   for (const [k, e] of keyRl) if (e.win < hWin) keyRl.delete(k);
 }, 60000).unref();
 
+// How many reverse proxies sit in front of this process, and therefore how many entries at the *end*
+// of X-Forwarded-For we wrote ourselves. Railway and the Caddy setup in deploy/ both add exactly one.
+export const TRUSTED_PROXY_HOPS = Math.max(0, Number(process.env.TRUSTED_PROXY_HOPS ?? 1));
+
+// The client address, read from the end of the forwarding chain rather than the start.
+//
+// A proxy *appends* the address it received the connection from, so X-Forwarded-For reads
+// `<whatever the client claimed>, <what our proxy actually saw>`. The leftmost entry is therefore an
+// input, not a measurement. Taking it meant every per-IP limit here could be lifted by setting a
+// header: the /api throttle, and more to the point `rateLimitKeys`, which is the only thing bounding
+// free API key creation at 5/hour — with a fresh forged prefix per request that bound was zero.
+//
+// So we count entries from the right: our own hops are the tail, and the first entry *we* wrote is
+// the last address anyone verified. With no trusted proxy in front (TRUSTED_PROXY_HOPS=0) the header
+// is entirely client-controlled and is ignored outright in favour of the socket.
 export function clientIp(req) {
+  const socketIp = req.socket?.remoteAddress || 'unknown';
+  if (!TRUSTED_PROXY_HOPS) return socketIp;
   const fwd = req.headers['x-forwarded-for'];
-  if (typeof fwd === 'string' && fwd) return fwd.split(',')[0].trim();
-  return req.socket?.remoteAddress || 'unknown';
+  if (typeof fwd !== 'string' || !fwd) return socketIp;
+  const chain = fwd.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!chain.length) return socketIp;
+  // N hops means the last N entries are ours; the earliest of those is the observed client.
+  return chain[Math.max(0, chain.length - TRUSTED_PROXY_HOPS)] ?? socketIp;
 }
 
 // CORS so third-party browser apps can call the API (custom X-API-Key header needs a preflight).
@@ -61,10 +81,26 @@ function json(res, body, code = 200, headers = {}) {
   res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-robots-tag': 'noindex', ...CORS, ...headers });
   res.end(JSON.stringify(body));
 }
-function readBody(req) {
+export const BODY_MAX = 1e5;
+
+// Resolves to the parsed body, or to a marker the caller turns into a 413.
+//
+// The oversize path used to call req.destroy() and wait for 'end', which destroy() guarantees will
+// never fire — so the promise never settled, the handler never returned, and the request hung with no
+// response until the client or Node's requestTimeout gave up. Now the stream is drained-and-stopped
+// and the promise always settles: 'aborted' and 'error' are terminal states too, not just 'end'.
+export function readBody(req) {
   return new Promise((resolve) => {
-    let d = ''; req.on('data', (c) => { d += c; if (d.length > 1e5) req.destroy(); });
-    req.on('end', () => { try { resolve(JSON.parse(d || '{}')); } catch { resolve({}); } });
+    let d = '', done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    req.on('data', (c) => {
+      if (done) return;
+      d += c;
+      if (d.length > BODY_MAX) { req.pause(); finish({ __tooLarge: true }); }
+    });
+    req.on('end', () => { try { finish(JSON.parse(d || '{}')); } catch { finish({}); } });
+    req.on('aborted', () => finish({}));
+    req.on('error', () => finish({}));
   });
 }
 
@@ -93,6 +129,11 @@ export async function handleV1(req, res, u) {
       indexLag: live.snapshot.indexLag ?? null,
       updatedAt: live.snapshot.updatedAt ?? null,
       dataAt: live.snapshot.dataAt ?? null,
+      // Every rolling window ends at the newest measured minute, which is chain time. This is how
+      // far that sits behind the wall clock — near zero in normal operation, and the thing to look
+      // at first if a 24h figure looks impossibly quiet.
+      clockSkewSec: live.snapshot.clockSkewSec ?? null,
+      windowEnd: live.snapshot.windowEnd ?? null,
       billingEnabled: BILLING_ENABLED,
     });
   }
@@ -102,6 +143,7 @@ export async function handleV1(req, res, u) {
       return json(res, { error: 'key_limit_reached', hint: 'Max 5 free keys per hour per IP. Reuse an existing key.' }, 429, { 'retry-after': '3600' });
     }
     const body = await readBody(req);
+    if (body.__tooLarge) return json(res, { error: 'body_too_large', hint: `Request body must be under ${BODY_MAX} bytes.` }, 413);
     const key = 'sbd_' + randomBytes(16).toString('hex');
     const rec = db.createKey(key, String(body.label || '').slice(0, 60), 'free');
     return json(res, { key, tier: rec.tier, rpm: TIERS.free.rpm, docs: '/docs', note: 'Send this as the X-API-Key header on /v1 requests.' }, 201);
@@ -171,11 +213,15 @@ export async function handleV1(req, res, u) {
       cap: n.cap ?? null,
       atCap: !!n.atCap,
       thresholds: { transfersPerDay: n.txPerDay, volumePerDay: n.volumePerDay },
-      window: { days: n.windowDays, maxTransfers: n.maxTransfers, maxVolume: n.maxVolume },
+      // Each address is measured over its own observed span — first block seen to last — so there is
+      // no single window to report here. `windowDays`, `maxTransfers` and `maxVolume` ride on each
+      // address below: those are the limits it was actually judged against. `blockMs` is the only
+      // input that turns a block span into days, so it is published rather than assumed.
+      window: { perAddress: true, minDays: n.minWindowDays ?? 1, blockMs: n.blockMs ?? null },
       excludedVolume24h: n.excludedVolume24h ?? null,
       excludedShare: n.excludedShare ?? null,
       addresses: n.top || [],
-      note: 'Addresses whose activity rate exceeds the thresholds are treated as infrastructure. A transfer is excluded from adjusted volume only when both of its ends are flagged; see /methodology.',
+      note: 'Addresses whose activity rate over their own observed span exceeds the thresholds are treated as infrastructure. A transfer is excluded from adjusted volume only when both of its ends are flagged; see /methodology.',
       ...(n.atCap ? {
         warning: `The flag set is truncated: ${n.qualifying} addresses meet the thresholds but only the top ${n.cap} by volume are flagged. Adjusted volume is therefore a lower bound on what the published rule would exclude, and the cap — not the thresholds — is the binding constraint. Raw and real volume are unaffected.`,
       } : {}),
@@ -192,8 +238,17 @@ export async function handleV1(req, res, u) {
     // last indexed minute, and `windowEnd` states which instant that is so a consumer is never
     // left to assume the series runs up to the moment they called.
     const endSec = Math.floor((s.windowEnd || Date.now()) / 1000);
-    const since = endSec - r.span;
-    return json(res, { token, group: r.group, windowEnd: endSec * 1000, series: db.getHistory(token, since, r.group) }, 200, H);
+    const since = r.span == null ? 0 : endSec - r.span;
+    return json(res, {
+      token, group: r.group, windowEnd: endSec * 1000,
+      // Ranges past 7d are answered from the per-day rollup rather than the minute table. Stated,
+      // with the instant the range asked for and where the record actually starts, so a long range is
+      // never mistaken for more history than exists: `recordBegan > since` means it is truncated.
+      source: r.daily ? 'daily' : 'minute',
+      since,
+      recordBegan: r.daily ? db.dailyRecordBegan() : (db.getCoverage().a ?? null),
+      series: db.getSeries(token, since, r.group, r.daily),
+    }, 200, H);
   }
 
   // per-token detail: supply/velocity + 24h summary + net issuance + size distribution
@@ -263,6 +318,13 @@ export async function handleV1(req, res, u) {
     const snap = tvl.snapshot();
     return json(res, {
       ...snap.totals, method: snap.method, series: snap.series,
+      // How many contracts were measured, out of how many are known. Past the cap this total covers
+      // the highest-balance contracts and not the whole chain — which is a caveat on the headline
+      // number, so it travels with it.
+      coverage: snap.coverage,
+      ...(snap.coverage?.atCap ? {
+        warning: `Coverage is truncated: ${snap.coverage.knownContracts} contracts are known and the top ${snap.coverage.cap} by ${snap.coverage.order} were scanned. Chain TVL is therefore a lower bound.`,
+      } : {}),
       protocols: snap.protocols.filter((p) => p.tvl > 0).map((p) => ({ id: p.id, name: p.name, tvl: p.tvl })),
       updatedAt: snap.lastRun?.at ?? null,
     }, 200, H);
@@ -283,16 +345,36 @@ export async function handleV1(req, res, u) {
     return json(res, { top: db.getTop(limit).map((x) => ({ ...x, label: getLabel(x.address)?.name || null })) }, 200, H);
   }
 
+  // Largest transfers over an explicit number of days, from the retained per-day set. This used to
+  // read the rolling raw-transfer table, which at real throughput holds a couple of minutes — so
+  // "largest transfers" meant "largest of the last two minutes" with nothing saying so.
   if (path === '/v1/transfers/largest') {
     const limit = Math.min(100, Number(u.searchParams.get('limit')) || 20);
-    return json(res, { transfers: db.getLargest(limit) }, 200, H);
+    const days = Math.min(180, Math.max(1, Number(u.searchParams.get('days')) || 7));
+    const endSec = Math.floor((s.windowEnd || Date.now()) / 1000);
+    return json(res, {
+      days,
+      window: { from: (endSec - days * 86400) * 1000, to: endSec * 1000 },
+      note: `The largest transfers of the last ${days} day(s), from the retained per-day set (top ${db.TOP_PER_DAY} per day per token).`,
+      transfers: db.getLargest(limit, endSec - days * 86400),
+    }, 200, H);
   }
 
   if (path.startsWith('/v1/address/')) {
     const addr = path.slice('/v1/address/'.length).toLowerCase();
     if (!ADDR_RE.test(addr)) return json(res, { error: 'bad_address' }, 400, H);
     const stats = db.addressStats(addr) || { address: addr, transfers: 0, volume: 0, last_block: 0 };
-    return json(res, { ...stats, label: getLabel(addr)?.name || null, recent: db.addressRecent(addr, 25) }, 200, H);
+    return json(res, {
+      ...stats,
+      label: getLabel(addr)?.name || null,
+      // `recent` only reaches as far back as the raw transfer window, which is bounded by row count
+      // and therefore by throughput — so it is published with its span rather than left to be read as
+      // "this address's history". `largest` comes from the retained per-day set and does not expire
+      // with it, which is what makes an address lookup useful on a busy chain at all.
+      transferWindow: s.transferWindow ?? null,
+      recent: db.addressRecent(addr, 25),
+      largest: db.addressLargest(addr, 10),
+    }, 200, H);
   }
 
   // --- billing: pay in USDC on Base, no card, no account ---
@@ -323,12 +405,16 @@ export async function handleV1(req, res, u) {
 
   if (path === '/v1/alerts' && method === 'POST') {
     const body = await readBody(req);
+    if (body.__tooLarge) return json(res, { error: 'body_too_large', hint: `Request body must be under ${BODY_MAX} bytes.` }, 413, H);
     if (db.alertCount(key) >= tier.maxAlerts) {
       return json(res, { error: 'alert_limit_reached', tier: rec.tier, max: tier.maxAlerts, upgrade: `Pro tier allows ${TIERS.pro.maxAlerts} alerts.` }, 402, H);
     }
-    const whErr = validateWebhook(body.webhook);
+    // Resolved, not just parsed: a hostname pointing at a private address is the whole SSRF case, and
+    // the syntactic check alone never saw it.
+    const whErr = await validateWebhookHost(body.webhook);
     if (whErr === 'invalid_url') return json(res, { error: 'webhook_required', hint: 'Provide a valid https webhook URL (Discord/Slack/Telegram).' }, 400, H);
-    if (whErr) return json(res, { error: 'webhook_blocked', hint: 'Webhook must be a public https URL (no localhost or private IPs).' }, 400, H);
+    if (whErr === 'unresolvable_host') return json(res, { error: 'webhook_unresolvable', hint: 'The webhook hostname does not resolve. A rule pointing at it could never fire.' }, 400, H);
+    if (whErr) return json(res, { error: 'webhook_blocked', hint: 'Webhook must be a public https URL — no localhost, private, or link-local address, including via DNS.' }, 400, H);
 
     const token = body.token ? String(body.token).toUpperCase() : null;
     if (token && !TOKEN_SYMBOLS.has(token)) return json(res, { error: 'bad_token', hint: `token must be one of: ${TOKEN_LIST}.` }, 400, H);

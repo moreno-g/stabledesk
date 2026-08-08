@@ -374,8 +374,21 @@ function build() {
       '/v1/transfers/largest': {
         get: {
           tags: ['Addresses'], operationId: 'getLargestTransfers',
-          summary: 'Largest transfers in the retained window',
-          parameters: [limitParam(100, 20)],
+          summary: 'Largest transfers over a stated window',
+          description: [
+            'The largest transfers of the last `days` days, from the retained per-day set (top 100 per day per',
+            'token, kept 180 days). Previously read from the rolling raw-transfer table, which is row-capped —',
+            'so at real throughput "largest transfers" meant "largest of the last couple of minutes", with',
+            'nothing in the response saying so. The window is now an argument and it is echoed back.',
+          ].join(' '),
+          parameters: [
+            limitParam(100, 20),
+            {
+              name: 'days', in: 'query', required: false,
+              description: 'Window in days, 1–180. Defaults to 7.',
+              schema: { type: 'integer', minimum: 1, maximum: 180, default: 7 },
+            },
+          ],
           responses: { 200: ok('Largest transfers.', schema('LargestTransfers')), ...COMMON },
         },
       },
@@ -546,6 +559,15 @@ function build() {
             index: schema('IndexProgress'),
             chainId: { type: 'integer', examples: [CHAIN.chainId] },
             network: { type: 'string', examples: [CHAIN.id] },
+            windowEnd: { type: ['integer', 'null'], description: 'The instant every rolling window ends at (ms) — the newest measured minute.' },
+            clockSkewSec: {
+              type: ['integer', 'null'],
+              description: [
+                'How far the newest measured minute sits behind the wall clock. Near zero in normal operation.',
+                'Bucket minutes are keyed by chain time, and every rolling window is anchored to it, so a large',
+                'value here is what explains a 24h figure that looks impossibly quiet.',
+              ].join(' '),
+            },
             block: { type: ['integer', 'null'], description: 'Last indexed block *as of the newest snapshot*. Frozen while a long catch-up runs — prefer `index.checkpoint`, which is read live.' },
             indexLag: { type: ['integer', 'null'], description: 'Blocks between the chain head and the last indexed block, from the snapshot. Frozen during a catch-up; `index.behind` is the live equivalent.' },
             updatedAt: num('When this snapshot was assembled (ms).'),
@@ -672,13 +694,22 @@ function build() {
           properties: {
             token: { type: 'string' },
             group: { type: 'integer', description: 'Bucket size in seconds.' },
-            windowEnd: { type: 'integer', description: 'The instant the range ends at (ms). Equal to now while live; equal to the last indexed minute once frozen. Label the series with this rather than assuming it runs to the moment of the call.' },
+            windowEnd: { type: 'integer', description: 'The instant the range ends at (ms) — the newest measured minute, which is chain time. Label the series with this rather than assuming it runs to the moment of the call.' },
+            source: {
+              type: 'string', enum: ['minute', 'daily'],
+              description: 'Which table answered. Per-minute aggregates are a rolling 7 days; anything longer is served from the per-day rollup, which is kept indefinitely.',
+            },
+            since: { type: 'integer', description: 'The instant the range asked for, unix seconds. 0 on `range=all`.' },
+            recordBegan: {
+              type: ['integer', 'null'],
+              description: 'Where the answering table\'s history starts, unix seconds. When this is later than `since`, the series is bounded by how long the record has existed rather than by the range — a 90-day range drawn from a rollup that began last week is a one-week series wearing a 90-day label, and this is how you can tell.',
+            },
             series: {
               type: 'array',
               items: {
                 type: 'object',
                 properties: {
-                  minute: { type: 'integer', description: 'Bucket start, unix seconds.' },
+                  t: { type: 'integer', description: 'Bucket start, unix seconds — a minute boundary or a day boundary depending on `source`.' },
                   volume: { type: 'number' }, cnt: { type: 'integer' },
                   rvolume: { type: 'number' }, avolume: { type: 'number' },
                   mint: { type: 'number' }, burn: { type: 'number' },
@@ -697,8 +728,9 @@ function build() {
             netIssuance24h: num('mint − burn over the rolling 24h.'),
             distribution: {
               type: 'object',
-              description: 'Transfer-size histogram over the retained window.',
+              description: 'Transfer-size histogram over the retained transfer window, published with the window it covers.',
               properties: {
+                window: schema('TransferWindow'),
                 total: { type: 'integer' },
                 brackets: {
                   type: 'array',
@@ -770,6 +802,22 @@ function build() {
             unattributed: { type: 'number', description: 'Held by contracts nobody has named. Counted in `tvl` and reported separately — hiding it would understate the chain, and assigning it to a plausible protocol would invent data.' },
             attributedShare: { type: 'number', description: 'How much of the locked value the registry can actually name, 0–1. Reported next to the total, never instead of it.' },
             holders: { type: 'integer', description: 'Distinct contracts holding a balance.' },
+            coverage: {
+              type: 'object',
+              description: [
+                'How much of the chain the total covers. One pass reads balanceOf for every tracked asset against',
+                'every target, so the target count is capped; targets are ordered by last-read balance, then by',
+                'volume moved. Past the cap the total is a lower bound, and `atCap` is how you know.',
+              ].join(' '),
+              properties: {
+                scanned: { type: 'integer' },
+                knownContracts: { type: ['integer', 'null'], description: 'How many contracts exist to scan.' },
+                cap: { type: 'integer' },
+                atCap: { type: 'boolean' },
+                order: { type: 'string', description: 'How targets are prioritised when the cap binds.' },
+              },
+            },
+            warning: { type: 'string', description: 'Present only while coverage is truncated.' },
           },
         },
 
@@ -953,8 +1001,17 @@ function build() {
             },
             window: {
               type: 'object',
-              description: 'The per-day thresholds scaled by how many days of history are actually held.',
-              properties: { days: { type: 'number' }, maxTransfers: { type: 'number' }, maxVolume: { type: 'number' } },
+              description: [
+                'How the per-day rates above become an absolute limit. Each address is measured over its *own*',
+                'observed span — the first block it was seen in to the last — so there is no single window here:',
+                '`windowDays`, `maxTransfers` and `maxVolume` ride on each address below, and those are the limits',
+                'it was actually judged against. `blockMs` is the only input that converts a block span to days.',
+              ].join(' '),
+              properties: {
+                perAddress: { type: 'boolean', description: 'Always true. Present so a client written against the old chain-wide window fails loudly rather than reading undefined.' },
+                minDays: { type: 'number', description: 'Floor on an address\'s window. Without it, an address first seen inside one block has a near-zero span and any activity is an infinite rate.' },
+                blockMs: { type: ['number', 'null'], description: 'Measured average block time, used to convert a block span into days.' },
+              },
             },
             excludedVolume24h: num('Real volume dropped from adjusted, over 24h.'),
             excludedShare: num('That volume as a share of real volume, 0–1.'),
@@ -967,6 +1024,11 @@ function build() {
                   transfers: { type: 'integer' },
                   volume: { type: 'number' },
                   label: { type: ['string', 'null'] },
+                  windowDays: { type: 'number', description: 'This address\'s own observed span, in days, floored at one.' },
+                  maxTransfers: { type: 'number', description: 'The transfer limit derived from that span — what it was actually compared against.' },
+                  maxVolume: { type: 'number', description: 'The volume limit derived from that span.' },
+                  firstBlock: { type: ['integer', 'null'], description: 'First block this address was seen in. Null on rows written before the span was recorded; those fall back to the one-day floor.' },
+                  lastBlock: { type: 'integer' },
                   reason: { type: 'string', enum: ['volume', 'frequency'], description: 'An address can breach both limits; this names the one it breaches hardest, relatively.' },
                 },
                 additionalProperties: true,
@@ -985,13 +1047,39 @@ function build() {
             too: { type: 'string', description: 'Recipient. The zero address means a burn.' },
             amount: { type: 'number' },
             block: { type: 'integer' },
-            ts: { type: 'integer', description: 'Unix seconds, derived from the block number against a rolling anchor.' },
+            ts: { type: 'integer', description: 'Unix seconds, interpolated between the measured timestamps of its indexed range\'s first and last block.' },
+          },
+        },
+
+        TransferWindow: {
+          type: 'object',
+          description: [
+            'The span of the retained raw-transfer table — what the size distribution and the `recent` lists',
+            'are describing. It is bounded by both a 24h clock and a row cap, so its actual length depends on',
+            'how busy the chain is, which is why it is measured and published rather than stated once.',
+          ].join(' '),
+          properties: {
+            rows: { type: 'integer' },
+            fromTs: { type: ['integer', 'null'], description: 'Oldest retained transfer, unix seconds.' },
+            toTs: { type: ['integer', 'null'] },
+            spanSec: { type: 'integer' },
+            cap: { type: 'integer', description: 'Row ceiling.' },
+            atCap: { type: 'boolean', description: 'True when the row cap rather than the 24h clock is deciding how far back the table reaches.' },
           },
         },
 
         LargestTransfers: {
           type: 'object',
-          properties: { transfers: { type: 'array', items: schema('Transfer') } },
+          description: 'Largest transfers over an explicit window, from the retained per-day set rather than from the rolling raw table.',
+          properties: {
+            days: { type: 'integer', description: 'The window this answered over.' },
+            window: {
+              type: 'object',
+              properties: { from: { type: 'integer' }, to: { type: 'integer' } },
+            },
+            note: { type: 'string' },
+            transfers: { type: 'array', items: schema('Transfer') },
+          },
         },
 
         AddressDetail: {
@@ -1001,8 +1089,14 @@ function build() {
             transfers: { type: 'integer' },
             volume: { type: 'number' },
             last_block: { type: 'integer' },
+            first_block: { type: ['integer', 'null'], description: 'First block this address was seen in — the start of the span its activity rate is measured over.' },
             label: { type: ['string', 'null'] },
-            recent: { type: 'array', items: schema('Transfer'), description: 'Up to 25 most recent transfers touching this address.' },
+            transferWindow: { anyOf: [schema('TransferWindow'), { type: 'null' }] },
+            recent: { type: 'array', items: schema('Transfer'), description: 'Up to 25 most recent transfers touching this address, within `transferWindow`.' },
+            largest: {
+              type: 'array', items: schema('Transfer'),
+              description: 'Largest transfers touching this address, from the retained per-day set — so they do not expire with the window above.',
+            },
           },
         },
 

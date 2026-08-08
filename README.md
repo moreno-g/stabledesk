@@ -12,7 +12,8 @@
 flows — read straight from the chain, with a [published method](https://stabledesk.xyz/methodology)
 and a free data API.
 
-**[stabledesk.xyz](https://stabledesk.xyz)** · [@getStabledesk](https://x.com/getStabledesk)
+**[stabledesk.xyz](https://stabledesk.xyz)** · [@getStabledesk](https://x.com/getStabledesk) ·
+[how we publish numbers](COMMS.md)
 
 **Running against the Arc public testnet.** Arc mainnet has not launched publicly — Circle's
 whitepaper targets a summer 2026 beta — so the figures on the live site are faucet-funded testnet
@@ -32,11 +33,17 @@ Read-only. Zero dependencies — Node's native `fetch` and `node:sqlite`, nothin
 - **Three volume measures, all published** — raw (every `Transfer` event), **real** (one largest
   transfer per transaction per token, so routing hops and contract internals don't count twice),
   and **adjusted** (real, minus infrastructure talking to infrastructure). Showing all three means
-  every filtering step is auditable rather than asserted.
+  every filtering step is auditable rather than asserted. The adjusted filter is a *rate*: each
+  address is measured over its own observed span — first block seen to last — so $2M in a day is
+  infrastructure and the same $2M across a month is not, and every flagged address publishes the
+  window and the two limits it was actually judged against.
 - **Network economics** — gas on Arc is paid in USDC, so fees are dollars read straight from
   transaction receipts: no price feed, no oracle. Headline metric is *cost to move $1M*.
 - **Stablecoin supply, share and velocity** per token, plus mint/burn.
-- **Per-block activity** + **largest transfers**, in real time.
+- **Per-block activity** + **largest transfers** over a stated window, in real time.
+- **History past the retention window** — per-day aggregates are kept indefinitely, so `30d`, `90d`,
+  `1y` and `all` ranges exist and every series says which table answered it and how far back the
+  record actually reaches.
 - **Ecosystem** (`/ecosystem`) — every protocol on Arc with its **TVL**, flow, status and official links, plus
   the contracts holding balances nobody has named yet. TVL is measured as stablecoin balances held by
   contracts, which needs no per-protocol adapter on a chain where value is denominated in USDC.
@@ -48,12 +55,15 @@ node server.js
 # → http://localhost:4317
 ```
 
-No install step (Node ≥ 20). On first run the indexer backfills recent history, then keeps
+No install step (Node ≥ 22.5.0 — `node:sqlite`). On first run the indexer backfills recent history, then keeps
 indexing forward and serves:
 
 - `GET /` — the terminal
 - `GET /api/state` — live snapshot: network stats, 24h summary, top addresses, largest transfers
-- `GET /api/history?token=ALL|USDC|EURC|USYC&range=1h|24h|7d` — time series (volume, count, mint, burn)
+- `GET /api/history?token=ALL|USDC|EURC|USYC&range=1h|24h|7d|30d|90d|1y|all` — time series (volume,
+  count, mint, burn). Past 7d the series comes from the per-day rollup; the response states which
+  table answered (`source`) and how far back the record reaches (`recordBegan`), so a long range
+  over a short record cannot pass for a long one
 - `GET /api/top?limit=N` — top addresses by volume
 - `GET /api/health` — status: indexer health *and* chain liveness, reported separately
 - `GET /api/uptime?days=30` — the availability record: uptime over observed time, plus coverage
@@ -86,9 +96,12 @@ remedies, so they are tracked and reported as two separate things.
   going blank. Only a genuinely empty database reports `booting`.
 - **Live-only figures go null, never stale**: block time, throughput and gas price are absent
   rather than carried over, because an old number displayed as current is a wrong number.
-- **Rolling windows re-anchor**: frozen, the 24h windows end at the last indexed minute
-  (`windowEnd`) rather than at now — a trailing-24h-from-now window on a halted chain would
-  report "24h volume: 0" and state the chain sat idle when in fact it stopped.
+- **Rolling windows follow chain time, not our clock**: minute buckets are keyed by block
+  timestamps, so every window ends at the newest minute actually measured (`windowEnd`) and never at
+  a wall-clock instant the data has not reached. Anchoring to now would report "24h volume: 0" and
+  state the chain sat idle whenever the two clocks diverge — on a halted chain, or simply when block
+  timestamps run behind. `clockSkewSec` publishes the gap so the anchoring is visible rather than
+  something to be discovered.
 - **The verdict is pushed, not just published** (`chainalert.js`). A refused credential once sat in
   production for four days — correctly diagnosed and correctly displayed, on a page nobody was
   watching. State *changes* are announced to Telegram (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`,
@@ -131,7 +144,8 @@ saw — leave it off for a week and it publishes a week of Arc uptime it never w
 ### How it works
 
 - **Modules**: `rpc.js` (RPC + chain constants) · `db.js` (SQLite schema + queries) · `indexer.js` (backfill + live loop + snapshot) · `server.js` (HTTP + API) · `openapi.js` (generated spec + `llms.txt`).
-- **Trick**: blocks are ~0.5s with no reorgs, so a transfer's timestamp is derived from its block number against a rolling anchor — the indexer only needs `eth_getLogs`, sparing the rate-limited public RPC.
+- **Trick**: no reorgs, so a transfer's timestamp is derived from its block number rather than by fetching a header per block — the hot path stays `eth_getLogs`, sparing the rate-limited public RPC. Each 500-block range carries the *measured* timestamps of its own first and last block (same JSON-RPC batch as the logs, so no extra round trip) and interpolates between them, which bounds the error to whatever the block time varies by inside four minutes of chain.
+- **Retention**, three different answers because the tables answer different questions: per-minute aggregates are a rolling 7 days; they are rolled into **per-day aggregates kept indefinitely** before being deleted, in the same transaction, so every minute is counted exactly once; individual transfers are a 24h window bounded by a row cap, and the largest transfers are kept per day for 180 days so "the biggest transfer this week" doesn't fall off the end of a row cap.
 
 ## Networks
 
@@ -157,8 +171,10 @@ endpoint — the separate database files mean neither network's history is distu
 in either direction.
 
 Both are EVM, gas is paid in USDC, and there are no reorgs. That last property is what keeps the
-indexer simple: a transfer's timestamp is derived from its block number against a rolling anchor,
-so the hot path only needs `eth_getLogs` and the rate-limited public RPC is spared.
+indexer simple: a transfer's timestamp is derived from its block number rather than from a header
+fetched per block, so the hot path only needs `eth_getLogs` and the rate-limited public RPC is
+spared. See *How it works* above for how each range is anchored to its own measured block
+timestamps.
 
 ## Roadmap
 
@@ -174,7 +190,13 @@ so the hot path only needs `eth_getLogs` and the rate-limited public RPC is spar
    through an outage (see *When the chain stops* above).
 7. ✅ **Chain uptime history** — the transitions are persisted, so Arc's availability becomes a
    public record (`/status`, `/v1/chain/uptime` — see *The availability record* above).
-8. **Billing** — USDC on Base is implemented (`payments.js`); card payment is not.
+8. ✅ **Permanent history** — per-day aggregates survive the minute table's 7-day window, so launch
+   day stays readable after launch week (`30d`/`90d`/`1y`/`all`). Backups of what cannot be
+   re-indexed: `backup.js`, see `DEPLOY.md`.
+9. **Billing** — USDC on Base is implemented (`payments.js`); card payment is not.
+10. **Notable-transfer posting** — built and tested (`whalewatch.js`), off until
+    `WHALEWATCH_ENABLED=true`: enabling it starts publishing, which should be a deliberate act
+    rather than a side effect of a deploy.
 
 ### Ecosystem endpoints
 

@@ -15,13 +15,14 @@ import * as entities from './entities.js';
 import * as tvl from './tvl.js';
 import * as rankings from './rankings.js';
 import * as chainuptime from './chainuptime.js';
+import * as whalewatch from './whalewatch.js';
 import { search } from './search.js';
 import { CATEGORIES, PROTOCOLS, protocolById } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
 import { specJson, llmsTxt } from './openapi.js';
-import { RANGES, ADDR_RE, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED, SITE_ORIGIN } from './constants.js';
+import { RANGES, ADDR_RE, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED, WHALEWATCH_ENABLED, SITE_ORIGIN } from './constants.js';
 import { CHAIN, NETWORK } from './chains.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -29,8 +30,13 @@ const PORT = Number(process.env.PORT) || 4317;
 
 const SEC = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY' };
 // CSP tuned to the app: inline styles/scripts + a data: favicon, everything else same-origin only.
-// Umami analytics is loaded from and reports to cloud.umami.is, so it's allowlisted explicitly.
-const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cloud.umami.is; connect-src 'self' https://cloud.umami.is; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+//
+// Umami is served from cloud.umami.is but posts its beacons to gateway.umami.is, so both hosts have
+// to be named — script-src for the first, connect-src for the second. Only cloud.umami.is was listed,
+// which loaded the script and then blocked every event it tried to send: the console showed
+// "violates the following Content Security Policy directive" on each pageview and the analytics had
+// been recording nothing. Found while verifying an unrelated change.
+const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cloud.umami.is; connect-src 'self' https://cloud.umami.is https://gateway.umami.is; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 function json(res, body, code = 200) {
   res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-store', 'x-robots-tag': 'noindex', ...SEC });
@@ -51,7 +57,15 @@ function applyNetwork(html) {
   // token list is substituted rather than written out — a hardcoded symbol would render an
   // empty tab and an empty row on whichever network doesn't have it.
   const symbols = [...new Set(Object.values(CHAIN.tokens).map((t) => t.symbol))];
+  // Whether Circle Gateway is deployed here is a fact about the active network, not a sentence to
+  // write down once. /methodology asserted "Arc mainnet is not on Circle's Gateway list yet", which
+  // is true until the day it isn't — and that day is a launch day, when nobody will be editing prose.
+  const gatewayStatus = CHAIN.gateway
+    ? `${CHAIN.label} is a Gateway chain and is measured as described: Gateway's contracts are `
+      + `<code>${CHAIN.gateway.wallet}</code> and <code>${CHAIN.gateway.minter}</code>.`
+    : `Circle Gateway is not deployed on ${CHAIN.label}, so there is no bridge flow to attribute here.`;
   const out = html
+    .replaceAll('{{GATEWAY_STATUS}}', gatewayStatus)
     .replaceAll('{{NET}}', CHAIN.label)
     .replaceAll('{{CHAIN_ID}}', String(CHAIN.chainId))
     // Lets the page reason about the network in JS, not only in markup: some caveats belong on a
@@ -218,8 +232,18 @@ const server = http.createServer(async (req, res) => {
     // empty plot next to KPIs that show figures, which reads as a broken chart rather than a
     // stopped chain.
     const endSec = Math.floor((live.snapshot.windowEnd || Date.now()) / 1000);
-    const since = endSec - r.span;
-    return json(res, { token, group: r.group, windowEnd: endSec * 1000, series: db.getHistory(token, since, r.group) });
+    const since = r.span == null ? 0 : endSec - r.span;
+    return json(res, {
+      token, group: r.group, windowEnd: endSec * 1000,
+      // Which table answered, which instant the range asked for, and how far back that table
+      // actually reaches. A 90-day range served from a rollup that started last week is a one-week
+      // series wearing a 90-day label; `since` vs `recordBegan` is what lets a caller — or our own
+      // chart footer — notice that without knowing our retention.
+      source: r.daily ? 'daily' : 'minute',
+      since,
+      recordBegan: r.daily ? db.dailyRecordBegan() : (db.getCoverage().a ?? null),
+      series: db.getSeries(token, since, r.group, r.daily),
+    });
   }
   if (path === '/api/top') {
     const limit = Math.min(50, Number(u.searchParams.get('limit')) || 10);
@@ -238,8 +262,13 @@ const server = http.createServer(async (req, res) => {
       summary24h: sm,
       netIssuance24h: sm ? sm.mint - sm.burn : null,
       distribution: db.sizeDistribution(token),
-      largest: db.largestByToken(token, 8).map(dress),
+      // Over the last seven days, from the retained per-day set — stated in `largestWindowDays` so the
+      // page can label it. Read from the rolling transfer table this was "the largest of the last few
+      // minutes", which at real throughput is not the claim the heading makes.
+      largestWindowDays: 7,
+      largest: db.largestByToken(token, 8, Math.floor(Date.now() / 1000) - 7 * 86400).map(dress),
       recent: db.recentByToken(token, 12).map(dress),
+      transferWindow: db.recentWindow(),
     });
   }
   if (path === '/api/address') {
@@ -451,6 +480,12 @@ server.listen(PORT, () => {
   payments.start();
   if (ENTITIES_ENABLED) entities.start();
   if (TVL_ENABLED) tvl.start();
+  // Off by default. Enabling it starts posting publicly, so it is an explicit switch — but it is a
+  // switch that exists, rather than an export nobody calls.
+  if (WHALEWATCH_ENABLED) {
+    console.log('[whalewatch] enabled — notable transfers will be delivered to Telegram');
+    whalewatch.start();
+  }
 });
 
 let shuttingDown = false;
@@ -460,6 +495,7 @@ function shutdown() {
   console.log('\nShutting down…');
   stop();                          // stop the live poll loop
   payments.stop();                 // stop the payment poller
+  whalewatch.stop();               // stop the notable-transfer poster (no-op when disabled)
   entities.stop();                 // stop the entity derivation loop
   tvl.stop();                      // stop the TVL balance scanner
   server.close(() => { try { db.close(); } catch {} process.exit(0); });

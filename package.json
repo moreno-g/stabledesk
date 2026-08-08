@@ -4,7 +4,7 @@
   "license": "MIT",
   "private": true,
   "type": "module",
-  "description": "Stabledesk — live stablecoin analytics terminal + data API (on the Arc testnet, Circle L1).",
+  "description": "Stabledesk — live stablecoin analytics terminal + data API for Arc, Circle's L1. Which network it reads is set by ARC_NETWORK.",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",

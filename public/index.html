@@ -318,6 +318,11 @@
             <button data-rng="1h">1h</button>
             <button data-rng="24h" class="on">24h</button>
             <button data-rng="7d">7d</button>
+            <!-- Past 7d the series comes from the per-day rollup, which is kept indefinitely. The
+                 minute table is a rolling week, so these ranges did not exist before it. -->
+            <button data-rng="30d">30d</button>
+            <button data-rng="90d">90d</button>
+            <button data-rng="all">All</button>
           </div>
         </div>
       </div>
@@ -588,19 +593,23 @@ function renderFees(f){
 }
 
 // ---- address-level noise filter ----
+// The limits are rates now, and each address is judged over its own observed span — so there is no
+// single "limits over Nd of history" line to print. The rate goes in the footer; the window each
+// address was actually measured over goes on its own row, which is what makes a flag auditable.
 function renderNoise(n){
   const tb=$('#noiseTbl'), foot=$('#noiseFoot');
+  const rate = n ? `${compact(n.txPerDay)} transfers/day or ${compact(n.volumePerDay)} volume/day, per address` : '';
   if(!n || !n.top || !n.top.length){
     tb.innerHTML='<tr><td colspan="3" style="color:var(--ink-3);padding:14px 0">No address exceeds the thresholds yet.</td></tr>';
-    foot.textContent = n ? `Limits over ${n.windowDays.toFixed(1)}d of history: ${compact(n.maxTransfers)} transfers or ${compact(n.maxVolume)} volume.` : '';
+    foot.textContent = n ? `Thresholds: ${rate}.` : '';
     return;
   }
   tb.innerHTML=n.top.map(x=>`<tr>
-    <td>${x.label?`<span class="lblchip">${esc(x.label)}</span>`:`<span class="addr">${short(x.address)}</span>`}<span class="tag">${esc(x.reason)}</span></td>
+    <td>${x.label?`<span class="lblchip">${esc(x.label)}</span>`:`<span class="addr">${short(x.address)}</span>`}<span class="tag">${esc(x.reason)}</span>
+      <span class="tag" title="Measured over this address's own observed span — the window its limits were derived from">${(x.windowDays||1).toFixed(1)}d</span></td>
     <td class="r">${nf.format(x.transfers)}</td>
     <td class="r amt">${compact(x.volume)}</td></tr>`).join('');
-  foot.textContent=`${nf.format(n.flagged)} address${n.flagged===1?'':'es'} flagged · limits over ${n.windowDays.toFixed(1)}d: `
-    + `${compact(n.maxTransfers)} transfers or ${compact(n.maxVolume)} volume · removes `
+  foot.textContent=`${nf.format(n.flagged)} address${n.flagged===1?'':'es'} flagged · thresholds ${rate} · removes `
     + `${compact(n.excludedVolume24h)} (${(n.excludedShare*100).toFixed(1)}%) of 24h real volume`;
   // Said on the page, not just in the API. Once the cap binds, which addresses are flagged is
   // decided by the cap rather than by the thresholds printed right above it — leaving that to a
@@ -635,11 +644,21 @@ function renderChart(payload){
     + `<path d="${area}" fill="${color}" opacity="0.12"/>`
     + `<path d="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
   peak.innerHTML=`peak <b>${compact(maxV)}</b>`;
+  // Buckets are days once the series comes from the rollup, so the axis follows what the response
+  // says answered it rather than a hardcoded list of range names.
+  const byDay = payload.source==='daily' || chart.range==='7d';
   const fmt=(sec)=>{ const dte=new Date(sec*1000);
-    return chart.range==='7d' ? dte.toLocaleDateString('en-US',{month:'short',day:'numeric'})
+    return byDay ? dte.toLocaleDateString('en-US',{month:'short',day:'numeric'})
       : dte.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}); };
   const mid=series[Math.floor(series.length/2)];
   axis.innerHTML=`<span>${fmt(series[0].t)}</span><span>${fmt(mid.t)}</span><span>${fmt(series.at(-1).t)}</span>`;
+  // A long range drawn from a record that began recently is a short series wearing a long label. The
+  // response says both where the record starts and which instant the range asked for, so the two can
+  // be compared instead of guessed at.
+  if(payload.recordBegan!=null && payload.since!=null && payload.recordBegan>payload.since){
+    const began=new Date(payload.recordBegan*1000);
+    peak.innerHTML += ` · record begins ${began.toLocaleDateString('en-US',{month:'short',day:'numeric'})}`;
+  }
 }
 
 async function loadChart(){

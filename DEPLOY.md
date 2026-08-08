@@ -77,6 +77,53 @@ at this stage.
 
 ---
 
+## Backups — what cannot be re-indexed
+
+Most of the database can be rebuilt by pointing the indexer at the chain again. Four tables cannot,
+and losing the volume loses them permanently:
+
+| Table | Why it is irreplaceable |
+|---|---|
+| `chain_events` | The availability record. It is a log of *observations* — when we were watching and what we saw. Re-indexing cannot reconstruct having been present. |
+| `buckets_daily` | Per-day history, kept indefinitely. Re-indexable in principle, but only for as long as the RPC still serves those blocks' logs, and never for a range the provider has pruned. |
+| `tvl_history` | Daily TVL levels. A level is a reading taken at a moment; `balanceOf` today cannot tell you last Tuesday's balance. |
+| `api_keys` / `orders` | Issued keys and paid subscriptions. Losing these revokes access people paid for. |
+
+`top_transfers` and `fee_samples` are re-derivable; `buckets`, `addr_stats` and `recent` are rolling
+windows and will refill on their own.
+
+`cp` is not a backup of a live SQLite database: with WAL enabled the file on disk is not a complete
+database on its own, and a copy taken mid-write is a torn one. `backup.js` drives SQLite's
+online-backup API instead — a consistent snapshot with no downtime — then runs `integrity_check` on
+the *copy* and prints the row count of each irreplaceable table, because a snapshot nobody verified is
+a file rather than a backup:
+
+```bash
+railway ssh node backup.js /tmp/snap.db
+```
+
+It resolves the database path exactly the way `db.js` does, so it can never snapshot a different file
+than the one the service is writing to, and it needs no `sqlite3` binary — the deployed image is
+`node:24-slim`, which does not ship one. Then pull the file down:
+
+```bash
+railway ssh cat /tmp/snap.db > "stabledesk-$(date +%F).db"
+```
+
+Expect output like `ok · 65.6 MB · chain_events=412 buckets_daily=94 tvl_history=88 api_keys=37`. A
+count of `0` or `absent` on `chain_events` or `buckets_daily` means the snapshot is not worth keeping —
+investigate before overwriting the previous one.
+
+Keep this on a schedule; weekly is enough for a daily rollup, and the whole point of a permanent record
+is that it survives the disk it lives on. Restore is the reverse: stop the service, copy the file onto
+the volume under the name `chains.js` expects for that network (`arc-mainnet.db` or `arc.db`), redeploy.
+
+⚠️ **Never restore a testnet snapshot onto a mainnet deployment or vice versa.** The aggregates are
+additive, so faucet volume mixed into mainnet history could not be subtracted back out afterwards —
+which is why the two networks use different filenames in the first place.
+
+---
+
 ## Appendix — alternative: any VPS with Docker
 
 The repo also ships a `docker-compose.yml` + `Caddyfile` (app + Caddy with automatic HTTPS) if you

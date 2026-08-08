@@ -10,7 +10,10 @@ const TO_TOPIC = '0x' + '0'.repeat(24) + PAYMENT_RECEIVE_ADDRESS.slice(2).toLowe
 
 const POLL_MS = 20000;   // Base blocks are ~2s; no need to poll faster than this
 const MAX_RANGE = 2000;  // blocks per eth_getLogs call, conservative for public RPCs
+const RANGE_DELAY = 250; // ms between ranges when closing a gap
 const CP_KEY = 'base_payment_checkpoint';
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let endpoint = BASE_RPC_ENDPOINTS[0];
 
@@ -62,7 +65,7 @@ export function processLogs(logs) {
   }
 }
 
-async function tick() {
+async function tickOnce() {
   try {
     const latest = parseInt(await rpc('eth_blockNumber', []), 16);
     const cp = db.getMetaValue(CP_KEY);
@@ -74,12 +77,35 @@ async function tick() {
         const end = Math.min(latest, start + MAX_RANGE - 1);
         processLogs(await getLogsRange(start, end));
         db.setMetaValue(CP_KEY, end);
+        // Base is a rate-limited public RPC too, and closing a long gap (a day of downtime is ~43k
+        // blocks, i.e. 22 requests) should not arrive as a burst.
+        if (end < latest) await sleep(RANGE_DELAY);
       }
     }
     db.expireStaleOrders(Date.now() - ORDER_EXPIRY_MS);
   } catch (e) {
     console.error('[payments]', e.message || e);
   }
+}
+
+// setInterval fires on schedule whether or not the previous call has returned, and this one can run
+// long: after any stretch of downtime the first tick walks every block since the checkpoint. Two
+// overlapping walks both read the checkpoint, both re-scan ranges the other is working through, and
+// each writes back an `end` the other has already passed — so the checkpoint can move *backwards*.
+// Credit itself is safe (markOrderPaid only settles a still-pending order, and only once), which is
+// exactly why this stayed invisible. Guarded anyway: this is the path that grants paid access, and
+// the same guard already exists a file away for the same reason.
+const tick = nonReentrant(tickOnce);
+
+// Local rather than imported from indexer.js: the payment poller has no other reason to pull in the
+// indexer's module graph, and a shared 8-line guard is not worth that coupling on the money path.
+function nonReentrant(fn) {
+  let running = false;
+  return async (...args) => {
+    if (running) return false;
+    running = true;
+    try { await fn(...args); return true; } finally { running = false; }
+  };
 }
 
 let timer = null;

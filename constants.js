@@ -2,10 +2,23 @@
 
 import { CHAIN } from './chains.js';
 
+// Chart / series ranges. The first three read the per-minute table, which prune() keeps to a rolling
+// seven days; `daily: true` reads the per-day rollup instead, which is kept indefinitely.
+//
+// The long ranges exist because 7d used to be the maximum the data could answer — the minute table
+// was the only history there was. For a measurement layer that is the wrong ceiling: launch day is
+// precisely the day nobody can re-index later, and at seven days of retention it stopped being
+// readable a week after it happened.
 export const RANGES = {
   '1h': { span: 3600, group: 60 },
   '24h': { span: 86400, group: 900 },
   '7d': { span: 604800, group: 3600 },
+  '30d': { span: 30 * 86400, group: 86400, daily: true },
+  '90d': { span: 90 * 86400, group: 86400, daily: true },
+  '1y': { span: 365 * 86400, group: 86400, daily: true },
+  // span null → from the beginning of the record. The rollup is one row per day per token, so this
+  // stays a small query however long the deployment has been running.
+  all: { span: null, group: 86400, daily: true },
 };
 
 export const TIERS = {
@@ -100,6 +113,11 @@ export const RANKING_MIN_MOVE_PCT = 0.02;
 // announced yet. The payment poller itself keeps running regardless (so anything already
 // sent still gets credited); this flag only gates *creating new* orders and the public UI.
 export const BILLING_ENABLED = process.env.BILLING_ENABLED === 'true';
+
+// Whale-transfer posting (see whalewatch.js). Off unless explicitly enabled: switching it on starts
+// publishing to a public channel, and that must be a deliberate act rather than a consequence of a
+// deploy. The drafting pipeline runs and is tested regardless — only delivery is gated.
+export const WHALEWATCH_ENABLED = process.env.WHALEWATCH_ENABLED === 'true';
 export const BASE_CHAIN_ID = 8453;
 export const BASE_RPC_ENDPOINTS = [
   'https://mainnet.base.org',
