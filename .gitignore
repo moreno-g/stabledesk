@@ -6,3 +6,6 @@ arc-mainnet.db
 arc-mainnet.db-wal
 arc-mainnet.db-shm
 .DS_Store
+
+# Claude Code — réglages personnels, pas partagés
+.claude/settings.local.json

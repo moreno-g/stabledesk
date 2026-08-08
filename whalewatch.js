@@ -4,7 +4,12 @@
 // "$500K moved!" style content about them would misrepresent what's actually happening.
 // This module still builds and proves the detection + drafting pipeline now, so it's
 // ready to flip on the day Arc goes to mainnet — it just never delivers anywhere on its
-// own. NOT started from server.js by default; call start() explicitly to activate.
+// own.
+//
+// Activation is `WHALEWATCH_ENABLED=true` plus a configured Telegram bot, and it stays off by
+// default on purpose: turning it on starts posting publicly, which is not something a deploy should
+// do as a side effect of shipping. server.js reads the flag, so the switch is a documented one
+// rather than an unreferenced export nobody remembers to call.
 
 import { alertFeed } from './indexer.js';
 import * as db from './db.js';
@@ -17,11 +22,16 @@ const CHECK_MS = 15000;
 const short = (a) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '');
 const dedupeKey = (ev) => `${ev.block}|${ev.token}|${ev.kind}|${ev.from}|${ev.to}|${ev.amount}`;
 
-export function draftText(ev) {
+// The testnet disclaimer is derived, not written in. This module exists to be switched on the day Arc
+// goes to mainnet, and it hardcoded "(testnet — for demonstration, not real value)" into every draft —
+// so flipping it on would have published that caveat over real transfers, which is the same class of
+// wrong number this codebase refuses everywhere else, just in prose.
+export function draftText(ev, chain = CHAIN) {
   const amt = Math.round(ev.amount).toLocaleString('en-US');
   const verb = ev.kind === 'mint' ? 'minted' : ev.kind === 'burn' ? 'burned' : 'moved';
   const route = ev.kind === 'transfer' ? `\n${short(ev.from)} → ${short(ev.too || ev.to)}\n` : '\n';
-  return `👀 ${amt} ${ev.token} ${verb} on Arc (testnet — for demonstration, not real value)${route}\nLive on stabledesk.xyz`;
+  const caveat = chain.isTestnet ? ' (testnet — for demonstration, not real value)' : '';
+  return `👀 ${amt} ${ev.token} ${verb} on Arc${caveat}${route}\nLive on stabledesk.xyz`;
 }
 
 // Pure function: given a list of feed events, returns the ones that qualify as a fresh

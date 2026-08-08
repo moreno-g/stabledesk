@@ -114,16 +114,28 @@
     Only bot-to-bot movement is discarded.</p>
   </div>
   <div class="card">
-    <p style="margin-top:0"><strong>How flags are applied.</strong> Our retention window is a rolling ~7 days rather than a calendar
-    month, so the monthly thresholds are converted to a daily rate and multiplied by however many days of history we actually hold.
-    That window is floored at one full day, so a freshly-restarted indexer can't brand an ordinary address a bot off a handful of
-    transfers. The flag set is recomputed every minute, and the <a href="/">terminal</a> lists the currently flagged addresses —
-    the filter is auditable, not a black box.</p>
+    <p style="margin-top:0"><strong>How flags are applied.</strong> The monthly thresholds are converted to a daily rate, and each
+    address is measured against <em>its own</em> observation window: the first block we saw it in, to the last, converted to days at the
+    measured block time. So an address that moves $2M in a day is flagged and an address that moves the same $2M across a month is not,
+    which is what makes the rule a rate rather than a total. Each window is floored at one full day — an address first seen inside a
+    single block has a near-zero span, and without the floor any activity at all would be an infinite rate. The flag set is recomputed
+    every minute, and the <a href="/">terminal</a> lists the currently flagged addresses with the window and the two limits each one was
+    judged against, so the arithmetic can be redone rather than trusted.</p>
+    <p><strong>What this replaced, and why it mattered.</strong> Until August 2026 the limits were pro-rated to our <em>retention</em>
+    window instead — a rolling ~7 days — while the per-address totals they were compared against accumulate from the first time an
+    address is seen. Those are different spans, and the second one keeps growing. An address active for two months was measured over two
+    months and judged against seven days, so the same behaviour was flagged or not depending on how long this deployment had been
+    running, and adjusted volume drifted downwards over a deployment's lifetime with nothing on the page saying so. The rule described
+    here is now the rule the code applies; every flagged row carries the window it was actually measured over.</p>
+    <p style="margin-bottom:0"><strong>One transitional caveat.</strong> Addresses first seen before this change have no recorded start
+    block, so they fall back to the one-day floor — which <em>over</em>-flags them, and makes adjusted volume a lower bound rather than an
+    overstatement. It corrects itself as each address is seen again and its span starts accumulating, so the effect fades within about a
+    week of the change. A database that starts fresh is never affected.</p>
     <p>Flags are derived from the same history they filter, so on a <em>cold</em> start the initial backfill
     is indexed before any address has been flagged. Rather than ship a figure we know is wrong, the indexer re-reads that range once
     the first pass has revealed the high-frequency addresses and rewrites the adjusted numbers.</p>
-    <p style="margin-bottom:0"><strong>The flag set is capped at 5,000 addresses</strong>, ordered by volume, so a pathological
-    window cannot load an unbounded set into memory. This is a threshold like any other and it belongs here: when more than 5,000
+    <p style="margin-bottom:0"><strong>The flag set is capped at 20,000 addresses</strong>, ordered by volume, so a pathological
+    window cannot load an unbounded set into memory. This is a threshold like any other and it belongs here: when more than 20,000
     addresses meet the rate limits above, <em>which</em> addresses get flagged stops being decided by those limits and starts being
     decided by the cap and the ordering. Adjusted volume is then a <em>lower bound</em> on what the published rule would exclude —
     the lowest-volume qualifying addresses fall outside the set and their bot-to-bot transfers stay counted. Raw and real volume are
@@ -148,10 +160,9 @@
     you get if you scan the chain yourself, so our numbers stay reconcilable against yours. <code>organicNetIssuance24h</code> takes
     Gateway's net out. Where they diverge, the gap <em>is</em> the bridged liquidity. Gateway's share of real volume is published the
     same way, because a deposit into Gateway is a genuine transfer — it just isn't anyone paying anyone.</p>
-    <p style="margin-bottom:0"><strong>Where this applies.</strong> Arc testnet is a Gateway chain (domain 26) and is measured as
-    described. Arc mainnet is not on Circle's Gateway list yet; until it is, every bridge-adjusted figure is returned as
-    <code>null</code> rather than <code>0</code>. Nothing was measured, so nothing is claimed — a zero here would read as "we checked
-    and there was none".</p>
+    <p style="margin-bottom:0"><strong>Where this applies.</strong> {{GATEWAY_STATUS}} Where Gateway is not deployed, every
+    bridge-adjusted figure is returned as <code>null</code> rather than <code>0</code>: nothing was measured, so nothing is claimed — a zero
+    here would read as "we checked and there was none".</p>
   </div>
 
   <h2>Network fees &amp; economics</h2>
@@ -185,6 +196,11 @@
     address identical on every EVM chain), <code>team</code> (the operator confirmed it), or <code>observed</code> (we found and classified it
     ourselves — which is not a claim about who operates it). Only the first two are marked verified. Two entries may never claim the same
     contract, because that would double-count its balance.</p>
+    <p><strong>How many contracts are measured, and which.</strong> One pass reads <code>balanceOf</code> for every tracked asset against
+    every target, so the number of targets is capped — at <strong>600</strong> — to keep a pass inside the public RPC's rate limit. Targets
+    are ordered by the balance we last read, then by the volume they move: the contracts that decide the total are the ones measured first.
+    Whether the cap is binding is published on <code>/v1/tvl</code> as <code>coverage.atCap</code>, with the number of contracts known
+    against the number scanned, and the total carries an explicit warning while it is. Past the cap, chain TVL is a lower bound.</p>
     <p style="margin-bottom:0"><strong>Known limits.</strong> Value held in assets other than the indexed stablecoins is invisible to this
     method. A protocol's own accounting may therefore be higher than ours, and where we know that to be the case the entry says so. TVL
     history begins the day measurement began — nothing is back-filled or estimated. Registry submissions and corrections:
@@ -205,11 +221,11 @@
       <tr><td>Dominance</td><td>A token's supply ÷ total tracked stablecoin supply.</td></tr>
       <tr><td>Velocity</td><td>Real transfer volume per day ÷ supply — how often the supply turns over.</td></tr>
       <tr><td>Active addresses</td><td>Distinct addresses that sent or received in the trailing window (e.g. 1h).</td></tr>
-      <tr><td>Size distribution</td><td>Histogram of transfer amounts bucketed by magnitude, over recently indexed transfers.</td></tr>
+      <tr><td>Size distribution</td><td>Histogram of transfer amounts bucketed by magnitude, over the retained transfer window (published with the counts, since a row cap makes its span depend on throughput).</td></tr>
       <tr><td>Avg fee / tx</td><td>Total fees ÷ transaction count over sampled blocks, in USDC. Measured from receipts, not estimated from a gas assumption.</td></tr>
       <tr><td>Fees / day</td><td>Mean fee per sampled block × blocks per day — a run rate, not a cumulative total.</td></tr>
       <tr><td>Cost to move $1M</td><td>Total network fees ÷ real volume, scaled to $1M. What the network charges to move a million dollars.</td></tr>
-      <tr><td>Flagged address</td><td>An address exceeding 1,000 transfers or $10M volume per month, pro-rated to the retained window.</td></tr>
+      <tr><td>Flagged address</td><td>An address exceeding 1,000 transfers or $10M volume per month, as a rate over its own observed span (floored at one day).</td></tr>
       <tr><td>TVL</td><td>Sum of indexed stablecoin balances held by addresses with bytecode, read with <code>balanceOf</code>.</td></tr>
       <tr><td>Attributed TVL</td><td>The part of TVL held by contracts a registry entry claims. The remainder is reported as unattributed.</td></tr>
       <tr><td>Protocol "moved"</td><td>Transfer volume across a protocol's contracts over the retained window (~7 days) — not 24 hours.</td></tr>
@@ -219,11 +235,39 @@
 
   <h2>Timestamps &amp; freshness</h2>
   <div class="card">
-    <p style="margin:0">Because Arc blocks are ~0.5s and never reorg, a transfer's timestamp is derived from its block number against a
-    rolling <em>anchor</em> (a recent block → timestamp reference) rather than fetching every block header — this keeps the indexer light
-    on the rate-limited public RPC. Aggregates are stored per minute; the live snapshot refreshes every few seconds, and the header
-    shows a <span style="color:var(--good)">live</span> / <span style="color:var(--warn)">delayed</span> status. History is retained on a
-    rolling ~7-day window.</p>
+    <p style="margin-top:0">Arc never reorgs, so a transfer's timestamp is derived from its block number rather than by fetching a header
+    for every block — which on a rate-limited public RPC is not affordable. Each indexed range carries the <strong>real timestamps of its
+    own first and last block</strong>, read in the same request as the logs, and blocks in between are interpolated across them. Ranges are
+    500 blocks, so the error is bounded by however much the block time varies inside four minutes of chain.</p>
+    <p><strong>What this replaced.</strong> Timestamps used to be extrapolated from a single rolling anchor at the average block time —
+    and that average was initialised to an assumed 500&nbsp;ms and only measured once the first live poll ran, which happens
+    <em>after</em> the initial backfill. So a freshly-seeded history was timestamped at an assumption: on a chain running at 1s, the far
+    end of a 20,000-block backfill landed nearly three hours from where it happened. Per-minute aggregates are additive, so that is not a
+    figure that can be repaired later. The anchor still exists as a fallback for a range whose headers came back empty.</p>
+    <p style="margin-bottom:0"><strong>Which clock the windows use.</strong> Minute buckets are keyed by <em>chain</em> time. So every
+    rolling window — 24h volume, the fee window — ends at the newest minute actually measured, not at our wall clock, and never at a time
+    the data has not reached. On a healthy chain those are seconds apart. When they are not, <code>windowEnd</code> says which instant the
+    window ends at and <code>clockSkewSec</code> says how far that is from the wall clock. Anchoring to the wall clock instead would
+    publish "24h volume: 0" over a database holding days of transfers, which is the failure this makes visible rather than silent.</p>
+  </div>
+
+  <h2>How much history, and of what</h2>
+  <div class="card">
+    <p style="margin-top:0">Three retentions, because the tables answer different questions:</p>
+    <p><strong>Per-minute aggregates — rolling 7 days.</strong> A row per minute per token grows without bound, so it is a window.</p>
+    <p><strong>Per-day aggregates — kept indefinitely.</strong> Before they are pruned, minutes are rolled into their day in the same
+    transaction that deletes them, so every minute is counted exactly once and the two tables never overlap. A row per day per token is
+    about a kilobyte a year, so there is no reason to throw it away. Ranges past 7 days are answered from this rollup, and every series
+    response states which table answered (<code>source</code>) and how far back the record reaches (<code>recordBegan</code>) — a 90-day
+    range drawn from a rollup that started last week is a one-week series wearing a 90-day label unless it says so.</p>
+    <p><strong>Individual transfers — a 24-hour window, bounded by row count.</strong> This is what the size distribution, the per-token
+    recent lists and an address's recent activity are read from, and the row cap means the span it covers is a function of how busy the
+    chain is. So the span is measured and published rather than assumed. It was previously capped at 1,200 rows, which at the ~954k
+    transfers a day the testnet actually does is <strong>114 seconds</strong> — every one of those surfaces was describing the last two
+    minutes while being labelled as something broader.</p>
+    <p style="margin-bottom:0"><strong>Largest transfers — top 100 per day per token, kept 180 days.</strong> Recorded separately for the
+    same reason: "the largest transfer" read out of a row-capped table only ever means "the largest of the last few minutes".
+    <code>/v1/transfers/largest</code> takes an explicit <code>days</code> and states the window it answered over.</p>
   </div>
 
   <h2>Caveats</h2>

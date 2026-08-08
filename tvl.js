@@ -88,10 +88,12 @@ export async function refresh() {
     // Registry addresses are always scanned, even with no recorded activity: a protocol that has
     // just deployed holds a balance before it shows up in any transfer ranking.
     const registry = PROTOCOLS.flatMap((p) => p.contracts);
+    const known = db.knownContractCount();
     const targets = [...new Set([...registry, ...db.knownContracts(TVL_MAX_TARGETS)])].slice(0, TVL_MAX_TARGETS);
 
     const rows = await scanBalances(targets);
     db.upsertBalances(rows);
+    invalidateAggregate();
 
     // Persist today's level so tomorrow has something to diff against.
     const agg = aggregate();
@@ -100,16 +102,39 @@ export async function refresh() {
       ...agg.protocols.filter((p) => p.tvl > 0).map((p) => ({ protocol: p.id, tvl: p.tvl })),
     ]);
 
-    lastRun = { at: Date.now(), scanned: targets.length, contractsFound, error: null };
+    lastRun = {
+      at: Date.now(), scanned: targets.length, contractsFound, error: null,
+      // How many contracts there are to scan against how many the ceiling allows. Past the ceiling,
+      // chain TVL is the TVL of the contracts that fit — so which ones fit is a published fact, not
+      // an implementation detail. They are now ordered by balance and then volume; they used to be
+      // ordered by the hexadecimal value of their address, which decided coverage by accident.
+      knownContracts: known, cap: TVL_MAX_TARGETS, atCap: known > TVL_MAX_TARGETS,
+    };
   } catch (e) {
     lastRun = { ...lastRun, at: Date.now(), error: String(e.message || e) };
     console.error('[tvl]', e.message || e);
   }
 }
 
+// Memoised aggregate. The underlying balances only change when refresh() runs, which is every five
+// minutes — but aggregate() was called on every /api/ecosystem and /api/protocol request, and it reads
+// the whole balance table plus one volume query per registered protocol. detail() called it, and
+// addressDetail() called it twice. A short TTL, invalidated on write, makes a burst of requests cost
+// one pass instead of one pass each.
+let aggCache = { at: 0, value: null };
+const AGG_TTL_MS = 15000;
+const invalidateAggregate = () => { aggCache = { at: 0, value: null }; };
+
+export function aggregate() {
+  if (aggCache.value && Date.now() - aggCache.at < AGG_TTL_MS) return aggCache.value;
+  const value = computeAggregate();
+  aggCache = { at: Date.now(), value };
+  return value;
+}
+
 // Pure aggregation over whatever is stored — no network. Exported so tests can drive it and so the
 // API can serve a snapshot without waiting on a scan.
-export function aggregate() {
+export function computeAggregate() {
   const rows = db.balanceRows();
 
   const byAddress = new Map();      // address -> { total, byToken }
@@ -184,12 +209,9 @@ export function aggregate() {
 }
 
 // Chain-wide total only. The dashboard polls every few seconds and needs one number, so this skips
-// the per-protocol attribution and flow lookups that aggregate() does.
-export function total() {
-  let t = 0;
-  for (const r of db.balanceRows()) t += r.balance;
-  return t;
-}
+// the per-protocol attribution and flow lookups that aggregate() does — and now asks SQLite for the
+// sum rather than reading every row, sorted by balance, in order to add them up in JS.
+export const total = () => db.totalBalance();
 
 // TVL movers — today's level against `daysBack` ago, per protocol. Drives the daily rankings.
 export function movers(daysBack = 1) {
@@ -255,6 +277,7 @@ export function addressDetail(address) {
   const stats = db.addressStats(a);
   const meta = db.addressMeta(a);
   if (!balances.length && !stats && !meta) return null;
+  const agg = aggregate();
   return {
     unnamed: true,
     address: a,
@@ -268,7 +291,8 @@ export function addressDetail(address) {
     windowTransfers: stats?.transfers || 0,
     lastBlock: stats?.last_block || null,
     recent: db.addressRecent(a, 12),
-    chainTvl: aggregate().totals.tvl,
+    largest: db.addressLargest(a, 8),
+    chainTvl: agg.totals.tvl,
     lastRun,
   };
 }
@@ -281,6 +305,16 @@ export function snapshot() {
     registry: registryStats(),
     series: history('*', 30),
     lastRun,
+    // Coverage, next to the total it constrains. Same reasoning as the noise-set cap: when there are
+    // more contracts than the ceiling, the total is the total of the ones that fit, and a reader who
+    // is not told cannot audit it.
+    coverage: {
+      scanned: lastRun.scanned || 0,
+      knownContracts: lastRun.knownContracts ?? null,
+      cap: TVL_MAX_TARGETS,
+      atCap: !!lastRun.atCap,
+      order: 'balance, then window volume',
+    },
     method: 'Stablecoin balances held by addresses with bytecode, read with balanceOf. See /methodology.',
   };
 }

@@ -41,7 +41,16 @@ test('ADDR_RE matches lowercase 40-hex only', () => {
 test('config surface is sane', () => {
   assert.deepEqual([...TOKEN_SYMBOLS].sort(), ['EURC', 'USDC', 'USYC']);
   assert.ok(TIERS.free.rpm < TIERS.pro.rpm);
-  for (const r of Object.values(RANGES)) { assert.ok(r.span > 0 && r.group > 0); }
+  for (const [name, r] of Object.entries(RANGES)) {
+    assert.ok(r.group > 0, `${name} groups into buckets`);
+    // `all` is deliberately open-ended (span null → from the start of the record); every other
+    // range is a finite trailing window.
+    if (name === 'all') assert.equal(r.span, null);
+    else assert.ok(r.span > 0, `${name} has a span`);
+    // Anything past the minute table's 7-day retention has to be answered from the daily rollup,
+    // or the range would silently return a truncated series.
+    if (r.span != null && r.span > 7 * 86400) assert.ok(r.daily, `${name} must read the daily rollup`);
+  }
 });
 
 // ---- DB round-trip (isolated temp database) ----
@@ -138,15 +147,18 @@ test('crypto billing: order matching, idempotency, renewal, expiry', async () =>
 // ---- network fee economics + address-level noise filter ----
 test('fee sampling and the address noise filter', async () => {
   const db = await import('../db.js');
-  const { noiseLimits, feeMetrics, isNoiseTransfer } = await import('../indexer.js');
+  const { noiseLimitsFor, noiseWindowDays, feeMetrics, isNoiseTransfer } = await import('../indexer.js');
   const { NOISE_FILTER } = await import('../constants.js');
 
-  // Thresholds scale with retained history, but never drop below a full day — otherwise a
-  // freshly-booted indexer holding 25 minutes of backfill would flag ordinary addresses.
-  assert.equal(noiseLimits(0).days, 1, 'window is floored at one day');
-  assert.equal(noiseLimits(3600).days, 1, 'an hour of history still uses the one-day floor');
-  assert.equal(noiseLimits(7 * 86400).days, 7);
-  assert.equal(noiseLimits(7 * 86400).maxTransfers, NOISE_FILTER.txPerDay * 7);
+  // Thresholds are rates applied to an address's own observation window, and that window never
+  // drops below a full day — otherwise an address first seen inside a single block has a near-zero
+  // span, any activity at all is an infinite rate, and every new address is a bot.
+  assert.equal(noiseWindowDays(900, 900, 500), 1, 'a single-block span uses the one-day floor');
+  assert.equal(noiseWindowDays(null, 900, 500), 1, 'an unknown first block uses the floor too');
+  assert.equal(noiseWindowDays(0, 172800, 500), 1, '172,800 blocks at 500ms is exactly one day');
+  assert.equal(noiseWindowDays(0, 7 * 172800, 500), 7);
+  assert.equal(noiseLimitsFor(7).maxTransfers, NOISE_FILTER.txPerDay * 7);
+  assert.equal(noiseLimitsFor(0).days, 1, 'the limit builder floors the window as well');
 
   // Fee metrics are exact per sampled block and extrapolated to the window; the sample size
   // rides along so a derived rate can't be mistaken for a measured total.
@@ -166,9 +178,8 @@ test('fee sampling and the address noise filter', async () => {
   // figure was governed by the cap rather than by the documented rate limits, with nothing on the
   // page or in the API saying so. Both counts are now reported so the difference is visible.
   assert.ok(db.NOISE_SET_MAX > 0, 'the cap is a named, exported number rather than a literal in a query');
-  const capLim = noiseLimits(7 * 86400);
-  const capped = db.noisyAddresses(capLim.maxTransfers, capLim.maxVolume);
-  const qualifying = db.noisyAddressCount(capLim.maxTransfers, capLim.maxVolume);
+  const capped = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, 500);
+  const qualifying = db.noisyAddressCount(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, 500);
   assert.ok(capped.length <= db.NOISE_SET_MAX, 'the flag set never exceeds the cap');
   assert.ok(qualifying >= capped.length, 'the uncapped count is never smaller than the capped set');
   // Below the cap the two must agree exactly, or `atCap` would fire on a healthy chain and cry
@@ -195,11 +206,10 @@ test('fee sampling and the address noise filter', async () => {
   // A busy address trips the filter; a quiet one does not.
   const bot = '0x' + 'b'.repeat(40), human = '0x' + 'c'.repeat(40);
   db.applyBatch(new Map(), new Map([
-    [bot, { transfers: 5000, volume: 10, lastBlock: 900 }],      // flagged on frequency alone
-    [human, { transfers: 3, volume: 10, lastBlock: 900 }],
+    [bot, { transfers: 5000, volume: 10, lastBlock: 900, firstBlock: 900 }],  // flagged on frequency alone
+    [human, { transfers: 3, volume: 10, lastBlock: 900, firstBlock: 900 }],
   ]), []);
-  const lim = noiseLimits(86400);
-  const flagged = db.noisyAddresses(lim.maxTransfers, lim.maxVolume).map((r) => r.address);
+  const flagged = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, 500).map((r) => r.address);
   assert.ok(flagged.includes(bot), 'high-frequency address is flagged');
   assert.ok(!flagged.includes(human), 'a low-activity address is left alone');
 
@@ -819,6 +829,289 @@ test('the OpenAPI spec describes every route the API actually serves', async () 
   assert.deepEqual(tokenEnum, tokens, 'the token enum must come from the active network profile');
   assert.match(llmsTxt(), new RegExp(tokens.join(', ')), 'llms.txt states the tracked assets');
   assert.match(llmsTxt(), /openapi\.json/, 'llms.txt points an agent at the spec');
+});
+
+// ---- a transfer's timestamp comes from measured headers, not from an assumed block time ----
+test('a range is timestamped between its own two block headers', async () => {
+  const { chunkClock } = await import('../indexer.js');
+
+  // 500 blocks spanning 250 seconds is half a second a block. Any block in between is placed by
+  // interpolating the two *measured* endpoints.
+  const clock = chunkClock(100, 600, 1000, 1250);
+  assert.equal(clock(100), 1000, 'the first block sits on its own header');
+  assert.equal(clock(600), 1250, 'and so does the last');
+  assert.equal(clock(300), 1100, 'the middle is interpolated, not extrapolated');
+
+  // The bug this replaces: `avgBlockMs` is initialised to 500 and was only measured by the first
+  // live tick, which runs *after* the cold backfill — so a whole seeded history was timestamped at
+  // an assumed half-second block time. On a chain that actually runs at 1s, the far end of a
+  // 20,000-block backfill lands 10,000 seconds from where it happened, and buckets are additive and
+  // keyed by minute, so it cannot be corrected afterwards.
+  const real = chunkClock(0, 20000, 0, 20000); // 1s blocks, measured
+  const assumed = (block) => block * 0.5;      // what the old default would have said
+  assert.equal(real(20000) - assumed(20000), 10000, 'the error the measured clock removes');
+
+  // Degenerate inputs return null so the caller can fall back to the anchor rather than divide by
+  // zero and write NaN minutes into every bucket in the range.
+  assert.equal(chunkClock(100, 100, 1000, 1000), null, 'a single-block range has no slope');
+  assert.equal(chunkClock(100, 600, NaN, 1250), null, 'a missing header is not a timestamp');
+  assert.equal(chunkClock(600, 100, 1000, 1250), null, 'a reversed range is refused');
+});
+
+// ---- the noise filter measures a rate, over the window it says it measures ----
+test('an address is judged over its own observed span, not over the retained window', async () => {
+  const db = await import('../db.js');
+  const { NOISE_FILTER } = await import('../constants.js');
+
+  // Two addresses with *identical* totals, seen over different spans. At 500ms blocks, 172,800
+  // blocks is one day.
+  const day = 172800;
+  const brief = '0x' + 'd'.repeat(40);   // 200 transfers inside one day  → 200/day
+  const patient = '0x' + 'e'.repeat(40); // 200 transfers across 30 days  → ~7/day
+  db.applyBatch(new Map(), new Map([
+    [brief, { transfers: 200, volume: 1000, lastBlock: 1_000_000 + day, firstBlock: 1_000_000 }],
+    [patient, { transfers: 200, volume: 1000, lastBlock: 2_000_000 + 30 * day, firstBlock: 2_000_000 }],
+  ]), []);
+
+  const flagged = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, 500);
+  const byAddr = new Map(flagged.map((r) => [r.address, r]));
+  assert.ok(byAddr.has(brief), '200 transfers in a day is ~6x the rate limit');
+  assert.ok(!byAddr.has(patient), 'the same 200 transfers spread over a month is an ordinary address');
+
+  // This is the regression that matters. Before, both totals were compared against a limit
+  // pro-rated to the *bucket* coverage — which prune() caps at seven days — so the denominator was
+  // the same for both and the patient address was flagged too. Worse, the denominator stopped
+  // growing at seven days while the numerators kept accumulating, so an ordinary address became a
+  // bot purely by the deployment staying up, and adjusted volume drifted downwards with nothing
+  // saying so. /methodology claimed the rate was measured over the window we hold; now it is.
+  const row = byAddr.get(brief);
+  assert.equal(row.windowDays, 1, 'the flagged address carries the window it was judged over');
+  assert.equal(row.maxTransfers, NOISE_FILTER.txPerDay * 1, 'and the limit derived from it');
+  assert.ok(row.transfers > row.maxTransfers, 'which is the comparison that flagged it');
+
+  // The published rule is auditable per address: every flagged row states its own limits, so a
+  // reader can redo the arithmetic without knowing anything about our retention.
+  for (const r of flagged) {
+    assert.ok(r.windowDays >= 1, 'no window is ever below the one-day floor');
+    assert.ok(r.transfers > r.maxTransfers || r.volume > r.maxVolume, `${r.address} breaches a stated limit`);
+  }
+});
+
+// ---- history outlives the minute table ----
+test('minutes roll up into days before they are pruned, and long ranges read the rollup', async () => {
+  const db = await import('../db.js');
+  const T = 'ROLL';                                  // its own token, so other tests' rows can't blur this
+  const day = Math.floor(Date.now() / 1000 / 86400) * 86400 - 40 * 86400;  // 40 days ago
+  const bk = (minute, volume, cnt) => new Map([[`${minute}|${T}`,
+    { minute, token: T, volume, cnt, mint: 0, burn: 0, rvolume: volume, rcnt: cnt }]]);
+
+  db.applyBatch(bk(day + 600, 100, 1), new Map(), []);       // early in the day
+  db.applyBatch(bk(day + 80000, 250, 3), new Map(), []);     // late in the same day
+
+  // Prune with a cutoff *inside* that day: only the first half is old enough to roll up.
+  db.prune(day + 40000 + 7 * 86400, 10_000_000, 500);
+  let series = db.getDailyHistory(T, day - 86400);
+  assert.equal(series.length, 1, 'one day, whichever table the halves are sitting in');
+  assert.equal(series[0].volume, 350, 'the rolled-up half and the live half sum to the whole day');
+
+  // Prune again, past the whole day. The second half now rolls into the same daily row, which is
+  // why the rollup is additive: a day straddling the cutoff is written across two prunes, and a
+  // replace-on-conflict would have thrown the first half away.
+  db.prune(day + 86400 + 7 * 86400, 10_000_000, 500);
+  assert.equal(db.getHistory(T, day - 86400, 60).length, 0, 'the minute rows are gone');
+  series = db.getDailyHistory(T, day - 86400);
+  assert.equal(series.length, 1);
+  assert.equal(series[0].volume, 350, 'and the day survives them in full');
+  assert.equal(series[0].cnt, 4);
+
+  // Idempotence is what stops volume from inflating: prune runs every couple of hundred ticks
+  // forever, and aggregates are additive, so a re-run must be a no-op once the minutes are gone.
+  db.prune(day + 86400 + 7 * 86400, 10_000_000, 500);
+  assert.equal(db.getDailyHistory(T, day - 86400)[0].volume, 350, 'pruning twice does not double-count');
+
+  // The dispatcher both /history endpoints go through: past 7 days it must reach the rollup, or a
+  // 30-day chart would end where the minute table does and look like an outage.
+  const { RANGES: R } = await import('../constants.js');
+  assert.ok(db.getSeries(T, day - 86400, R['30d'].group, R['30d'].daily).length === 1);
+  assert.equal(db.getSeries(T, day - 86400, R['7d'].group, R['7d'].daily).length, 0, '7d reads minutes, which are pruned');
+  assert.ok(db.dailyCoverage().a <= day, 'the rollup states how far back it reaches');
+});
+
+// ---- "largest transfer" means over a stated window, not over the last two minutes ----
+test('the largest transfers are retained per day, and the raw window publishes its span', async () => {
+  const db = await import('../db.js');
+  const A = '0x' + '7'.repeat(40), B = '0x' + '8'.repeat(40);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const oldTs = nowSec - 3 * 86400;   // older than the raw transfer window, inside the per-day set
+
+  db.applyBatch(new Map(), new Map(), [
+    { block: 900_001, ts: oldTs, token: 'USDC', frm: A, too: B, amount: 9_000_000 },
+    { block: 900_002, ts: nowSec, token: 'USDC', frm: A, too: B, amount: 7 },
+  ]);
+
+  // Replaying a range must not list one transfer twice — indexRange retries, and adjustBackfill
+  // deliberately re-reads the cold-start range. The natural key is what makes that safe.
+  db.applyBatch(new Map(), new Map(), [
+    { block: 900_001, ts: oldTs, token: 'USDC', frm: A, too: B, amount: 9_000_000 },
+  ]);
+  const nineMil = db.getLargest(50, 0).filter((r) => r.amount === 9_000_000);
+  assert.equal(nineMil.length, 1, 'a re-indexed transfer appears once');
+
+  // The window is an argument, so the claim is explicit. A 1-day window must not contain a
+  // transfer from three days ago.
+  assert.ok(db.getLargest(10, nowSec - 86400).every((r) => r.amount !== 9_000_000), 'outside a 1-day window');
+  assert.ok(db.getLargest(10, nowSec - 7 * 86400).some((r) => r.amount === 9_000_000), 'inside a 7-day one');
+
+  // Prune the raw transfer table down to its 24h window. The old row leaves `recent`; it stays in
+  // the per-day set — which is the whole point, because at real throughput (~954k transfers/day on
+  // the testnet) a 1,200-row table held 114 seconds, and "the largest transfer" read from it meant
+  // "the largest of the last two minutes" on the terminal, in /v1/transfers/largest, and on every
+  // token page.
+  db.prune(nowSec, 10_000_000, 500);
+  assert.ok(db.addressRecent(A, 25).every((r) => r.ts >= nowSec - 24 * 3600), 'recent is a 24h window');
+  assert.ok(db.addressLargest(A, 10).some((r) => r.amount === 9_000_000), 'the biggest thing it did is kept');
+
+  // The size distribution describes that same raw window, so it reports it: a histogram over two
+  // minutes and one over a day are different claims and the shape alone does not say which.
+  const dist = db.sizeDistribution('USDC');
+  assert.ok(dist.window, 'the distribution states the window it covers');
+  assert.equal(dist.window.cap, db.RECENT_MAX);
+  assert.equal(dist.window.atCap, false, 'and whether the row cap, not the clock, is the binding limit');
+  assert.equal(dist.total, dist.brackets.reduce((a, b) => a + b.count, 0), 'brackets account for every row');
+});
+
+// ---- rolling windows are anchored to the clock the data is keyed by ----
+test('window end follows chain time, never a wall clock the data has not reached', async () => {
+  const { windowEndSec } = await import('../indexer.js');
+  const now = 1_800_000_000;
+
+  // Healthy chain: the newest measured minute is seconds behind now, and that is what the window
+  // ends at. Unchanged behaviour, arrived at honestly.
+  assert.equal(windowEndSec(now, now - 30), now - 30);
+
+  // Diverged clocks. Bucket minutes are keyed by *block* timestamps; the window used to end at
+  // Date.now(), so `minute >= now - 86400` selected nothing and the terminal published "24h volume:
+  // 0" over a database holding days of transfers. The local testnet database is exactly this shape —
+  // buckets ending six days behind its own event log.
+  const sixDays = now - 6 * 86400;
+  assert.equal(windowEndSec(now, sixDays), sixDays, 'the window ends at the last measured minute');
+
+  // Frozen chain: same anchor, which is why the two paths can no longer disagree.
+  assert.equal(windowEndSec(now, sixDays, true), sixDays);
+  // Chain timestamps ahead of the wall clock: do not report a window ending in the future.
+  assert.equal(windowEndSec(now, now + 500), now, 'never past now while live');
+  // Nothing indexed at all: there is no measured minute to anchor to.
+  assert.equal(windowEndSec(now, null), now);
+});
+
+// ---- per-IP limits cannot be lifted with a header ----
+test('the client address is read from the trusted end of the forwarding chain', async () => {
+  const { clientIp, TRUSTED_PROXY_HOPS } = await import('../api.js');
+  const req = (fwd, socket = '10.0.0.1') => ({ headers: fwd == null ? {} : { 'x-forwarded-for': fwd }, socket: { remoteAddress: socket } });
+
+  assert.equal(TRUSTED_PROXY_HOPS, 1, 'Railway and the Caddy setup in deploy/ each add exactly one hop');
+
+  // A proxy appends the address it saw, so XFF reads `<claimed>, <observed>`. Reading the leftmost
+  // entry meant a client could mint unlimited free API keys — rateLimitKeys allows 5/hour per IP, and
+  // a fresh forged prefix per request makes that no limit at all.
+  assert.equal(clientIp(req('9.9.9.9, 203.0.113.7')), '203.0.113.7', 'the observed address, not the claimed one');
+  assert.equal(clientIp(req('203.0.113.7')), '203.0.113.7', 'no client header: the single entry is ours');
+  assert.equal(clientIp(req(null)), '10.0.0.1', 'no header at all falls back to the socket');
+  assert.equal(clientIp(req('')), '10.0.0.1');
+
+  // The spoofing case, stated directly: two different forged prefixes behind the same real client
+  // must resolve to the same identity, or the limiter counts them separately and bounds nothing.
+  assert.equal(clientIp(req('1.1.1.1, 198.51.100.5')), clientIp(req('2.2.2.2, 198.51.100.5')));
+  assert.equal(clientIp(req('1.1.1.1, 2.2.2.2, 198.51.100.5')), '198.51.100.5', 'a longer forged prefix changes nothing');
+});
+
+// ---- webhook targets are checked against what they resolve to ----
+test('a webhook hostname that resolves privately is refused', async () => {
+  const { validateWebhookHost } = await import('../validate.js');
+  const resolver = (host) => {
+    const table = {
+      'evil.example.com': [{ address: '169.254.169.254', family: 4 }],
+      'split.example.com': [{ address: '93.184.216.34', family: 4 }, { address: '127.0.0.1', family: 4 }],
+      'ok.example.com': [{ address: '93.184.216.34', family: 4 }],
+      'v6.example.com': [{ address: 'fd00::1', family: 6 }],
+    };
+    return table[host] ? Promise.resolve(table[host]) : Promise.reject(new Error('ENOTFOUND'));
+  };
+
+  // The hole this closes: every syntactic check passes, and the fetch still lands on the cloud
+  // metadata endpoint from inside the deployment, with the response discarded. Refusing redirects
+  // never helped, because no redirect was needed.
+  assert.equal(await validateWebhookHost('https://evil.example.com/hook', resolver), 'blocked_host');
+  assert.equal(await validateWebhookHost('https://v6.example.com/hook', resolver), 'blocked_host', 'IPv6 unique-local too');
+  // One public and one private answer is refused outright rather than raced against whichever
+  // address fetch happens to pick.
+  assert.equal(await validateWebhookHost('https://split.example.com/hook', resolver), 'blocked_host');
+  assert.equal(await validateWebhookHost('https://ok.example.com/hook', resolver), null);
+  // A name that does not resolve would store a rule that can never fire.
+  assert.equal(await validateWebhookHost('https://nope.example.com/hook', resolver), 'unresolvable_host');
+  // The synchronous checks still run first, and a literal IP needs no resolution.
+  assert.equal(await validateWebhookHost('http://ok.example.com/x', resolver), 'https_required');
+  assert.equal(await validateWebhookHost('https://127.0.0.1/x', resolver), 'blocked_host');
+});
+
+// ---- an oversize body gets an answer ----
+test('an oversize request body is refused instead of hanging the request', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { readBody, BODY_MAX } = await import('../api.js');
+
+  // req.destroy() guarantees 'end' will never fire, so the old version's promise never settled: the
+  // handler never returned and the request hung with no response until something else timed out.
+  const big = new EventEmitter();
+  big.pause = () => {};
+  const pending = readBody(big);
+  big.emit('data', 'x'.repeat(BODY_MAX + 1));
+  assert.deepEqual(await pending, { __tooLarge: true }, 'settles, with a marker the caller turns into a 413');
+
+  const ok = new EventEmitter();
+  ok.pause = () => {};
+  const parsed = readBody(ok);
+  ok.emit('data', '{"webhook":"https://example.com/x"}');
+  ok.emit('end');
+  assert.equal((await parsed).webhook, 'https://example.com/x');
+
+  // A client that disconnects mid-body is a terminal state too, not a promise nobody resolves.
+  const gone = new EventEmitter();
+  gone.pause = () => {};
+  const aborted = readBody(gone);
+  gone.emit('aborted');
+  assert.deepEqual(await aborted, {});
+
+  const bad = new EventEmitter();
+  bad.pause = () => {};
+  const junk = readBody(bad);
+  bad.emit('data', 'not json');
+  bad.emit('end');
+  assert.deepEqual(await junk, {}, 'unparseable JSON is an empty body, not a crash');
+});
+
+// ---- TVL coverage is decided by relevance, and says when it is truncated ----
+test('the balance scanner picks its targets by value and publishes the ceiling', async () => {
+  const db = await import('../db.js');
+  const rich = '0x' + 'a1'.repeat(20), busy = '0x' + 'a2'.repeat(20), idle = '0x' + 'a3'.repeat(20);
+
+  for (const a of [rich, busy, idle]) db.markContract(a, true, 100);
+  db.upsertBalances([{ address: rich, token: 'USDC', balance: 5_000_000 }]);
+  db.applyBatch(new Map(), new Map([[busy, { transfers: 10, volume: 900_000, lastBlock: 950, firstBlock: 900 }]]), []);
+
+  const order = db.knownContracts(50);
+  assert.ok(order.indexOf(rich) < order.indexOf(busy), 'the biggest balance is scanned first');
+  assert.ok(order.indexOf(busy) < order.indexOf(idle), 'then the biggest flow');
+
+  // Before, this was `ORDER BY address` — so past the 600-target ceiling, which contracts counted
+  // towards chain TVL was decided by how their addresses happened to sort in hex. That is the same
+  // silent truncation the noise-set cap is published to avoid, and it now reports the same way.
+  assert.ok(db.knownContractCount() >= 3, 'how many there are to scan is a measured number');
+  assert.equal(db.knownContracts(2).length, 2, 'and the ceiling is respected');
+
+  // The sum the dashboard polls comes from SQLite rather than from reading and sorting every row.
+  // Asserted against the rows themselves rather than a literal: earlier tests share this database.
+  assert.equal(db.totalBalance(), db.balanceRows().reduce((a, r) => a + r.balance, 0));
+  assert.ok(db.totalBalance() >= 5_000_000);
 });
 
 // ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----

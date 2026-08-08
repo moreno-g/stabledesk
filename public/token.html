@@ -155,7 +155,7 @@
 
     <div class="card">
       <h2>Transfer-size distribution</h2>
-      <p class="cap">How transfer amounts break down, over recently indexed transfers.</p>
+      <p class="cap">How transfer amounts break down, over the retained transfer window — its actual span is stated below the chart.</p>
       <div id="dist"><div class="chart-empty" style="position:static;height:80px">collecting…</div></div>
       <div class="disttot" id="distTot"></div>
     </div>
@@ -164,7 +164,7 @@
   <div class="grid">
     <div class="card">
       <h2>Largest transfers</h2>
-      <p class="cap">Biggest recent <span id="lt1">—</span> transfers indexed.</p>
+      <p class="cap">Biggest <span id="lt1">—</span> transfers of the last <span id="ltWin">7</span> days.</p>
       <table><thead><tr><th>From</th><th>To</th><th class="r">Amount</th></tr></thead>
         <tbody id="largest"></tbody></table>
     </div>
@@ -264,7 +264,15 @@ function renderDist(dist){
       <div class="distbar"><span style="width:${(b.count/max*100).toFixed(1)}%"></span></div>
       <span class="dc"><b>${nf.format(b.count)}</b> · ${pct.toFixed(0)}%</span></div>`;
   }).join('');
-  $('#distTot').textContent=`${nf.format(total)} transfers in window`;
+  // The window is measured, not assumed: the transfer table is bounded by a row cap as well as by a
+  // clock, so how far back it reaches depends on how busy the chain is. Stating the count without the
+  // span is how a histogram over two minutes ends up read as a histogram over a day.
+  const w=dist&&dist.window;
+  const span=w&&w.spanSec ? (w.spanSec>=86400 ? `${(w.spanSec/86400).toFixed(1)}d`
+    : w.spanSec>=3600 ? `${(w.spanSec/3600).toFixed(1)}h` : `${Math.round(w.spanSec/60)}min`) : null;
+  $('#distTot').textContent=`${nf.format(total)} transfers`
+    + (span?` over the last ${span}`:' in window')
+    + (w&&w.atCap?' (window limited by row cap, not by time)':'');
 }
 function txRows(list){
   return (list&&list.length)? list.map(x=>`<tr>
@@ -280,6 +288,7 @@ async function loadToken(){
     if(d.ok){ dot.className='dot'; txt.textContent='live'; } else { dot.className='dot down'; txt.textContent='indexing…'; }
     $('#metaLine').textContent=d.updatedAt?('upd. '+Math.max(0,Math.round((Date.now()-d.updatedAt)/1000))+'s ago'):'';
     renderKpis(d); renderDist(d.distribution);
+    if(d.largestWindowDays) $('#ltWin').textContent=d.largestWindowDays;
     $('#largest').innerHTML=txRows(d.largest); $('#recent').innerHTML=txRows(d.recent);
   }catch(e){ $('#statusDot').className='dot down'; $('#statusText').textContent='network error'; }
 }

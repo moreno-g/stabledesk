@@ -40,6 +40,31 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_buckets_minute ON buckets(minute);
 
+  -- Per-day rollup of the table above, kept indefinitely. "buckets" is a rolling 7-day window
+  -- because a row per minute per token grows without bound; a row per *day* per token does not
+  -- (three tokens ≈ 1 KB/year), so there is no reason to throw the history away. Written by
+  -- prune() out of the minutes it is about to delete, in the same transaction, so every minute is
+  -- rolled up exactly once and the two tables never double-count. Launch day is the one day
+  -- nobody can re-index later: at 7-day retention it would have been unreadable a week after it
+  -- happened.
+  CREATE TABLE IF NOT EXISTS buckets_daily (
+    day    INTEGER NOT NULL,           -- unix seconds floored to the day (UTC)
+    token  TEXT    NOT NULL,
+    volume REAL    NOT NULL DEFAULT 0,
+    cnt    INTEGER NOT NULL DEFAULT 0,
+    mint   REAL    NOT NULL DEFAULT 0,
+    burn   REAL    NOT NULL DEFAULT 0,
+    rvolume REAL   NOT NULL DEFAULT 0,
+    rcnt   INTEGER NOT NULL DEFAULT 0,
+    avolume REAL   NOT NULL DEFAULT 0,
+    acnt   INTEGER NOT NULL DEFAULT 0,
+    bmint  REAL    NOT NULL DEFAULT 0,
+    bburn  REAL    NOT NULL DEFAULT 0,
+    bvolume REAL   NOT NULL DEFAULT 0,
+    bcnt   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, token)
+  );
+
   CREATE TABLE IF NOT EXISTS addr_stats (
     address    TEXT    PRIMARY KEY,
     transfers  INTEGER NOT NULL DEFAULT 0,
@@ -54,6 +79,28 @@ db.exec(`
     block  INTEGER, ts INTEGER, token TEXT, frm TEXT, too TEXT, amount REAL
   );
   CREATE INDEX IF NOT EXISTS idx_recent_amount ON recent(amount DESC);
+  -- An address lookup used to scan this table end to end ("WHERE frm = ? OR too = ?"), which was
+  -- free while it held ~1,200 rows and would not be at the retention below. Two indexes plus a
+  -- UNION, because the OR could never use either one.
+  CREATE INDEX IF NOT EXISTS idx_recent_frm ON recent(frm);
+  CREATE INDEX IF NOT EXISTS idx_recent_too ON recent(too);
+  CREATE INDEX IF NOT EXISTS idx_recent_ts ON recent(ts);
+  CREATE INDEX IF NOT EXISTS idx_recent_token ON recent(token, amount DESC);
+
+  -- The largest transfers per day and token, kept long after "recent" has rolled past them.
+  -- "Largest transfer" read out of a rolling row-capped table is only ever the largest of the last
+  -- few minutes, which is not the claim the terminal and /v1/transfers/largest make. The natural
+  -- key dedupes a re-indexed range: replaying a block range must not list one transfer twice.
+  CREATE TABLE IF NOT EXISTS top_transfers (
+    day    INTEGER NOT NULL,
+    token  TEXT    NOT NULL,
+    amount REAL    NOT NULL,
+    frm    TEXT, too TEXT, block INTEGER, ts INTEGER,
+    PRIMARY KEY (day, token, block, frm, too, amount)
+  );
+  CREATE INDEX IF NOT EXISTS idx_top_amount ON top_transfers(amount DESC);
+  CREATE INDEX IF NOT EXISTS idx_top_token ON top_transfers(token, amount DESC);
+  CREATE INDEX IF NOT EXISTS idx_top_ts ON top_transfers(ts);
 
   -- Exact per-block fee accounting, from transaction receipts. Receipts are far too
   -- many to fetch for every block on a rate-limited public RPC, so the indexer samples
@@ -179,16 +226,53 @@ try { db.exec('ALTER TABLE api_keys ADD COLUMN expires_at INTEGER'); } catch { /
 // graph, and the one heuristic that reliably ties an operational wallet back to its treasury.
 // Captured at index time (free) rather than reconstructed later (a full-history log scan).
 try { db.exec('ALTER TABLE addr_stats ADD COLUMN first_from TEXT'); } catch { /* already present */ }
+// Migration: the first block this address was seen in. Without it, `transfers` and `volume` are
+// totals over an unknown span, and the noise filter was comparing them against a limit pro-rated
+// to the *bucket* window — which prune() caps at 7 days. An address active for two months was
+// therefore measured over two months and judged against seven days, so the same behaviour got
+// flagged or not depending on how long this process had been running.
+//
+// NULL on rows written before this migration, and those fall back to the one-day floor — which
+// *over*-flags them, since a long-lived address then looks like a one-day address with a long-lived
+// address's totals. That direction is deliberate: it makes adjusted volume a lower bound rather than
+// an overstatement, which is the same choice the flag-set cap makes. It also self-corrects, because
+// the next transfer touching such an address records a first_block and the span grows from there —
+// so an existing deployment understates adjusted volume for about a week after this lands, and a
+// fresh database (mainnet) is never affected. Stated on /methodology rather than left to be noticed.
+try { db.exec('ALTER TABLE addr_stats ADD COLUMN first_block INTEGER'); } catch { /* already present */ }
 
-const RECENT_KEEP = 1200;
+// How much of the raw transfer stream is retained. This was 1,200 rows, which sounded like a
+// window and was not one: at the ~954k transfers/day the testnet actually does, 1,200 rows is
+// **114 seconds**. Eight surfaces read from this table — the size distribution, the largest
+// transfers, an address's recent activity, a protocol's recent flow — and every one of them was
+// describing the last two minutes while being labelled as something broader.
+//
+// A row cap still exists, because the point of the cap is to bound disk on a chain whose volume we
+// don't get to choose. What changed is that it is large enough to be a window, the span it actually
+// covers is measured and published (`recentWindow()`) instead of assumed, and the "largest"
+// queries no longer come from here at all — they come from top_transfers, which is per-day and
+// kept, so the biggest transfer of the week does not fall off the end in a few minutes.
+export const RECENT_MAX = Number(process.env.RECENT_MAX) || 200000;
+export const RECENT_WINDOW_SEC = 24 * 3600;
+
+// Largest transfers written per (day, token) on each batch, and how many survive a prune. The
+// per-batch figure only has to be big enough that a single chunk cannot push the day's real top N
+// out; the retained figure is what the API can serve.
+const TOP_PER_BATCH = 20;
+export const TOP_PER_DAY = 100;
 
 // Ceiling on the high-frequency address set, so a pathological window can't load an unbounded
 // set into memory. Exported and published rather than buried, because of what happens when it
 // binds: past this many qualifying addresses, which ones get flagged stops being decided by the
 // published thresholds and starts being decided by this number plus an ORDER BY. Adjusted volume
-// currently drops ~76% of real volume, so a reader who is not told the cap is active cannot audit
-// the figure they are being shown — and "every threshold is published" would be false.
-export const NOISE_SET_MAX = 5000;
+// drops most of real volume on this chain, so a reader who is not told the cap is active cannot
+// audit the figure they are being shown — and "every threshold is published" would be false.
+//
+// Raised from 5,000, which was measured at 4,443 qualifying addresses on four days of testnet
+// history — 89% of the ceiling, on the quieter of the two networks. A set of this size is a few
+// megabytes of strings; the cap exists to stop an unbounded load, not to be the binding constraint
+// in ordinary operation, and at 5,000 it was about to become the latter.
+export const NOISE_SET_MAX = Number(process.env.NOISE_SET_MAX) || 20000;
 
 const stmt = {
   getMeta: db.prepare('SELECT v FROM meta WHERE k = ?'),
@@ -202,26 +286,66 @@ const stmt = {
       avolume = avolume + excluded.avolume, acnt = acnt + excluded.acnt,
       bmint = bmint + excluded.bmint, bburn = bburn + excluded.bburn,
       bvolume = bvolume + excluded.bvolume, bcnt = bcnt + excluded.bcnt`),
-  // first_from is written once and never overwritten — it records who funded the address first.
-  upAddr: db.prepare(`INSERT INTO addr_stats(address, transfers, volume, last_block, first_from) VALUES(?, ?, ?, ?, ?)
+  // first_from and first_block are written once and never overwritten — the first is who funded
+  // the address, the second is when we started being able to measure a rate for it at all.
+  upAddr: db.prepare(`INSERT INTO addr_stats(address, transfers, volume, last_block, first_from, first_block) VALUES(?, ?, ?, ?, ?, ?)
     ON CONFLICT(address) DO UPDATE SET
       transfers = transfers + excluded.transfers, volume = volume + excluded.volume,
       last_block = MAX(last_block, excluded.last_block),
-      first_from = COALESCE(addr_stats.first_from, excluded.first_from)`),
+      first_from = COALESCE(addr_stats.first_from, excluded.first_from),
+      first_block = MIN(COALESCE(addr_stats.first_block, excluded.first_block), excluded.first_block)`),
   insRecent: db.prepare('INSERT INTO recent(block, ts, token, frm, too, amount) VALUES(?, ?, ?, ?, ?, ?)'),
   trimRecent: db.prepare('DELETE FROM recent WHERE id <= (SELECT MAX(id) FROM recent) - ?'),
+  trimRecentTs: db.prepare('DELETE FROM recent WHERE ts < ?'),
+  recentWindow: db.prepare('SELECT COUNT(*) AS rows, MIN(ts) AS a, MAX(ts) AS b FROM recent'),
+  insTop: db.prepare('INSERT OR IGNORE INTO top_transfers(day, token, amount, frm, too, block, ts) VALUES(?, ?, ?, ?, ?, ?, ?)'),
+  largest: db.prepare('SELECT token, frm, too, amount, block, ts FROM top_transfers WHERE ts >= ? ORDER BY amount DESC LIMIT ?'),
+  largestTok: db.prepare('SELECT token, frm, too, amount, block, ts FROM top_transfers WHERE token = ? AND ts >= ? ORDER BY amount DESC LIMIT ?'),
+  topWindow: db.prepare('SELECT COUNT(*) AS rows, MIN(ts) AS a, MAX(ts) AS b FROM top_transfers'),
+  // Keeps the top TOP_PER_DAY per (day, token) and drops the rest. A window function rather than a
+  // correlated subquery, which would re-rank the table once per row.
+  trimTop: db.prepare(`DELETE FROM top_transfers WHERE rowid IN (
+    SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER (PARTITION BY day, token ORDER BY amount DESC) AS rn FROM top_transfers)
+    WHERE rn > ?)`),
+  pruneTop: db.prepare('DELETE FROM top_transfers WHERE day < ?'),
   top: db.prepare('SELECT address, transfers, volume FROM addr_stats ORDER BY volume DESC LIMIT ?'),
-  largest: db.prepare('SELECT token, frm, too, amount FROM recent ORDER BY amount DESC LIMIT ?'),
   activeSince: db.prepare('SELECT COUNT(*) AS c FROM addr_stats WHERE last_block >= ?'),
   coverage: db.prepare('SELECT MIN(minute) AS a, MAX(minute) AS b FROM buckets'),
-  pruneBuckets: db.prepare('DELETE FROM buckets WHERE minute < ?'),
+  dailyCoverage: db.prepare('SELECT MIN(day) AS a, MAX(day) AS b, COUNT(DISTINCT day) AS days FROM buckets_daily'),
   pruneAddrs: db.prepare('DELETE FROM addr_stats WHERE last_block < ?'),
+  // Roll the minutes about to be deleted into their day, then delete them. Additive on conflict,
+  // because a day straddling the cutoff is rolled up across two prunes and both halves must land.
+  rollupDaily: db.prepare(`INSERT INTO buckets_daily(day, token, volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt)
+    SELECT (minute / 86400) * 86400 AS day, token, SUM(volume), SUM(cnt), SUM(mint), SUM(burn),
+           SUM(rvolume), SUM(rcnt), SUM(avolume), SUM(acnt), SUM(bmint), SUM(bburn), SUM(bvolume), SUM(bcnt)
+      FROM buckets WHERE minute < ? GROUP BY day, token
+    ON CONFLICT(day, token) DO UPDATE SET
+      volume = volume + excluded.volume, cnt = cnt + excluded.cnt,
+      mint = mint + excluded.mint, burn = burn + excluded.burn,
+      rvolume = rvolume + excluded.rvolume, rcnt = rcnt + excluded.rcnt,
+      avolume = avolume + excluded.avolume, acnt = acnt + excluded.acnt,
+      bmint = bmint + excluded.bmint, bburn = bburn + excluded.bburn,
+      bvolume = bvolume + excluded.bvolume, bcnt = bcnt + excluded.bcnt`),
+  pruneBuckets: db.prepare('DELETE FROM buckets WHERE minute < ?'),
   // Addresses busy enough to be treated as infrastructure rather than economic actors.
-  noisy: db.prepare(`SELECT address, transfers, volume FROM addr_stats WHERE transfers > ? OR volume > ? ORDER BY volume DESC LIMIT ${NOISE_SET_MAX}`),
+  //
+  // The rate is measured over each address's *own* observed span — first block to last, converted
+  // to days at the measured block time and floored at one day — not over the retained bucket
+  // window. Those two were silently different: an address seen for two months carried two months
+  // of volume into a comparison against a seven-day limit.
+  noisy: db.prepare(`SELECT address, transfers, volume, first_block, last_block, days FROM (
+      SELECT address, transfers, volume, first_block, last_block,
+             MAX(1.0, (last_block - COALESCE(first_block, last_block)) * ? / 86400000.0) AS days
+        FROM addr_stats)
+    WHERE transfers > ? * days OR volume > ? * days
+    ORDER BY volume DESC LIMIT ${NOISE_SET_MAX}`),
   // How many the thresholds actually select, uncapped. Kept as its own query so the difference
   // between "selected by the published rule" and "flagged after the cap" is a measured number
   // rather than an inference from the set landing suspiciously round.
-  noisyCount: db.prepare('SELECT COUNT(*) AS c FROM addr_stats WHERE transfers > ? OR volume > ?'),
+  noisyCount: db.prepare(`SELECT COUNT(*) AS c FROM (
+      SELECT transfers, volume, MAX(1.0, (last_block - COALESCE(first_block, last_block)) * ? / 86400000.0) AS days
+        FROM addr_stats)
+    WHERE transfers > ? * days OR volume > ? * days`),
   zeroAdj: db.prepare('UPDATE buckets SET avolume = 0, acnt = 0 WHERE minute BETWEEN ? AND ?'),
   setAdj: db.prepare('UPDATE buckets SET avolume = ?, acnt = ? WHERE minute = ? AND token = ?'),
   insFee: db.prepare('INSERT OR IGNORE INTO fee_samples(block, minute, fees, txs, gas_used) VALUES(?, ?, ?, ?, ?)'),
@@ -235,6 +359,28 @@ export const getCheckpoint = () => {
 };
 export const setCheckpoint = (n) => stmt.setMeta.run('checkpoint', String(n));
 
+// The batch's largest transfers per (day, token). Computed here rather than in the indexer so
+// every writer feeds top_transfers by construction: a caller that forgot would silently reintroduce
+// "largest of the last few minutes". Only the top few per key are kept, so a chunk holding tens of
+// thousands of transfers still writes a couple of dozen rows.
+function topOf(recents, perKey = TOP_PER_BATCH) {
+  const by = new Map();
+  for (const r of recents) {
+    const day = Math.floor(r.ts / 86400) * 86400;
+    const k = day + '|' + r.token;
+    let list = by.get(k);
+    if (!list) { list = []; by.set(k, list); }
+    list.push(r);
+  }
+  const out = [];
+  for (const [k, list] of by) {
+    const day = Number(k.slice(0, k.indexOf('|')));
+    list.sort((a, b) => b.amount - a.amount);
+    for (const r of list.slice(0, perKey)) out.push({ day, ...r });
+  }
+  return out;
+}
+
 // Flush one processed batch (aggregated in JS) inside a single transaction.
 export function applyBatch(buckets, addrs, recents) {
   db.exec('BEGIN');
@@ -244,9 +390,13 @@ export function applyBatch(buckets, addrs, recents) {
       stmt.upBucket.run(b.minute, b.token, b.volume, b.cnt, b.mint, b.burn, b.rvolume || 0, b.rcnt || 0, b.avolume || 0, b.acnt || 0,
         b.bmint || 0, b.bburn || 0, b.bvolume || 0, b.bcnt || 0);
     }
-    for (const [addr, x] of addrs) stmt.upAddr.run(addr, x.transfers, x.volume, x.lastBlock, x.firstFrom || null);
+    for (const [addr, x] of addrs) stmt.upAddr.run(addr, x.transfers, x.volume, x.lastBlock, x.firstFrom || null, x.firstBlock ?? x.lastBlock ?? null);
     for (const r of recents) stmt.insRecent.run(r.block, r.ts, r.token, r.frm, r.too, r.amount);
-    if (recents.length) stmt.trimRecent.run(RECENT_KEEP);
+    for (const t of topOf(recents)) stmt.insTop.run(t.day, t.token, t.amount, t.frm, t.too, t.block, t.ts);
+    // The row cap bounds disk between prunes; prune() applies the time window. Both exist: the cap
+    // alone would make the window a function of throughput, and the window alone would make disk a
+    // function of throughput.
+    if (recents.length) stmt.trimRecent.run(RECENT_MAX);
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');
@@ -276,6 +426,47 @@ export function getHistory(token, since, groupSec) {
   return rows.map((r) => ({ t: r.t, volume: r.volume, cnt: r.cnt, mint: r.mint, burn: r.burn, rvolume: r.rvolume, rcnt: r.rcnt, avolume: r.avolume, acnt: r.acnt, bmint: r.bmint, bburn: r.bburn, bvolume: r.bvolume, bcnt: r.bcnt }));
 }
 
+// Daily series, for ranges longer than the minute table retains. Reads the rollup *and* the minutes
+// not yet rolled up, then groups both by day — otherwise every long range would end seven days ago,
+// which is the shape of bug that makes a chart look like an outage. The boundary day exists in both
+// tables (half rolled up, half still live), so the union has to be summed rather than concatenated.
+const dailyStmts = new Map();
+export function getDailyHistory(token, sinceDay) {
+  const filter = token && token !== 'ALL';
+  const ck = filter ? 'f' : 'a';
+  let ps = dailyStmts.get(ck);
+  if (!ps) {
+    const cols = 'volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt';
+    ps = db.prepare(`SELECT day AS t, ${cols.split(', ').map((c) => `SUM(${c}) AS ${c}`).join(', ')} FROM (
+        SELECT day, token, ${cols} FROM buckets_daily WHERE day >= ? ${filter ? 'AND token = ?' : ''}
+        UNION ALL
+        SELECT (minute / 86400) * 86400 AS day, token, ${cols} FROM buckets WHERE minute >= ? ${filter ? 'AND token = ?' : ''})
+      GROUP BY t ORDER BY t`);
+    dailyStmts.set(ck, ps);
+  }
+  return filter ? ps.all(sinceDay, token, sinceDay, token) : ps.all(sinceDay, sinceDay);
+}
+
+// How far back the daily rollup reaches. Published next to a long series so a 90-day range drawn
+// from a rollup that began last Tuesday is not read as ninety days of history.
+export const dailyCoverage = () => stmt.dailyCoverage.get();
+
+// Where a daily series' history actually starts. Not simply the rollup's own earliest day: until the
+// first prune runs, the rollup is empty while the minute table already holds days of data, and
+// reporting `null` there would say "no record" next to a populated series. The answer is the earliest
+// point either table can speak to, since getDailyHistory reads both.
+export function dailyRecordBegan() {
+  const rollup = stmt.dailyCoverage.get()?.a ?? null;
+  const minutes = stmt.coverage.get()?.a ?? null;
+  const days = [rollup, minutes].filter((v) => v != null);
+  return days.length ? Math.floor(Math.min(...days) / 86400) * 86400 : null;
+}
+
+// One entry point for both series tables, so the two callers that serve /history cannot end up
+// routing a range differently from one another.
+export const getSeries = (token, since, groupSec, daily) =>
+  (daily ? getDailyHistory(token, since) : getHistory(token, since, groupSec));
+
 // Per-token totals since `since` (defaults to a 24h window).
 export function getSummary(since) {
   const rows = db.prepare(`SELECT token, SUM(volume) AS volume, SUM(cnt) AS cnt, SUM(mint) AS mint, SUM(burn) AS burn,
@@ -299,10 +490,24 @@ export function getSummary(since) {
   return { byToken, volume, transfers, rvolume, rtransfers, avolume, atransfers, bmint, bburn, bvolume, btransfers };
 }
 
-// Addresses whose activity over the retained window exceeds the given absolute limits.
-// The indexer scales the per-day thresholds by how many days of history it actually holds.
-export const noisyAddresses = (maxTransfers, maxVolume) => stmt.noisy.all(maxTransfers, maxVolume);
-export const noisyAddressCount = (maxTransfers, maxVolume) => stmt.noisyCount.get(maxTransfers, maxVolume).c;
+// Addresses whose activity *rate* exceeds the published per-day thresholds. `blockMs` converts each
+// address's observed block span into days; the limits it was actually judged against come back on
+// the row, so a flagged address can be audited without re-deriving the arithmetic.
+export function noisyAddresses(txPerDay, volumePerDay, blockMs) {
+  return stmt.noisy.all(Math.max(1, blockMs), txPerDay, volumePerDay).map((r) => ({
+    address: r.address,
+    transfers: r.transfers,
+    volume: r.volume,
+    firstBlock: r.first_block ?? null,
+    lastBlock: r.last_block,
+    // The address's own observation window, and the two limits derived from it.
+    windowDays: r.days,
+    maxTransfers: txPerDay * r.days,
+    maxVolume: volumePerDay * r.days,
+  }));
+}
+export const noisyAddressCount = (txPerDay, volumePerDay, blockMs) =>
+  stmt.noisyCount.get(Math.max(1, blockMs), txPerDay, volumePerDay).c;
 
 // ---- fee samples (exact per-block fees, sampled) ----
 export function insertFeeSamples(rows) {
@@ -340,9 +545,30 @@ export function feeStats(sinceMinute) {
 }
 
 export const getTop = (limit = 8) => stmt.top.all(limit);
-export const getLargest = (limit = 8) => stmt.largest.all(limit);
+// Largest transfers over a time window, from the retained per-day set rather than from whatever
+// happens to still be in `recent`. `sinceTs` defaults to the last 7 days so the figure means "the
+// largest transfers of the week" — a claim the caller can state.
+export const getLargest = (limit = 8, sinceTs = 0) => stmt.largest.all(sinceTs, limit);
 export const activeSince = (block) => stmt.activeSince.get(block).c;
 export const getCoverage = () => stmt.coverage.get();
+
+// The span the raw transfer table actually covers, measured rather than assumed. Every surface that
+// reads `recent` — the size distribution above all — is describing this window, so it has to be
+// possible to say how long it is.
+export function recentWindow() {
+  const r = stmt.recentWindow.get();
+  return {
+    rows: r?.rows || 0,
+    fromTs: r?.a ?? null,
+    toTs: r?.b ?? null,
+    spanSec: r?.a && r?.b ? r.b - r.a : 0,
+    cap: RECENT_MAX,
+    // True when the row cap, not the time window, is deciding how far back the table reaches —
+    // i.e. throughput is high enough that 24h does not fit. Same reasoning as the noise-set cap:
+    // whichever constraint is binding is the one a reader needs told.
+    atCap: (r?.rows || 0) >= RECENT_MAX,
+  };
+}
 
 // ---- API keys ----
 const kstmt = {
@@ -431,11 +657,27 @@ export const deleteAlert = (id, key) => astmt.del.run(id, key).changes;
 
 // ---- address lookup ----
 const adstmt = {
-  stats: db.prepare('SELECT address, transfers, volume, last_block FROM addr_stats WHERE address = ?'),
-  recent: db.prepare('SELECT block, ts, token, frm, too, amount FROM recent WHERE frm = ? OR too = ? ORDER BY id DESC LIMIT ?'),
+  stats: db.prepare('SELECT address, transfers, volume, last_block, first_block FROM addr_stats WHERE address = ?'),
+  // A UNION of two indexed lookups, not `WHERE frm = ? OR too = ?`. The OR could not use either
+  // index, so this was a full scan of the transfer table on every address lookup — invisible while
+  // that table held 1,200 rows, and a scan of hundreds of thousands now that it holds a real window.
+  // UNION rather than UNION ALL so a self-transfer (frm = too) is listed once.
+  recent: db.prepare(`SELECT block, ts, token, frm, too, amount FROM (
+      SELECT id, block, ts, token, frm, too, amount FROM recent WHERE frm = ?
+      UNION
+      SELECT id, block, ts, token, frm, too, amount FROM recent WHERE too = ?)
+    ORDER BY id DESC LIMIT ?`),
+  largest: db.prepare(`SELECT block, ts, token, frm, too, amount FROM (
+      SELECT amount, block, ts, token, frm, too FROM top_transfers WHERE frm = ?
+      UNION
+      SELECT amount, block, ts, token, frm, too FROM top_transfers WHERE too = ?)
+    ORDER BY amount DESC LIMIT ?`),
 };
 export function addressStats(a) { return adstmt.stats.get(a.toLowerCase()); }
 export function addressRecent(a, limit = 20) { const x = a.toLowerCase(); return adstmt.recent.all(x, x, limit); }
+// Largest transfers touching an address, over the retained per-day set. `recent` only reaches back
+// as far as its window; the biggest thing an address ever did is the part worth keeping.
+export const addressLargest = (a, limit = 8) => adstmt.largest.all(String(a).toLowerCase(), String(a).toLowerCase(), limit);
 
 // Prefix search for the global search box. Bound as a parameter (not interpolated), and the caller
 // validates the prefix is hex first, so the LIKE pattern can't carry a wildcard.
@@ -443,25 +685,50 @@ const searchStmt = db.prepare('SELECT address, transfers, volume FROM addr_stats
 export const searchAddresses = (prefix, limit = 10) => searchStmt.all(prefix.toLowerCase() + '%', limit);
 
 // ---- per-token detail (drill-down) ----
+// One counting expression per published bracket, built once from SIZE_BRACKETS so the SQL and the
+// documented brackets cannot drift apart. Counted in SQLite rather than by pulling every amount into
+// JS: the old version read the whole transfer table into an array on every request, which was fine
+// at 1,200 rows and is not at a real retention window.
+const BRACKET_SQL = SIZE_BRACKETS
+  .map((b, i) => `SUM(CASE WHEN amount >= ${b.min}${Number.isFinite(b.max) ? ` AND amount < ${b.max}` : ''} THEN 1 ELSE 0 END) AS b${i}`)
+  .join(', ');
+
 const tkstmt = {
-  amountsAll: db.prepare('SELECT amount FROM recent'),
-  amountsTok: db.prepare('SELECT amount FROM recent WHERE token = ?'),
-  largest: db.prepare('SELECT token, frm, too, amount, block, ts FROM recent WHERE token = ? ORDER BY amount DESC LIMIT ?'),
+  distAll: db.prepare(`SELECT COUNT(*) AS total, ${BRACKET_SQL} FROM recent`),
+  distTok: db.prepare(`SELECT COUNT(*) AS total, ${BRACKET_SQL} FROM recent WHERE token = ?`),
   recent: db.prepare('SELECT token, frm, too, amount, block, ts FROM recent WHERE token = ? ORDER BY id DESC LIMIT ?'),
 };
 
-// Transfer-size histogram over the indexed `recent` window (rolling). token='ALL' → all tokens.
+// Memoised per token. Six SUM(CASE) expressions over the whole transfer window is a full scan —
+// measured at 50ms with the table at its 200k-row cap — and it runs on every token page load and every
+// /v1/stablecoins/{token} call. A 24h histogram does not change meaningfully between two requests a
+// few seconds apart, so a short TTL costs nothing in accuracy and turns a burst into one scan.
+const distCache = new Map();
+const DIST_TTL_MS = 20000;
+
+// Transfer-size histogram over the retained transfer window. token='ALL' → all tokens. The window is
+// returned alongside the counts, because a histogram over two minutes and a histogram over a day are
+// different claims and the shape alone does not say which one this is.
 export function sizeDistribution(token) {
-  const rows = (token && token !== 'ALL') ? tkstmt.amountsTok.all(token) : tkstmt.amountsAll.all();
-  const brackets = SIZE_BRACKETS.map((b) => ({ label: b.label, min: b.min, max: b.max === Infinity ? null : b.max, count: 0 }));
-  for (const r of rows) {
-    for (let i = 0; i < SIZE_BRACKETS.length; i++) {
-      if (r.amount >= SIZE_BRACKETS[i].min && r.amount < SIZE_BRACKETS[i].max) { brackets[i].count += 1; break; }
-    }
-  }
-  return { total: rows.length, brackets };
+  const ck = token || 'ALL';
+  const hit = distCache.get(ck);
+  if (hit && Date.now() - hit.at < DIST_TTL_MS) return hit.value;
+  const value = computeSizeDistribution(token);
+  distCache.set(ck, { at: Date.now(), value });
+  return value;
 }
-export const largestByToken = (token, limit = 8) => tkstmt.largest.all(token, limit);
+
+function computeSizeDistribution(token) {
+  const r = (token && token !== 'ALL') ? tkstmt.distTok.get(token) : tkstmt.distAll.get();
+  return {
+    total: r?.total || 0,
+    brackets: SIZE_BRACKETS.map((b, i) => ({
+      label: b.label, min: b.min, max: Number.isFinite(b.max) ? b.max : null, count: r?.[`b${i}`] || 0,
+    })),
+    window: recentWindow(),
+  };
+}
+export const largestByToken = (token, limit = 8, sinceTs = 0) => stmt.largestTok.all(token, sinceTs, limit);
 export const recentByToken = (token, limit = 12) => tkstmt.recent.all(token, limit);
 
 // ---- derived address attributes (experimental — entities.js; drop this block to remove) ----
@@ -504,10 +771,23 @@ const tvstmt = {
   // Non-zero only: a contract that has never held anything is not a data point worth serving.
   nonZero: db.prepare('SELECT address, token, balance, checked FROM tvl WHERE balance > 0 ORDER BY balance DESC'),
   forAddr: db.prepare('SELECT token, balance, checked FROM tvl WHERE address = ? AND balance > 0'),
+  // Sum only. The dashboard polls /api/state every few seconds and wants one number; the row-by-row
+  // version below was reading the whole table and sorting it by balance to do that.
+  totalBalance: db.prepare('SELECT SUM(balance) AS t FROM tvl WHERE balance > 0'),
   // Contracts the entity deriver has already confirmed have bytecode. Balances are only ever
   // scanned for these plus the registry's own addresses — scanning every address seen would
   // multiply RPC cost by ~1000 for no gain, since a plain wallet's balance is not TVL.
-  contracts: db.prepare('SELECT address FROM address_meta WHERE is_contract = 1 ORDER BY address LIMIT ?'),
+  //
+  // Ordered by what a contract is worth measuring — the balance we last read, then the volume it
+  // moves — and not, as it was, by the hexadecimal value of its address. Past the cap that ordering
+  // decided which contracts counted towards chain TVL by how their address happened to sort, which
+  // is the same silent truncation the noise-set cap is published to avoid.
+  contracts: db.prepare(`SELECT m.address FROM address_meta m
+      LEFT JOIN addr_stats a ON a.address = m.address
+      LEFT JOIN (SELECT address, SUM(balance) AS b FROM tvl GROUP BY address) t ON t.address = m.address
+    WHERE m.is_contract = 1
+    ORDER BY COALESCE(t.b, 0) DESC, COALESCE(a.volume, 0) DESC, m.address LIMIT ?`),
+  contractCount: db.prepare('SELECT COUNT(*) AS c FROM address_meta WHERE is_contract = 1'),
   // Records only whether an address has bytecode, and never overwrites an existing row — so the
   // TVL scanner can discover contracts on its own without clobbering anything entities.js derived.
   markCode: db.prepare(`INSERT INTO address_meta(address, is_contract, code_size, checked) VALUES(?, ?, ?, ?)
@@ -536,8 +816,12 @@ export function upsertBalances(rows) {
 }
 
 export const balanceRows = () => tvstmt.nonZero.all();
+export const totalBalance = () => tvstmt.totalBalance.get()?.t || 0;
 export const balancesForAddress = (a) => tvstmt.forAddr.all(String(a).toLowerCase());
 export const knownContracts = (limit = 2000) => tvstmt.contracts.all(limit).map((r) => r.address);
+// How many contracts exist to scan, against how many the cap allows. Published for the same reason
+// the noise-set cap is: past the ceiling, coverage is decided by the ceiling and not by the method.
+export const knownContractCount = () => tvstmt.contractCount.get().c;
 export const markContract = (a, isContract, codeSize) => tvstmt.markCode.run(a, isContract ? 1 : 0, codeSize || 0, Date.now());
 export const uncheckedAddresses = (limit = 40) => tvstmt.unchecked.all(limit).map((r) => r.address);
 
@@ -604,12 +888,35 @@ export function chainEventsSince(from) {
   return prior ? [prior, ...rows] : rows;
 }
 
+// How long the per-day rollup of the largest transfers is kept. Matches tvl_history: long enough to
+// be a record, bounded so it cannot become the biggest table in the file.
+const TOP_KEEP_DAYS = 180;
+
 export function prune(nowSec, latestBlock, blockMs) {
   tvstmt.histPrune.run(nowSec - 180 * 86400);
   const weekBlocks = Math.round((7 * 86400 * 1000) / Math.max(200, blockMs));
-  stmt.pruneBuckets.run(nowSec - 7 * 86400);
+  const cutoff = nowSec - 7 * 86400;
+
+  // Roll up, then delete, in one transaction. Separately they are two statements that can be
+  // interrupted between: a crash after the delete would lose the minutes for good, and a crash after
+  // the rollup would double-count them on the next pass. Aggregates being additive is exactly what
+  // makes the ordering load-bearing here.
+  db.exec('BEGIN');
+  try {
+    stmt.rollupDaily.run(cutoff);
+    stmt.pruneBuckets.run(cutoff);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+
   stmt.pruneAddrs.run(latestBlock - weekBlocks);
-  stmt.pruneFees.run(nowSec - 7 * 86400);
+  stmt.pruneFees.run(cutoff);
+  // The raw transfer window, by time. The row cap in applyBatch bounds it between prunes.
+  stmt.trimRecentTs.run(nowSec - RECENT_WINDOW_SEC);
+  stmt.trimTop.run(TOP_PER_DAY);
+  stmt.pruneTop.run(nowSec - TOP_KEEP_DAYS * 86400);
 }
 
 // Close the database (WAL checkpoint) for a clean shutdown.

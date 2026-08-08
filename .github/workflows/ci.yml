@@ -12,7 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [22.x, 23.x]
+        # 24.x is what the Dockerfile actually runs, so it has to be in here — the matrix used to
+        # cover only 22/23 and therefore never tested the version in production. It is also where
+        # node:sqlite stops being experimental. 22.x stays because it is the floor in `engines`.
+        node-version: [22.x, 23.x, 24.x]
 
     steps:
       - name: Checkout code
