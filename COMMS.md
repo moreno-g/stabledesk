@@ -43,18 +43,31 @@ number is wrong, even when every number in it is correct.
 This holds for screenshots too: a screenshot of the terminal carries the on-page warning, so crop
 it in, not out.
 
-### Known breaches
+### The second rule, which the first one missed
 
-Two posts published testnet figures without the label. Both predate this file.
+On 29 and 30 July 2026 this account published figures from Arc **mainnet** — chain 5042 — while
+holding gated pre-launch access. The site was running against mainnet at the time; the token list
+had been made network-derived on the 29th and the remaining testnet copy dropped with it. Access
+was withdrawn a few days later and the deployment returned to testnet, which is where it has been
+since and which the 3 August post says out loud.
 
-| Date | Post | Problem |
-|---|---|---|
-| 2026-07-29 | "@arc crossed 1,200 active wallets… supply just passed $5M" | No network stated |
-| 2026-07-30 | "Arc mainnet, today's snapshot" — 2,900 wallets, ~$10M supply | States mainnet; mainnet has not launched |
+So the numbers were real mainnet measurements and the label on them was correct.
 
-They are listed here rather than quietly deleted. A measurement project that erases its own bad
-measurements has a different promise than the one at the top of this file. The correction is a
-post, and the post is the record.
+What was missing is that **nobody else could reach that network.** Chain 5042 was producing blocks
+behind an access grant. A reader who wanted to check those figures had nowhere to check them, and
+the 30 July post read as though a public mainnet existed.
+
+That is not a wrong number. It is a category the first rule does not cover, and it needs its own:
+
+> **A figure from a network the reader cannot reach is published with that fact attached.**
+
+Not because it is less true — it was true — but because *check my work* is the whole promise, and
+here the work could not be checked. "Arc mainnet (pre-launch, access-gated — you cannot verify this
+yourself yet)" is one clause, and it turns an unverifiable claim into a disclosed one.
+
+Neither post is deleted and neither is retracted. Both are accurate, and they are the record of
+this project measuring Arc mainnet before it opened, which is worth more than a tidy timeline. What
+they get is the missing clause, added as a reply.
 
 ## September 16, 2026
 
@@ -69,11 +82,10 @@ verification, not authoring.
 
 What does need a human:
 
-- **The correction of the July posts must land before the switch.** Today "Arc mainnet" refers to
-  nothing public, so mislabelling testnet as mainnet is an error people can shrug at. From
-  September 16 it names a real network with real money, and those two posts start reading as a
-  claim about it. The correction gets cheaper the earlier it goes out and it never gets cheaper
-  again after that date.
+- **The July posts get their missing clause before the switch.** They are accurate mainnet figures
+  from the gated pre-launch network, but from September 16 "Arc mainnet" means something a reader
+  can go and check — and these two describe a period when it was not. Saying so now, while the
+  distinction still needs explaining, is cheaper than being asked about it during launch week.
 - **The first post that says "Arc mainnet" ships after the switch is live and verified**, not at
   00:01 on the 16th because the calendar says so. The rule has never been "post when it launches";
   it is "post what we measured, once we measured it."
