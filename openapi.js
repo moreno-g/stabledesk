@@ -217,7 +217,11 @@ function build() {
         get: {
           tags: ['Stablecoins'], operationId: 'getStablecoins',
           summary: 'Supply and 24h summary, all tokens',
-          responses: { 200: ok('Supply and rolling 24h totals per token.', schema('Stablecoins')), ...COMMON },
+          description: '`summary24h` sums everything since 24h ago, which on a young or freshly-restarted '
+            + 'index is however much history exists rather than a full day. `coverage` states how much that '
+            + 'actually is (`minutes`, and the first and last minute measured) and `windowEnd` states which '
+            + 'instant the window ends at, so the figures can be labelled instead of assumed.',
+          responses: { 200: ok('Supply and rolling 24h totals per token, with the coverage behind them.', schema('Stablecoins')), ...COMMON },
         },
       },
       '/v1/stablecoins/history': {
@@ -685,6 +689,18 @@ function build() {
             supply: { type: 'object', additionalProperties: schema('TokenSupply'), description: `Keyed by symbol: ${TOKENS.join(', ')}.` },
             totalSupply: num('Sum across tokens.'),
             summary24h: schema('Summary24h'),
+            coverage: {
+              type: 'object',
+              description: 'How much history actually backs `summary24h`. It sums everything since 24h ago, '
+                + 'so on a young or freshly-restarted index the window is shorter than the name — read `minutes` '
+                + 'before labelling these figures as a day.',
+              properties: {
+                fromMinute: { type: 'integer', nullable: true, description: 'First measured minute, unix seconds.' },
+                toMinute: { type: 'integer', nullable: true, description: 'Last measured minute, unix seconds.' },
+                minutes: { type: 'integer', description: 'Minutes of history held. 1440 is a full day.' },
+              },
+            },
+            windowEnd: num('ms — the instant the 24h window ends at, in chain time.'),
             updatedAt: num('ms'),
           },
         },

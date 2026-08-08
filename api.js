@@ -229,7 +229,22 @@ export async function handleV1(req, res, u) {
     }, 200, H);
   }
 
-  if (path === '/v1/stablecoins') return json(res, { supply: s.supply, totalSupply: s.totalSupply, summary24h: s.summary24h, updatedAt: s.updatedAt }, 200, H);
+  // `summary24h` is named for the window it asks for, not the one it got: it sums everything since
+  // 24h ago, and on a young or freshly-restarted index that is however much history exists. A
+  // consumer reading this endpoint had no way to tell 24 hours from 34 minutes, so the first thing
+  // built against it labelled half an hour of testnet as a day. Coverage is published beside the
+  // figures for the same reason the size distribution publishes its span: a window nobody states
+  // is a window every reader assumes.
+  if (path === '/v1/stablecoins') {
+    return json(res, {
+      supply: s.supply,
+      totalSupply: s.totalSupply,
+      summary24h: s.summary24h,
+      coverage: s.coverage,
+      windowEnd: s.windowEnd,
+      updatedAt: s.updatedAt,
+    }, 200, H);
+  }
 
   if (path === '/v1/stablecoins/history') {
     const token = (u.searchParams.get('token') || 'ALL').toUpperCase();
