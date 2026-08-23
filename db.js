@@ -140,6 +140,15 @@ db.exec(`
   -- Deliberately holds no IP, no user agent and no key: it answers "how many calls hit this
   -- route today", which is a measure of usage rather than of people. Kept indefinitely — the
   -- path set is bounded by normalisation, so this is a few rows a day forever.
+  -- Per-key, per-day call counts. api_keys.requests is a lifetime cumulative total, which cannot
+  -- answer "what happened yesterday" — the question a daily digest exists to answer. One row per
+  -- key per day, bounded by the number of keys, which minting limits already bound.
+  CREATE TABLE IF NOT EXISTS key_daily (
+    key TEXT NOT NULL, day INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (key, day)
+  );
+  CREATE INDEX IF NOT EXISTS idx_key_daily_day ON key_daily(day);
+
   CREATE TABLE IF NOT EXISTS hits (
     path TEXT NOT NULL, day INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (path, day)
@@ -615,10 +624,17 @@ const kstmt = {
   ins: db.prepare('INSERT INTO api_keys(key, label, tier, created) VALUES(?, ?, ?, ?)'),
   get: db.prepare('SELECT * FROM api_keys WHERE key = ?'),
   bump: db.prepare('UPDATE api_keys SET requests = requests + 1, last_used = ? WHERE key = ?'),
+  day: db.prepare(`INSERT INTO key_daily (key, day, count) VALUES (?, ?, 1)
+    ON CONFLICT(key, day) DO UPDATE SET count = count + 1`),
 };
 export function createKey(key, label, tier) { kstmt.ins.run(key, label || null, tier || 'free', Date.now()); return kstmt.get.get(key); }
 export const getKey = (key) => kstmt.get.get(key);
-export const bumpKey = (key) => kstmt.bump.run(Date.now(), key);
+export const bumpKey = (key) => {
+  kstmt.bump.run(Date.now(), key);
+  // Recorded here rather than at the call site so the lifetime total and the daily row can never
+  // disagree about whether a request happened.
+  try { kstmt.day.run(key, Math.floor(Date.now() / 86400000) * 86400); } catch { /* counting is not worth an error */ }
+};
 
 const tierstmt = {
   toPro: db.prepare("UPDATE api_keys SET tier = 'pro', expires_at = ? WHERE key = ?"),
@@ -1101,6 +1117,20 @@ const ustmt = {
 export function recordHit(path, day) {
   try { ustmt.hit.run(path, day); } catch { /* counting is not worth an error */ }
 }
+
+// What a given day looked like, for the digest. Joined to api_keys so a key that called can be
+// named by its label rather than by a prefix nobody chose.
+const dstmt = {
+  keysOnDay: db.prepare(`SELECT d.key, d.count, k.label, k.tier, k.created
+    FROM key_daily d LEFT JOIN api_keys k ON k.key = d.key
+    WHERE d.day = ? ORDER BY d.count DESC`),
+  routesOnDay: db.prepare('SELECT path, count FROM hits WHERE day = ? ORDER BY count DESC'),
+  keysCreatedOn: db.prepare('SELECT key, label, tier FROM api_keys WHERE created >= ? AND created < ?'),
+};
+
+export const keysOnDay = (day) => dstmt.keysOnDay.all(day);
+export const routesOnDay = (day) => dstmt.routesOnDay.all(day);
+export const keysCreatedOn = (fromMs, toMs) => dstmt.keysCreatedOn.all(fromMs, toMs);
 
 export const hitsByPath = (sinceDay) => ustmt.byPath.all(sinceDay);
 export const hitsByDay = (sinceDay) => ustmt.byDay.all(sinceDay);
