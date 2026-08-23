@@ -10,7 +10,7 @@ import { search } from './search.js';
 import { CATEGORIES } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS, TVL_HISTORY_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
-import { RANGES, TIERS, TOKEN_SYMBOLS, TOKEN_LIST, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
+import { RANGES, TIERS, clampLimit, alignToBucket, TOKEN_SYMBOLS, TOKEN_LIST, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
 import { validateWebhookHost } from './validate.js';
 import { CHAIN } from './chains.js';
 
@@ -253,7 +253,8 @@ export async function handleV1(req, res, u) {
     // last indexed minute, and `windowEnd` states which instant that is so a consumer is never
     // left to assume the series runs up to the moment they called.
     const endSec = Math.floor((s.windowEnd || Date.now()) / 1000);
-    const since = r.span == null ? 0 : endSec - r.span;
+    // Aligned to the bucket grid, so every point returned is a complete interval inside the window.
+    const since = r.span == null ? 0 : alignToBucket(endSec - r.span, r.group);
     return json(res, {
       token, group: r.group, windowEnd: endSec * 1000,
       // Ranges past 7d are answered from the per-day rollup rather than the minute table. Stated,
@@ -351,12 +352,12 @@ export async function handleV1(req, res, u) {
   }
 
   if (path === '/v1/search') {
-    const limit = Math.min(25, Number(u.searchParams.get('limit')) || 10);
+    const limit = clampLimit(u.searchParams.get('limit'), 25, 10);
     return json(res, search(u.searchParams.get('q'), limit), 200, H);
   }
 
   if (path === '/v1/addresses/top') {
-    const limit = Math.min(100, Number(u.searchParams.get('limit')) || 20);
+    const limit = clampLimit(u.searchParams.get('limit'), 100, 20);
     return json(res, { top: db.getTop(limit).map((x) => ({ ...x, label: getLabel(x.address)?.name || null })) }, 200, H);
   }
 
@@ -364,7 +365,7 @@ export async function handleV1(req, res, u) {
   // read the rolling raw-transfer table, which at real throughput holds a couple of minutes — so
   // "largest transfers" meant "largest of the last two minutes" with nothing saying so.
   if (path === '/v1/transfers/largest') {
-    const limit = Math.min(100, Number(u.searchParams.get('limit')) || 20);
+    const limit = clampLimit(u.searchParams.get('limit'), 100, 20);
     const days = Math.min(180, Math.max(1, Number(u.searchParams.get('days')) || 7));
     const endSec = Math.floor((s.windowEnd || Date.now()) / 1000);
     return json(res, {

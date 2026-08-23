@@ -30,6 +30,33 @@ export const TOKEN_SYMBOLS = new Set(Object.values(CHAIN.tokens).map((t) => t.sy
 export const TOKEN_LIST = [...TOKEN_SYMBOLS].join(', ');
 export const ADDR_RE = /^0x[0-9a-f]{40}$/;
 
+// Bounds a caller-supplied row limit.
+//
+// The naive form — Math.min(max, Number(raw) || dflt) — has no floor, and SQLite reads a negative
+// LIMIT as *no limit*. Measured against production: `/v1/addresses/top?limit=-5` returned 335,520
+// rows and 35 MB in 3.2 seconds, against 2.3 KB for the same call with a sane limit. That is a
+// 15,000x amplification from one character, on a free tier that allows 60 requests a minute, in a
+// single-threaded process — so it is an availability problem, not a tidiness one.
+//
+// Anything that is not a usable count falls back to the default rather than being clamped to 1: a
+// caller sending limit=0 or limit=abc has expressed no preference, and guessing "one row" would be a
+// stranger answer than giving them the default page.
+export function clampLimit(raw, max, dflt) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return dflt;
+  return Math.min(max, Math.floor(n));
+}
+
+// Aligns a window start up to the next bucket boundary.
+//
+// A series groups minutes with `(minute / g) * g`, so the first bucket is labelled with the floor of
+// its group. When `since` is not a multiple of the group — it never is, being now minus a span — that
+// label lands *before* the requested window and the bucket holds only part of its interval. Charted,
+// it is an artificially low first point: exactly the defect the terminal already avoids at the other
+// end by dropping the final, still-filling bucket. Aligning up means every bucket returned is whole
+// and inside the window, and the `since` reported back is the instant the series really starts.
+export const alignToBucket = (sec, group) => (group > 1 ? Math.ceil(sec / group) * group : sec);
+
 // The public origin, stated once. Three generated documents — sitemap.xml, openapi.json and
 // llms.txt — have to name it in absolute form, and three copies of a hostname is three chances
 // for one of them to keep pointing at an old one.
