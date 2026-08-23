@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 // db.js opens its database at module load and keeps one connection for the whole process, so
 // whichever import reaches it first decides which file the entire suite writes to. It has happened: a
@@ -128,6 +128,32 @@ test('a negative limit falls back to the default instead of dumping the table', 
   assert.equal(alignToBucket(1800, 900), 1800, 'an already-aligned instant is left alone');
   assert.equal(alignToBucket(0, 86400), 0);
   assert.equal(alignToBucket(1234, 1), 1234, 'a group of one has no grid to align to');
+});
+
+// ---- a refused credential is not an outage, in the verifier either ----
+test('the verifier tells a rejected key apart from an endpoint that is not there', async () => {
+  const { RPC_AUTH_STATUSES } = await import('../constants.js');
+
+  // The indexer already draws this line: chainStateFromError returns 'unauthorized' rather than
+  // 'unreachable', and chainalert spells out that it is ours to fix. The verifier reported a 401 as
+  // "did not answer", which sends the reader to look at the wrong system — and it is not academic.
+  // The production mainnet profile points at rpc.blockdaemon.mainnet.arc.io, which answers 401: the
+  // endpoint exists and runs, the credentials were revoked. "Unreachable" would suggest waiting for
+  // a chain; "refused" says go and ask for access back. Opposite actions.
+  for (const status of [401, 403, 407]) {
+    assert.ok(RPC_AUTH_STATUSES.has(status), `${status} means the endpoint answered and said no`);
+  }
+  for (const status of [500, 502, 503, 404, undefined]) {
+    assert.ok(!RPC_AUTH_STATUSES.has(status), `${status} is not a credentials verdict`);
+  }
+
+  // The verifier restates this set rather than importing it, so that it can be loaded without a
+  // network profile — constants.js pulls in chains.js, which throws by design on an incomplete
+  // mainnet config. Two copies of three numbers is the price; this pins them together.
+  const src = readFileSync('verify-network.js', 'utf8');
+  const declared = 'new Set([' + [...RPC_AUTH_STATUSES].join(', ') + '])';
+  assert.ok(src.includes('const RPC_AUTH_STATUSES = ' + declared),
+    'the verifier and constants.js must agree on which statuses mean "refused" — expected ' + declared);
 });
 
 // ---- what changed since the last look ----

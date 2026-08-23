@@ -54,6 +54,11 @@ const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 const SEL = { name: '0x06fdde03', symbol: '0x95d89b41', decimals: '0x313ce567', totalSupply: '0x18160ddd' };
 const BALANCE_OF = '0x70a08231';
 
+// The same set constants.js publishes, restated here rather than imported: constants.js pulls in
+// chains.js at load, and the whole point of loadProfile() is that this file can be imported without
+// a network profile. Three literals are a cheaper price than that coupling.
+const RPC_AUTH_STATUSES = new Set([401, 403, 407]);
+
 // How many Transfer events an unknown contract needs in the sample before it is worth reporting.
 // Below this it is noise: a test deployment nobody uses is not a gap in our coverage.
 const DISCOVERY_MIN_EVENTS = 20;
@@ -215,6 +220,7 @@ const fmt = (n) => (n == null ? '—' : n.toLocaleString('en-US', { maximumFract
 // ---- 1. endpoints ------------------------------------------------------------------------------
 async function checkEndpoints() {
   let live = 0;
+  let refused = 0;
   let head = null;
   for (const ep of CHAIN.endpoints) {
     const t = Date.now();
@@ -234,11 +240,34 @@ async function checkEndpoints() {
       head = head == null ? Number(bn) : Math.max(head, Number(bn));
       ok('endpoint', `${ep} · head ${Number(bn)} · ${ms}ms`);
     } catch (e) {
-      warn('endpoint', `${ep} did not answer: ${e.message}`);
+      // A refused credential is not an outage, and saying "did not answer" about a 401 sends the
+      // reader to look at the wrong system. The indexer already draws this line — chainStateFromError
+      // returns 'unauthorized' rather than 'unreachable', and chainalert spells out that it is ours to
+      // fix — and a tool whose job is to be precise about causes should not be vaguer than the thing
+      // it checks. Measured on the production mainnet profile: rpc.blockdaemon.mainnet.arc.io answers
+      // 401, which means the endpoint exists and is running. That is a very different situation from
+      // a hostname that resolves to nothing, and it has a completely different remedy.
+      if (RPC_AUTH_STATUSES.has(e.status)) {
+        refused += 1;
+        warn('endpoint', `${ep} answered and refused our credentials (HTTP ${e.status})`,
+          'the endpoint is up — this is our access to fix, not an outage');
+      } else {
+        warn('endpoint', `${ep} did not answer: ${e.message}`);
+      }
     }
   }
-  if (!live) fail('endpoint', 'no configured endpoint answered — the indexer cannot start');
-  else if (live < CHAIN.endpoints.length) warn('endpoint', `${live}/${CHAIN.endpoints.length} endpoints answering`);
+  if (!live) {
+    // Only when *every* endpoint refused us is the verdict about credentials. One network-level
+    // failure among them and the network is involved too — the same rule rpc.js applies to allAuth.
+    if (refused === CHAIN.endpoints.length) {
+      fail('endpoint', `every endpoint refused our credentials — the indexer cannot start`,
+        'the chain is reachable; the access is not. Restore or obtain credentials for these endpoints.');
+    } else {
+      fail('endpoint', 'no configured endpoint answered — the indexer cannot start');
+    }
+  } else if (live < CHAIN.endpoints.length) {
+    warn('endpoint', `${live}/${CHAIN.endpoints.length} endpoints answering`);
+  }
   return head;
 }
 
