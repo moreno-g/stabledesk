@@ -562,10 +562,18 @@ async function reportChanges() {
 // Only when invoked directly. The classification helpers above are the part that has been wrong twice
 // and they need a test, which means the module has to be importable without firing a live run.
 const invokedDirectly = process.argv[1] && process.argv[1].endsWith('verify-network.js');
-async function runOnce() {
+// One full pass. Exported so the server can run it on a timer in-process, the way every other
+// periodic job here works (tvl, entities, payments) — rather than as a second Railway service with a
+// second volume and a database that backup.js would not cover.
+//
+// `quiet` suppresses the per-check report and prints only what changed. A scheduled run that logs
+// forty lines an hour buries the one line that matters, which is the same reason chainalert announces
+// transitions and not conditions.
+export async function runOnce({ quiet = false, watch = WATCH } = {}) {
+  await loadProfile();
   findings.length = 0;
   observed.clear();
-  if (!JSON_OUT) console.log(`Verifying ${CHAIN.label} (${NETWORK}, chain ${CHAIN.chainId}) against ${CHAIN.endpoints.length} endpoint(s)…`);
+  if (!JSON_OUT && !quiet) console.log(`Verifying ${CHAIN.label} (${NETWORK}, chain ${CHAIN.chainId}) against ${CHAIN.endpoints.length} endpoint(s)…`);
   const head = await checkEndpoints();
   if (head != null) {
     await checkBlockTime(head);
@@ -574,16 +582,26 @@ async function runOnce() {
     await checkRegistry();
     await checkUntracked(head);
   }
-  const code = report();
+  const code = quiet ? summarise() : report();
   // Only after the checks have run: a run that could not read the chain has nothing to compare, and
   // storing its empty observation would make every subject look like it had disappeared.
-  if (WATCH && head != null) await reportChanges();
+  // Only in watch mode. A plain run stays strictly read-only, which is the property that makes it
+  // safe to point at a production deployment, and it would be quietly lost if this ran unconditionally.
+  if (watch && head != null) await reportChanges();
   return code;
+}
+
+// The one-line version, for a scheduled run. States the verdict without reprinting every check.
+function summarise() {
+  const fails = findings.filter((f) => f.level === 'FAIL');
+  const warns = findings.filter((f) => f.level === 'WARN');
+  console.log(`[watch] ${CHAIN.label}: ${fails.length} failed, ${warns.length} to review`);
+  for (const f of fails) console.error(`[watch] FAIL ${f.message}`);
+  return fails.length ? 1 : 0;
 }
 
 if (!invokedDirectly) { /* imported for its helpers */ } else
 try {
-  await loadProfile();
   if (EVERY > 0) {
     // A loop for a host with no scheduler. Deliberately not the default: one pass and exit composes
     // with cron, with a Railway job, and with && in a deploy line, and none of those want a process
@@ -595,7 +613,7 @@ try {
       await sleep(every * 1000);
     }
   }
-  process.exit(await runOnce());
+  process.exit(await runOnce({ quiet: false }));
 } catch (e) {
   // A crash here is itself a finding: the script could not establish what the chain says, which is
   // not the same as the chain agreeing with us.

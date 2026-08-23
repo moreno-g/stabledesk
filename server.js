@@ -22,7 +22,8 @@ import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
 import { specJson, llmsTxt } from './openapi.js';
-import { RANGES, ADDR_RE, clampLimit, alignToBucket, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED, WHALEWATCH_ENABLED, SITE_ORIGIN } from './constants.js';
+import { runOnce } from './verify-network.js';
+import { RANGES, ADDR_RE, clampLimit, alignToBucket, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED, WHALEWATCH_ENABLED, WATCH_ENABLED, WATCH_EVERY_SEC, SITE_ORIGIN } from './constants.js';
 import { CHAIN, NETWORK } from './chains.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -500,12 +501,23 @@ server.listen(PORT, () => {
   if (TVL_ENABLED) tvl.start();
   // Off by default. Enabling it starts posting publicly, so it is an explicit switch — but it is a
   // switch that exists, rather than an export nobody calls.
+  if (WATCH_ENABLED) {
+    // Staggered off the hour and delayed at boot, so a redeploy never lands a watch pass on top of
+    // the initial backfill — the pass would compete with it for the same rate-limited endpoints.
+    console.log(`[watch] enabled — checking the chain profile every ${Math.round(WATCH_EVERY_SEC / 60)} min`);
+    const pass = async () => {
+      try { await runOnce({ quiet: true, watch: true }); }
+      catch (e) { console.error('[watch]', e.message || e); }
+    };
+    setTimeout(() => { pass(); watchTimer = setInterval(pass, WATCH_EVERY_SEC * 1000); }, 120000).unref();
+  }
   if (WHALEWATCH_ENABLED) {
     console.log('[whalewatch] enabled — notable transfers will be delivered to Telegram');
     whalewatch.start();
   }
 });
 
+let watchTimer = null;
 let shuttingDown = false;
 function shutdown() {
   if (shuttingDown) return;
@@ -514,6 +526,7 @@ function shutdown() {
   stop();                          // stop the live poll loop
   payments.stop();                 // stop the payment poller
   whalewatch.stop();               // stop the notable-transfer poster (no-op when disabled)
+  if (watchTimer) clearInterval(watchTimer);  // stop the chain watcher
   entities.stop();                 // stop the entity derivation loop
   tvl.stop();                      // stop the TVL balance scanner
   server.close(() => { try { db.close(); } catch {} process.exit(0); });

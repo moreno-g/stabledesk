@@ -157,6 +157,18 @@ export const BILLING_ENABLED = process.env.BILLING_ENABLED === 'true';
 // publishing to a public channel, and that must be a deliberate act rather than a consequence of a
 // deploy. The drafting pipeline runs and is tested regardless — only delivery is gated.
 export const WHALEWATCH_ENABLED = process.env.WHALEWATCH_ENABLED === 'true';
+
+// The chain watcher (see chainwatch.js), run in-process on a timer like every other periodic job
+// here. It could have been a second Railway service on a cron, but that would need a second volume
+// and a second database — one that backup.js does not cover, holding the only record of what the
+// chain looked like last time. Sharing the process shares the database, and a pass costs about
+// twenty seconds an hour against an indexer that polls every seven.
+//
+// Off by default: it writes, and it can send Telegram messages. Both should be deliberate.
+export const WATCH_ENABLED = process.env.WATCH_ENABLED === 'true';
+// Floored at five minutes. The discovery sample walks a slice of recent blocks on a rate-limited
+// public RPC, and running it more often than the chain produces news is how a watcher becomes noise.
+export const WATCH_EVERY_SEC = Math.max(300, Number(process.env.WATCH_EVERY_SEC) || 3600);
 export const BASE_CHAIN_ID = 8453;
 export const BASE_RPC_ENDPOINTS = [
   'https://mainnet.base.org',

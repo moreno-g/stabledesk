@@ -132,6 +132,38 @@ npm run watch -- --every 3600   # loop, for a host with no scheduler
 
 One pass and exit is the default because it composes with cron, a Railway job, or a deploy line.
 
+### Running it continuously on Railway
+
+Set two variables on the existing service — no second service, no second volume:
+
+```
+WATCH_ENABLED=true
+WATCH_EVERY_SEC=3600     # optional, floored at 300
+```
+
+The watcher then runs in-process on a timer, the way `tvl`, `entities` and `payments` already do.
+It logs one line per pass rather than the full report, and only what changed:
+
+```
+[watch] enabled — checking the chain profile every 60 min
+[watch] Arc testnet: 0 failed, 1 to review
+```
+
+**Why not a Railway cron service.** Railway cron runs a service's start command on a schedule and
+requires the process to exit — which `npm run watch` does, cleanly, in about 25 seconds. But a cron
+service needs its own volume, and therefore its own database: the watcher's whole value is comparing
+this pass to the last one, and that record would live outside the volume `backup.js` snapshots. It
+would also be a second service to configure and pay for. Sharing the process shares the database, and
+a pass costs about 25 seconds an hour against an indexer that polls every seven seconds. Measured: the
+server answered `/api/health` in 4 ms during a pass.
+
+The first pass is delayed two minutes after boot and the interval is offset from the hour, so a
+redeploy never lands a watch pass on top of the initial backfill — they would compete for the same
+rate-limited endpoints.
+
+Off unless `WATCH_ENABLED=true`: it writes to the database and it can send Telegram messages. Both
+should be deliberate rather than a consequence of a deploy.
+
 **This is the only mode that writes.** A plain `npm run verify` stays strictly read-only, which is
 what makes it safe to point at production. `--watch` stores what it saw in `watch_subjects` so the
 next run has something to compare against.
