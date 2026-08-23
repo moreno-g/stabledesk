@@ -119,6 +119,47 @@ for the same reason.
 
 ---
 
+## Watching for drift — `npm run watch`
+
+`npm run verify` answers *does the profile match the chain right now*. That is the right question
+before a deploy and the wrong one on a schedule: run it hourly and it restates the present hourly, so
+the one run where something is different reads exactly like the fifty before it.
+
+```bash
+npm run watch            # one pass: report what changed since the last pass, then exit
+npm run watch -- --every 3600   # loop, for a host with no scheduler
+```
+
+One pass and exit is the default because it composes with cron, a Railway job, or a deploy line.
+
+**This is the only mode that writes.** A plain `npm run verify` stays strictly read-only, which is
+what makes it safe to point at production. `--watch` stores what it saw in `watch_subjects` so the
+next run has something to compare against.
+
+The first run records a baseline and announces nothing — everything is new the first time you look.
+
+What it reports:
+
+| | |
+|---|---|
+| `FIRST SEEN` | A contract emitting transfers that we had not observed before. *First seen*, not *new*: the pass samples a slice of recent blocks, so this means we saw it, not that it was deployed since the last check. |
+| `CHANGED` | An identity moved under a stable address — a symbol, a decimals field, bytecode that vanished. For a tracked token this is the expensive kind. |
+| `QUIET` | A tracked asset that is still deployed, still answers every call, and has stopped producing transfers. **This is the USYC case**, and it is the one no single check can report, because nothing about it is wrong. |
+| `GONE` | Something we knew about has been absent from several consecutive samples. |
+
+Absence has to repeat before it is reported — a contract missing from one sample may simply have been
+quiet for those few hundred blocks. Same rule the identity probe uses on unanswered calls.
+
+Findings above the severity bar go to Telegram when `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` are set;
+everything else is logged. A tracked token changing its decimals is worth interrupting someone for; a
+memecoin appearing is a line in a log. A watcher that forwards everything teaches its reader to ignore
+it — the same reasoning behind `chainalert.js` announcing transitions and never conditions.
+
+**It drafts and stops there.** Nothing here posts anywhere, by design: `COMMS.md` makes a human the
+interpolation step for anything published, and this is on the measurement side of that line.
+
+---
+
 ## Backups — what cannot be re-indexed
 
 Most of the database can be rebuilt by pointing the indexer at the chain again. Four tables cannot,

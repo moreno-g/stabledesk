@@ -204,6 +204,26 @@ db.exec(`
     error TEXT                            -- the error that caused it, for non-live states
   );
   CREATE INDEX IF NOT EXISTS idx_chain_events_at ON chain_events(at);
+
+  -- What the chain looked like last time we checked, so a check can report what *changed* rather
+  -- than restating the present. verify-network.js on its own is stateless: it can say USDC.b exists,
+  -- and never that USDC.b appeared this morning. The drift it was written for — a tracked token going
+  -- dormant while a lookalike carried the volume — is only visible as a difference over time.
+  --
+  -- One row per observed subject. The miss counter is what keeps a sampled absence from being read
+  -- as a disappearance: the discovery pass looks at a slice of recent blocks, so a contract missing
+  -- from one sample has not necessarily gone anywhere. Same rule as everywhere else — silence has to
+  -- repeat before it counts as an answer.
+  CREATE TABLE IF NOT EXISTS watch_subjects (
+    id          TEXT PRIMARY KEY,      -- kind:address, e.g. 'token:0x36…' or 'seen:0x9a8e…'
+    kind        TEXT NOT NULL,
+    facts       TEXT NOT NULL,         -- JSON: the identity we last observed, never the volatile values
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,      -- last check that found it present/active
+    last_check  INTEGER NOT NULL,
+    misses      INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_watch_kind ON watch_subjects(kind);
 `);
 
 // Migrations, safe on existing DBs:
@@ -959,6 +979,43 @@ export function chainEventsSince(from) {
 // How long the per-day rollup of the largest transfers is kept. Matches tvl_history: long enough to
 // be a record, bounded so it cannot become the biggest table in the file.
 const TOP_KEEP_DAYS = 180;
+
+// ---- what the chain looked like last time (see chainwatch.js) ----
+const wstmt = {
+  all: db.prepare('SELECT id, kind, facts, first_seen, last_seen, last_check, misses FROM watch_subjects'),
+  up: db.prepare(`INSERT INTO watch_subjects(id, kind, facts, first_seen, last_seen, last_check, misses)
+      VALUES(?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      facts = excluded.facts, last_seen = excluded.last_seen,
+      last_check = excluded.last_check, misses = excluded.misses`),
+  del: db.prepare('DELETE FROM watch_subjects WHERE id = ?'),
+};
+
+// Returns the previous observation keyed by subject id, with facts already parsed.
+export function watchSubjects() {
+  const out = new Map();
+  for (const r of wstmt.all.all()) {
+    let facts = {};
+    try { facts = JSON.parse(r.facts); } catch { /* a corrupt row is treated as unknown, not as a change */ }
+    out.set(r.id, { id: r.id, kind: r.kind, facts, firstSeen: r.first_seen, lastSeen: r.last_seen, lastCheck: r.last_check, misses: r.misses });
+  }
+  return out;
+}
+
+// Writes the new observation. Called once per check, after the diff has been taken against it.
+export function putWatchSubjects(rows) {
+  db.exec('BEGIN');
+  try {
+    for (const r of rows) {
+      wstmt.up.run(r.id, r.kind, JSON.stringify(r.facts || {}), r.firstSeen, r.lastSeen, r.lastCheck, r.misses || 0);
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+export const dropWatchSubject = (id) => wstmt.del.run(id);
 
 export function prune(nowSec, latestBlock, blockMs) {
   tvstmt.histPrune.run(nowSec - 180 * 86400);
