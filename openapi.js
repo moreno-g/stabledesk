@@ -1016,7 +1016,21 @@ function build() {
         FilteredAddresses: {
           type: 'object',
           properties: {
-            flagged: { type: 'integer' },
+            flagged: { type: 'integer', description: 'Addresses actually in the flag set.' },
+            // These four are the mechanism that says adjusted volume is a lower bound, and they were
+            // served without ever being declared — so a generated, typed client dropped them silently
+            // and its user could never learn the set was truncated. An honesty signal that exists only
+            // in the JSON and not in the contract is an honesty signal for people reading curl output.
+            qualifying: {
+              type: ['integer', 'null'],
+              description: 'How many addresses the published thresholds select, before the cap is applied. Equal to flagged in the ordinary case; larger when the cap is binding.',
+            },
+            cap: { type: ['integer', 'null'], description: 'Ceiling on the size of the flag set.' },
+            atCap: {
+              type: 'boolean',
+              description: 'True when qualifying exceeds cap. Which addresses are flagged is then decided by the cap and a volume ordering rather than by the published thresholds, so adjusted volume is a lower bound on what the rule would exclude. Raw and real volume are unaffected.',
+            },
+            warning: { type: 'string', description: 'Present only while atCap is true, spelling out the consequence in prose.' },
             thresholds: {
               type: 'object',
               description: 'Per-day rates. Visa/Allium exclude an address exceeding 1,000 transactions or $10M of volume in a month; these are the same limits expressed daily, because the retained window is rolling rather than a calendar month.',
