@@ -2,7 +2,7 @@
 // Run: npm test   (uses the built-in node:test runner — still zero dependencies)
 
 import { test } from 'node:test';
-import { normalizePath, dayOf, countable, keyPrefix } from '../usage.js';
+import { normalizePath, dayOf, countable, keyPrefix, buildDigest, QUIET_DAYS_BEFORE_HEARTBEAT } from '../usage.js';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1664,4 +1664,50 @@ test('usage: a key is never rendered in full', () => {
   assert.ok(shown.startsWith('sbd_'));
   assert.equal(keyPrefix(null), '—');
   assert.equal(keyPrefix('not-a-key'), '—');
+});
+
+// ---- the daily digest (usage.js) ----
+// The interesting property is not the formatting, it is when the digest declines to speak: a
+// message every day saying nothing trains its reader to ignore it, and pure silence cannot be
+// told apart from a broken sender.
+
+test('digest: a quiet day says nothing', () => {
+  assert.equal(buildDigest({ day: dayOf(), quietDays: 1 }), null);
+  assert.equal(buildDigest({ day: dayOf(), quietDays: 3 }), null);
+  assert.equal(buildDigest({ day: dayOf(), routes: [], keys: [], created: [], quietDays: 6 }), null);
+});
+
+test('digest: prolonged silence eventually confirms itself', () => {
+  const out = buildDigest({ day: dayOf(), quietDays: QUIET_DAYS_BEFORE_HEARTBEAT });
+  assert.ok(out, 'silence must become a message before the reader assumes it is broken');
+  assert.match(out, /7 days/);
+});
+
+test('digest: any activity is reported, however small', () => {
+  const oneCall = buildDigest({ day: dayOf(), routes: [{ path: '/v1/tvl', count: 1 }], quietDays: 1 });
+  assert.ok(oneCall && oneCall.includes('/v1/tvl'));
+  // a new key with no calls is still news — it means someone decided to build against this
+  const oneKey = buildDigest({ day: dayOf(), created: [{ key: 'sbd_' + 'a'.repeat(32), label: 'x' }], quietDays: 1 });
+  assert.ok(oneKey && oneKey.includes('1 new key'));
+});
+
+test('digest: a whole key never reaches the message', () => {
+  const key = 'sbd_' + 'a'.repeat(32);
+  const out = buildDigest({
+    day: dayOf(),
+    keys: [{ key, label: null, count: 3, tier: 'free' }],
+    created: [{ key, label: null }],
+    totalKeys: 1, quietDays: 1,
+  });
+  assert.ok(!out.includes(key), 'Telegram is a third party — the key must not be in the message');
+  assert.ok(out.includes('sbd_'), 'the prefix is still there, to tell two keys apart');
+});
+
+test('digest: the day reported is a closed one', () => {
+  // yesterday, not today — a digest of a day still running is a partial count shown as a total
+  const today = dayOf(Date.UTC(2026, 7, 23, 9, 0, 0));
+  const yesterday = today - 86400;
+  const out = buildDigest({ day: yesterday, routes: [{ path: '/v1/tvl', count: 1 }], quietDays: 1 });
+  assert.match(out, /2026-08-22/);
+  assert.ok(!out.includes('2026-08-23'));
 });

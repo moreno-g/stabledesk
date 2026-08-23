@@ -65,3 +65,52 @@ export const countable = (status) => Number.isInteger(status) && status >= 200 &
 // A key is a credential. It is never sent anywhere, never logged, and never returned by the admin
 // route — only this prefix is, which is enough to tell two keys apart and useless to a thief.
 export const keyPrefix = (key) => (typeof key === 'string' && key.startsWith('sbd_') ? key.slice(0, 12) + '…' : '—');
+
+// ---- the daily digest ----
+//
+// A digest that arrives every day saying "0 calls" trains its reader to stop opening it, and a
+// digest that only ever arrives on busy days leaves silence ambiguous — the reader cannot tell a
+// quiet day from a broken sender. Neither is monitoring.
+//
+// So: a day with anything to report is sent. A quiet day is not, until enough quiet days have
+// passed that the silence itself needs confirming, and then a single line goes out saying nothing
+// happened and that this is known rather than assumed. The same reasoning the chain watcher uses
+// before it goes quiet about a subject.
+export const QUIET_DAYS_BEFORE_HEARTBEAT = 7;
+
+const fmtDay = (day) => new Date(day * 1000).toISOString().slice(0, 10);
+
+// Returns the message to send, or null to stay quiet. Pure: every input is passed in, so what the
+// digest would say on any given day is testable without a database or a clock.
+export function buildDigest({ day, routes = [], keys = [], created = [], totalKeys = 0, quietDays = 0 }) {
+  const calls = routes.reduce((n, r) => n + r.count, 0);
+  const busy = calls > 0 || created.length > 0;
+
+  if (!busy) {
+    if (quietDays < QUIET_DAYS_BEFORE_HEARTBEAT) return null;
+    return `Stabledesk · ${fmtDay(day)}\nNo API calls and no new keys for ${quietDays} days. Still watching — this line exists so silence stays distinguishable from a broken digest.`;
+  }
+
+  const lines = [`Stabledesk · ${fmtDay(day)}`, ''];
+
+  lines.push(`${calls} API call${calls === 1 ? '' : 's'}`);
+  for (const r of routes.slice(0, 8)) lines.push(`  ${r.path}  ${r.count}`);
+  if (routes.length > 8) lines.push(`  … and ${routes.length - 8} more route(s)`);
+
+  // Which keys called, not just how many calls there were. A key that calls is someone building;
+  // a key that never calls again is someone who looked once. Only the digest can tell them apart.
+  if (keys.length) {
+    lines.push('', `${keys.length} key${keys.length === 1 ? '' : 's'} active`);
+    for (const k of keys.slice(0, 5)) {
+      lines.push(`  ${k.label ? '"' + String(k.label).slice(0, 40) + '"' : keyPrefix(k.key)}  ${k.count} call${k.count === 1 ? '' : 's'}${k.tier === 'pro' ? '  · pro' : ''}`);
+    }
+  }
+
+  if (created.length) {
+    lines.push('', `${created.length} new key${created.length === 1 ? '' : 's'}`);
+    for (const k of created.slice(0, 5)) lines.push(`  ${k.label ? '"' + String(k.label).slice(0, 40) + '"' : keyPrefix(k.key)}`);
+  }
+
+  lines.push('', `${totalKeys} key${totalKeys === 1 ? '' : 's'} in total`);
+  return lines.join('\n');
+}

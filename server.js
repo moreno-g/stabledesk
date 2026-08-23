@@ -21,7 +21,8 @@ import { CATEGORIES, PROTOCOLS, protocolById } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
-import { normalizePath, dayOf, countable, keyPrefix } from './usage.js';
+import { normalizePath, dayOf, countable, keyPrefix, buildDigest, QUIET_DAYS_BEFORE_HEARTBEAT } from './usage.js';
+import { sendTelegram, configured as tgConfigured } from './telegram.js';
 import { specJson, llmsTxt } from './openapi.js';
 import { runOnce } from './verify-network.js';
 import { RANGES, ADDR_RE, clampLimit, alignToBucket, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED, WHALEWATCH_ENABLED, WATCH_ENABLED, WATCH_EVERY_SEC, SITE_ORIGIN } from './constants.js';
@@ -235,6 +236,46 @@ function adminOk(req, u) {
   const b = Buffer.from(ADMIN_TOKEN);
   if (a.length !== b.length) return false;
   try { return timingSafeEqual(a, b); } catch { return false; }
+}
+
+// ---- the daily usage digest ----
+//
+// Reports yesterday, not today: a digest of a day still in progress is a partial count presented as
+// a total, and this project publishes windows that have actually closed.
+//
+// The once-a-day guard lives in the database rather than in a variable, because Railway restarts on
+// every deploy — an in-memory guard would re-send after each one, or skip a day, depending on the
+// hour. The day already sent is the state; the process holds none.
+const DIGEST_HOUR = Math.min(23, Math.max(0, Number(process.env.DIGEST_HOUR ?? 9)));
+const DIGEST_KEY = 'usage_digest_last_day';
+const QUIET_KEY = 'usage_digest_quiet_days';
+
+async function maybeSendDigest(now = new Date()) {
+  if (!tgConfigured) return false;
+  if (now.getUTCHours() < DIGEST_HOUR) return false;
+
+  const yesterday = dayOf(now.getTime()) - 86400;
+  if (Number(db.getMetaValue(DIGEST_KEY) || 0) >= yesterday) return false;   // already reported
+
+  const routes = db.routesOnDay(yesterday);
+  const keys = db.keysOnDay(yesterday);
+  const created = db.keysCreatedOn(yesterday * 1000, (yesterday + 86400) * 1000);
+  const quietDays = Number(db.getMetaValue(QUIET_KEY) || 0) + 1;
+
+  const text = buildDigest({
+    day: yesterday, routes, keys, created,
+    totalKeys: db.keyTotal(), quietDays,
+  });
+
+  // The day is marked reported either way. A quiet day that produced no message is still a day that
+  // has been looked at, and re-examining it tomorrow would double-count the silence.
+  db.setMetaValue(DIGEST_KEY, String(yesterday));
+  const busy = routes.length > 0 || created.length > 0;
+  db.setMetaValue(QUIET_KEY, busy ? '0' : String(quietDays >= QUIET_DAYS_BEFORE_HEARTBEAT ? 0 : quietDays));
+
+  if (!text) return false;
+  try { await sendTelegram(text); return true; }
+  catch (e) { console.error('[digest] send failed:', e.message); return false; }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -569,9 +610,19 @@ server.listen(PORT, () => {
     console.log('[whalewatch] enabled — notable transfers will be delivered to Telegram');
     whalewatch.start();
   }
+  // Checked hourly rather than scheduled for one instant: a process that happened to be restarting
+  // at the scheduled minute would otherwise skip the day entirely, and a deploy is exactly the kind
+  // of thing that happens in the morning. The database holds which day was last reported, so the
+  // extra checks cost one indexed read and send nothing.
+  if (tgConfigured) {
+    console.log(`[digest] enabled — daily usage summary after ${String(DIGEST_HOUR).padStart(2, '0')}:00 UTC`);
+    const tick = () => { maybeSendDigest().catch((e) => console.error('[digest]', e.message || e)); };
+    setTimeout(() => { tick(); digestTimer = setInterval(tick, 3600 * 1000); }, 90000).unref();
+  }
 });
 
 let watchTimer = null;
+let digestTimer = null;
 let shuttingDown = false;
 function shutdown() {
   if (shuttingDown) return;
@@ -581,6 +632,7 @@ function shutdown() {
   payments.stop();                 // stop the payment poller
   whalewatch.stop();               // stop the notable-transfer poster (no-op when disabled)
   if (watchTimer) clearInterval(watchTimer);  // stop the chain watcher
+  if (digestTimer) clearInterval(digestTimer);  // stop the daily digest
   entities.stop();                 // stop the entity derivation loop
   tvl.stop();                      // stop the TVL balance scanner
   server.close(() => { try { db.close(); } catch {} process.exit(0); });
