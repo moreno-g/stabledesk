@@ -1,6 +1,8 @@
 // Public data API (/v1) — API keys, tiers, rate limiting. The monetization layer.
 
 import { randomBytes } from 'node:crypto';
+import { sendTelegram, configured as tgConfigured } from './telegram.js';
+import { keyPrefix } from './usage.js';
 import * as db from './db.js';
 import { live, chainStatus, organicIssuance, indexProgress } from './indexer.js';
 import * as tvl from './tvl.js';
@@ -13,6 +15,39 @@ import { getLabel } from './labels.js';
 import { RANGES, TIERS, clampLimit, alignToBucket, TOKEN_SYMBOLS, TOKEN_LIST, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
 import { validateWebhookHost } from './validate.js';
 import { CHAIN } from './chains.js';
+
+// A key being minted is the one event on this API worth interrupting someone for: it means a
+// stranger decided to build against it. Everything else is a number to look at later.
+//
+// Three deliberate constraints. The key itself is never sent — Telegram is a third party, and a
+// credential that leaves this process is a credential that has left. Delivery is fire-and-forget,
+// because a message that fails to send must not fail the key creation that prompted it. And the
+// hourly ceiling exists because key minting is rate-limited per IP but not globally: without it,
+// someone with a handful of addresses could turn this into a way to flood a phone.
+const NOTIFY_MAX_PER_HOUR = 12;
+let notifyWindow = 0;
+let notifySent = 0;
+
+export function notifyKeyCreated(rec, total) {
+  if (!tgConfigured) return;
+  const hour = Math.floor(Date.now() / 3600000);
+  if (hour !== notifyWindow) { notifyWindow = hour; notifySent = 0; }
+  if (notifySent >= NOTIFY_MAX_PER_HOUR) return;
+  notifySent += 1;
+
+  const label = rec.label ? `"${String(rec.label).slice(0, 60)}"` : '(no label)';
+  const text = [
+    'New API key',
+    `  label: ${label}`,
+    `  tier: ${rec.tier}`,
+    `  prefix: ${keyPrefix(rec.key)}`,
+    `  keys in total: ${total}`,
+  ].join('\n');
+
+  // Detached on purpose: the HTTP response must not wait on Telegram, and a Telegram outage must
+  // not surface as an API error to someone who just successfully got a key.
+  sendTelegram(text).catch((e) => console.error('[api] key notification failed:', e.message));
+}
 
 // fixed-window in-memory rate limiter, per key per minute
 const rl = new Map();
@@ -146,6 +181,7 @@ export async function handleV1(req, res, u) {
     if (body.__tooLarge) return json(res, { error: 'body_too_large', hint: `Request body must be under ${BODY_MAX} bytes.` }, 413);
     const key = 'sbd_' + randomBytes(16).toString('hex');
     const rec = db.createKey(key, String(body.label || '').slice(0, 60), 'free');
+    notifyKeyCreated({ ...rec, key }, db.keyTotal());
     return json(res, { key, tier: rec.tier, rpm: TIERS.free.rpm, docs: '/docs', note: 'Send this as the X-API-Key header on /v1 requests.' }, 201);
   }
 

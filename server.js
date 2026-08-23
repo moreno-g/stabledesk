@@ -5,7 +5,7 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 
 import * as db from './db.js';
@@ -21,6 +21,7 @@ import { CATEGORIES, PROTOCOLS, protocolById } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
+import { normalizePath, dayOf, countable, keyPrefix } from './usage.js';
 import { specJson, llmsTxt } from './openapi.js';
 import { runOnce } from './verify-network.js';
 import { RANGES, ADDR_RE, clampLimit, alignToBucket, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED, WHALEWATCH_ENABLED, WATCH_ENABLED, WATCH_EVERY_SEC, SITE_ORIGIN } from './constants.js';
@@ -221,9 +222,31 @@ function apiThrottle(req) {
 }
 setInterval(() => { const win = Math.floor(Date.now() / 60000); for (const [k, e] of apiRl) if (e.win < win) apiRl.delete(k); }, 60000).unref();
 
+// Private usage route. Unset by default: a deployment with no token behaves as though the route
+// does not exist, which is the right default for something that reports on the operator's own
+// traffic. Set ADMIN_TOKEN in the environment to enable it.
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+
+// Compared in constant time. String equality on a secret leaks its length and how far a guess got
+// through timing — a small leak, but the fix costs one function call.
+function adminOk(req, u) {
+  const given = String(req.headers['x-admin-token'] || u.searchParams.get('token') || '');
+  const a = Buffer.from(given);
+  const b = Buffer.from(ADMIN_TOKEN);
+  if (a.length !== b.length) return false;
+  try { return timingSafeEqual(a, b); } catch { return false; }
+}
+
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://localhost');
   const path = u.pathname;
+
+  // Count the machine-readable surfaces (see usage.js). Hooked on 'finish' rather than inline so
+  // one listener covers every route below regardless of how it returns, and so the status is known
+  // — a 404 is someone knocking, not usage, and counting it would let anyone inflate the numbers by
+  // requesting routes that do not exist.
+  const label = normalizePath(path);
+  if (label) res.on('finish', () => { if (countable(res.statusCode)) db.recordHit(label, dayOf()); });
 
   // public data API (keys + tiers + rate limiting)
   if (path.startsWith('/v1')) return handleV1(req, res, u);
@@ -231,6 +254,37 @@ const server = http.createServer(async (req, res) => {
   // internal API for the dashboard (same-origin, no key) — coarse per-IP throttle to blunt abuse
   if (path.startsWith('/api/')) {
     if (!apiThrottle(req)) return json(res, { error: 'rate_limited' }, 429);
+  }
+
+  // ---- private: what the JavaScript tracker cannot see ----
+  // Answers 404 rather than 401 when no token is configured, and on a wrong token. A 401 would
+  // confirm the route exists and turn it into something worth guessing at; an unconfigured
+  // deployment should look exactly like one that never had the feature.
+  if (path === '/api/admin/usage') {
+    if (!ADMIN_TOKEN || !adminOk(req, u)) { res.writeHead(404, SEC); return res.end('not found'); }
+    const days = Math.min(365, Math.max(1, Number(u.searchParams.get('days')) || 30));
+    const sinceDay = dayOf() - (days - 1) * 86400;
+    const dayMs = 86400000;
+    return json(res, {
+      windowDays: days,
+      since: sinceDay * 1000,
+      // Route labels, never raw paths — see usage.js. No IP, no user agent, no key is recorded.
+      routes: db.hitsByPath(sinceDay),
+      daily: db.hitsByDay(sinceDay),
+      keys: {
+        total: db.keyTotal(),
+        createdLast7d: db.keysCreatedSince(Date.now() - 7 * dayMs),
+        createdLast30d: db.keysCreatedSince(Date.now() - 30 * dayMs),
+        usedLast7d: db.keysActiveSince(Date.now() - 7 * dayMs),
+        // Prefixes only. A key is a credential; the whole point of this route is to tell keys
+        // apart, which a prefix does, not to hand them back in readable form.
+        recent: db.keysRecent(20).map((k) => ({
+          key: keyPrefix(k.key), label: k.label, tier: k.tier,
+          created: k.created, requests: k.requests, lastUsed: k.last_used,
+        })),
+      },
+      note: 'Counts calls to /v1, /openapi.json and /llms.txt. Human page views are in Umami; these are the surfaces it cannot see.',
+    });
   }
   // TVL is merged in here rather than computed by the indexer: it comes from a separate scan loop on
   // its own cadence, and tvl.total() is a single summed query so the dashboard's polling stays cheap.
