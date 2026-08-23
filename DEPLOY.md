@@ -77,6 +77,48 @@ at this stage.
 
 ---
 
+## Before every deploy — verify the profile against the chain
+
+```bash
+npm run verify
+```
+
+`chains.js` is the single switch between networks and everything downstream trusts it completely:
+token addresses, decimals, symbols, the Gateway pair, the registry. Nothing else checks that any of it
+is still true, because no test talks to the chain.
+
+On 22 August 2026 a manual check found it was not. The tracked USYC contract had gone dormant while a
+second deployment carried all the activity — one transfer against 722 over the same window — and USDT
+had been trading for weeks, with **18 decimals**, untracked. On testnet that is faucet money. On
+mainnet a decimals field off by twelve overstates a figure by a factor of a trillion, and the result
+still looks like a number.
+
+The script reads the chain and writes nothing. It exits **1** on any FAIL, so it can gate a deploy:
+
+```bash
+npm run verify && railway up
+```
+
+**FAIL** means the profile asserts something the chain contradicts — an endpoint on the wrong chain, a
+token address with no bytecode, a symbol or decimals mismatch. Publishing under it would serve wrong
+numbers. **WARN** means the chain moved in a way worth reading: an asset emitting transfers that is not
+tracked, a registry contract that is no longer deployed, a wrapper whose supply is exactly the
+collateral it holds (which must be registered as a protocol, never tracked as issuance — counting both
+reports the same money twice).
+
+Useful flags: `--json` for a machine-readable result, `--blocks N` to widen the discovery sample.
+
+**On launch day**, run it against mainnet before starting the indexer:
+
+```bash
+ARC_NETWORK=mainnet npm run verify
+```
+
+It will refuse to run at all if the mainnet variables are missing — the same refusal `chains.js` makes,
+for the same reason.
+
+---
+
 ## Backups — what cannot be re-indexed
 
 Most of the database can be rebuilt by pointing the indexer at the chain again. Four tables cannot,

@@ -1,0 +1,524 @@
+// Checks the active network profile against the chain it claims to describe.
+//
+//   node verify-network.js                 # human-readable report; exit 1 if anything FAILs
+//   ARC_NETWORK=mainnet node verify-network.js
+//   node verify-network.js --json          # machine-readable, for a deploy gate
+//   node verify-network.js --blocks 4000   # widen the discovery sample
+//
+// Why this exists. chains.js is the single switch between networks, and everything downstream trusts
+// it completely: token addresses, decimals, symbols, the Gateway pair, the registry. Nothing verifies
+// that any of it is still true. On 22 August 2026 a manual check found that it was not — the tracked
+// USYC contract had gone dormant while a second deployment carried all the activity, and USDT had
+// been trading on the chain for weeks with 18 decimals while we did not track it at all. Both were
+// found by hand. Neither would have been noticed by any test, because no test talks to the chain.
+//
+// That is a tolerable failure on a testnet full of faucet money. On mainnet it is the failure this
+// codebase is otherwise built to refuse: numbers that look plausible and are wrong. A decimals field
+// off by twelve overstates a figure by a factor of a trillion, and nothing anywhere would complain.
+//
+// So: run it before a deploy, run it on launch day, run it on a schedule. It writes nothing, reads
+// nothing but the chain, and fails loudly.
+
+// Loaded on demand, not statically. chains.js throws by design when a mainnet variable is missing —
+// refusing to boot rather than quietly serving testnet figures under a mainnet banner — and that
+// message is the most useful thing this script can print on launch day. A static import throws before
+// any of our code runs, so it arrives as a raw stack trace with the explanation buried in it.
+// Deferring also lets the tests import the classification helpers below without touching a profile.
+let CHAIN; let NETWORK; let PROTOCOLS;
+async function loadProfile() {
+  try {
+    ({ CHAIN, NETWORK } = await import('./chains.js'));
+    ({ PROTOCOLS } = await import('./protocols.js'));
+  } catch (e) {
+    console.error('\nThe network profile refused to load:\n');
+    console.error('  ' + String(e.message || e).split('. ').join('.\n  '));
+    console.error('\nNothing was verified. This is the same refusal the server makes at boot.');
+    process.exit(2);
+  }
+}
+
+const args = process.argv.slice(2);
+const JSON_OUT = args.includes('--json');
+const flag = (name, dflt) => {
+  const i = args.indexOf(name);
+  return i >= 0 && args[i + 1] ? Number(args[i + 1]) : dflt;
+};
+const SAMPLE_BLOCKS = flag('--blocks', 1500);
+
+const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+const SEL = { name: '0x06fdde03', symbol: '0x95d89b41', decimals: '0x313ce567', totalSupply: '0x18160ddd' };
+const BALANCE_OF = '0x70a08231';
+
+// How many Transfer events an unknown contract needs in the sample before it is worth reporting.
+// Below this it is noise: a test deployment nobody uses is not a gap in our coverage.
+const DISCOVERY_MIN_EVENTS = 20;
+
+// A textual marker that an asset is denominated in a fiat unit. Deliberately a note on the name, not
+// a judgement about the asset: a token called USDC.b is worth a human look on a stablecoin index and
+// a token called ARC WIF CAT is not, and saying which is which is the reader's job, not this script's.
+// Used only to order the report so the candidates that matter are not buried under memecoins.
+// Currency codes and the words a stable asset tends to carry, split by how much they collide with
+// ordinary English. The first version knew eight currencies and pushed QCAD — a Canadian-dollar
+// stablecoin trading on this chain — into the 'nothing to see' pile; on an index claiming to measure
+// every stablecoin, a short currency list is a short list of assets it will quietly miss.
+//
+// But some ISO codes are also everyday words: PEN (Peruvian sol) is the start of Penguin, TRY (Turkish
+// lira) is a verb. Matched loosely they drag memecoins into the list that matters, which defeats the
+// sorting this exists to do. So they are only recognised as a whole symbol, never inside a name.
+//
+// This is a triage hint, not a classifier. It decides the order of a report a human reads; it never
+// decides what is tracked.
+const SAFE_CODES = ['usd','eur','gbp','jpy','chf','cad','aud','nzd','sgd','hkd','cny','cnh','krw',
+  'inr','idr','brl','mxn','rub','pln','czk','nok','dkk','zar','ngn','kes','ghs','egp','aed','sar',
+  'ils','uah','vnd','myr','twd','dai','stable','yield','peg','fiat','dollar','euro','franc','pound','yen'];
+const AMBIGUOUS_CODES = ['pen','try','sek','cop','clp','ars','php','thb','huf','won','real'];
+
+const SAFE_MARKER = new RegExp('\\b(' + SAFE_CODES.join('|') + ')', 'i');
+const isAmbiguous = (t) => AMBIGUOUS_CODES.includes(String(t || '').toLowerCase());
+
+// Names match on a word boundary; symbols are also tried with one leading letter removed, because
+// stable tickers routinely glue an issuer prefix to the currency — QCAD, XSGD, ZUSD, GYEN.
+export function looksFiat(name, symbol) {
+  const sym = String(symbol || '');
+  const stripped = sym.length >= 3 ? sym.slice(1) : '';
+  return SAFE_MARKER.test(String(name || ''))
+    || SAFE_MARKER.test(sym)
+    || (stripped && SAFE_MARKER.test(stripped))
+    || isAmbiguous(sym) || isAmbiguous(stripped);
+}
+
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const hex = (n) => '0x' + n.toString(16);
+
+// ---- findings ----------------------------------------------------------------------------------
+// Three levels, and the distinction is the whole point. FAIL means the configuration asserts
+// something the chain contradicts — serving figures under it would publish a wrong number. WARN
+// means something changed that a human should look at but that does not make any published figure
+// false. Only FAIL sets the exit code, so this can gate a deploy without crying wolf.
+const findings = [];
+const add = (level, check, message, detail) => findings.push({ level, check, message, detail });
+const fail = (check, message, detail) => add('FAIL', check, message, detail);
+const warn = (check, message, detail) => add('WARN', check, message, detail);
+const ok = (check, message, detail) => add('OK', check, message, detail);
+
+// ---- RPC ---------------------------------------------------------------------------------------
+// Deliberately not rpc.js: that layer picks one endpoint and sticks to it, which is right for the
+// indexer and wrong here — the first thing to verify is that *every* configured endpoint works.
+// It also rotates on rate limits, which the public endpoints apply aggressively enough that a naive
+// run reports phantom failures. A refused call must never be reported as a chain fact.
+let rr = 0;
+async function callOn(endpoint, batch) {
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(batch.map((c, i) => ({ jsonrpc: '2.0', id: i, ...c }))),
+    signal: AbortSignal.timeout(20000),
+  });
+  if (!res.ok) { const e = new Error(`HTTP ${res.status}`); e.status = res.status; throw e; }
+  const json = await res.json();
+  const arr = Array.isArray(json) ? json : [json];
+  const out = new Array(batch.length);
+  for (const item of arr) out[item.id] = item.error ? { __err: item.error.message } : item.result;
+  // Endpoints do not always return a slot for every call in a batch — some cap the batch, some cap
+  // the response size, and the reply simply comes back short. A hole left as undefined reads exactly
+  // like a definitive null downstream, which is how a run reported "EURC does not answer
+  // totalSupply()" about a contract that answers it on every endpoint, every time. A missing slot is
+  // a question that was never put, so it is marked as such and retried.
+  for (let i = 0; i < out.length; i++) {
+    if (out[i] === undefined) out[i] = { __err: 'no slot in response', __transient: true };
+  }
+  return out;
+}
+
+// Which per-call errors mean "we were not answered" as opposed to "the contract said no". The
+// distinction decides whether a null is a fact about the chain or a fact about the endpoint's mood,
+// and getting it wrong is how a verification tool invents failures: a rate-limited totalSupply() slot
+// reported as "EURC does not answer totalSupply()" is precisely the kind of confident wrong statement
+// this script exists to catch elsewhere.
+// Deliberately broad, and erring toward "retry" rather than "conclude". Endpoints word this a
+// dozen ways — Arc's public RPC says "request limit reached", which matched none of the first
+// version's patterns, so a refusal was read as EURC declining to state its own decimals. For a tool
+// whose whole job is to catch confident wrong statements, a false retry costs a few hundred
+// milliseconds and a false conclusion costs the entire point.
+export const TRANSIENT = /limit|too many|timeout|timed out|busy|try again|429|503|capacity|throttl|exceed|overload|unavailable/i;
+
+// Rotates endpoints and retries. Slots that came back as a genuine contract-level failure (a revert)
+// are handed back carrying { __err }, because that *is* the answer. Slots that were merely refused are
+// retried on another endpoint, individually if need be, until one of them answers or we run out.
+async function rpc(batch, attempts = 6) {
+  let out = new Array(batch.length).fill(undefined);
+  let pending = batch.map((_, i) => i);
+  let lastErr;
+
+  for (let a = 0; a < attempts && pending.length; a++) {
+    const ep = CHAIN.endpoints[rr++ % CHAIN.endpoints.length];
+    try {
+      const sub = await callOn(ep, pending.map((i) => batch[i]));
+      const stillPending = [];
+      sub.forEach((slot, j) => {
+        const idx = pending[j];
+        if (slot?.__err && TRANSIENT.test(slot.__err)) stillPending.push(idx);
+        else out[idx] = slot;
+      });
+      pending = stillPending;
+      if (pending.length) await sleep(500 * (a + 1));
+    } catch (e) { lastErr = e; await sleep(600 * (a + 1)); }
+  }
+  // Anything still unanswered is marked as such rather than as an empty result, so callers can tell
+  // "refused" from "reverted" and decline to draw a conclusion.
+  for (const i of pending) out[i] = { __err: 'unanswered', __transient: true };
+  if (pending.length === batch.length && lastErr) throw lastErr;
+  return out;
+}
+
+// True when a slot is the endpoint declining rather than the contract answering.
+export const refused = (slot) => !!(slot && slot.__err && (slot.__transient || TRANSIENT.test(slot.__err)));
+
+const call = (to, data) => ({ method: 'eth_call', params: [{ to, data }, 'latest'] });
+
+// Decodes a Solidity string return. Null for anything else — a revert, an empty return, or a value
+// that is not a string at all.
+export function decodeString(h) {
+  try {
+    if (typeof h !== 'string' || h === '0x' || h.length < 130) return null;
+    const b = h.slice(2);
+    const off = parseInt(b.slice(0, 64), 16) * 2;
+    const len = parseInt(b.slice(off, off + 64), 16) * 2;
+    if (!Number.isFinite(off) || !Number.isFinite(len) || len <= 0 || len > 256) return null;
+    const s = Buffer.from(b.slice(off + 64, off + 64 + len), 'hex').toString('utf8');
+    const clean = s.replace(/[^\x20-\x7e]/g, '').trim();
+    return clean.length ? clean.slice(0, 64) : null;
+  } catch { return null; }
+}
+const decodeNum = (h) => {
+  try { return (typeof h === 'string' && h !== '0x') ? BigInt(h) : null; } catch { return null; }
+};
+const units = (raw, decimals) => Number(raw) / 10 ** decimals;
+const fmt = (n) => (n == null ? '—' : n.toLocaleString('en-US', { maximumFractionDigits: 2 }));
+
+// ---- 1. endpoints ------------------------------------------------------------------------------
+async function checkEndpoints() {
+  let live = 0;
+  let head = null;
+  for (const ep of CHAIN.endpoints) {
+    const t = Date.now();
+    try {
+      const out = await callOn(ep, [{ method: 'eth_blockNumber', params: [] }, { method: 'eth_chainId', params: [] }]);
+      const ms = Date.now() - t;
+      const bn = decodeNum(out[0]);
+      const cid = decodeNum(out[1]);
+      if (bn == null || cid == null) { fail('endpoint', `${ep} answered but returned no block/chain id`); continue; }
+      // The one check that must never be skipped: an endpoint on the wrong chain would serve entirely
+      // real, entirely irrelevant numbers under this network's banner.
+      if (Number(cid) !== CHAIN.chainId) {
+        fail('endpoint', `${ep} is chain ${cid}, profile says ${CHAIN.chainId}`);
+        continue;
+      }
+      live += 1;
+      head = head == null ? Number(bn) : Math.max(head, Number(bn));
+      ok('endpoint', `${ep} · head ${Number(bn)} · ${ms}ms`);
+    } catch (e) {
+      warn('endpoint', `${ep} did not answer: ${e.message}`);
+    }
+  }
+  if (!live) fail('endpoint', 'no configured endpoint answered — the indexer cannot start');
+  else if (live < CHAIN.endpoints.length) warn('endpoint', `${live}/${CHAIN.endpoints.length} endpoints answering`);
+  return head;
+}
+
+// ---- 2. block time -----------------------------------------------------------------------------
+// Not a correctness check but a calibration one: the noise filter converts each address's block span
+// into days at this rate, so a chain running at a different speed than assumed shifts every flag.
+async function checkBlockTime(head) {
+  if (head == null) return null;
+  const span = Math.min(2000, head);
+  const out = await rpc([
+    { method: 'eth_getBlockByNumber', params: [hex(head), false] },
+    { method: 'eth_getBlockByNumber', params: [hex(head - span), false] },
+  ]);
+  const a = out[0]?.timestamp ? parseInt(out[0].timestamp, 16) : null;
+  const b = out[1]?.timestamp ? parseInt(out[1].timestamp, 16) : null;
+  if (a == null || b == null || a <= b) { warn('blocktime', 'could not measure block time from headers'); return null; }
+  const ms = ((a - b) / span) * 1000;
+  ok('blocktime', `${Math.round(ms)}ms over ${span} blocks`);
+  // The chain's own clock against ours. Buckets are keyed by block timestamps and every rolling
+  // window is anchored to them, so a large gap is worth knowing about before it shows up as a
+  // suspiciously quiet 24h figure.
+  const skew = Math.floor(Date.now() / 1000) - a;
+  if (Math.abs(skew) > 600) warn('clock', `head timestamp is ${fmt(skew)}s from wall clock — windows anchor to chain time`);
+  else ok('clock', `head timestamp within ${skew}s of wall clock`);
+  return ms;
+}
+
+// ---- 3. configured tokens ----------------------------------------------------------------------
+// Every field chains.js asserts about a token, asked of the token. This is the check that would have
+// caught both August failures.
+async function checkTokens() {
+  const entries = Object.entries(CHAIN.tokens);
+  const bySymbol = new Map();
+  for (const [addr, meta] of entries) {
+    const out = await rpc([
+      { method: 'eth_getCode', params: [addr, 'latest'] },
+      call(addr, SEL.symbol), call(addr, SEL.decimals), call(addr, SEL.totalSupply), call(addr, SEL.name),
+    ]);
+    const code = out[0];
+    const size = (typeof code === 'string' && code !== '0x') ? (code.length - 2) / 2 : 0;
+    if (!size) { fail('token', `${meta.symbol} ${addr} has no bytecode — nothing is deployed there`); continue; }
+
+    const symbol = decodeString(out[1]);
+    const decimals = decodeNum(out[2]);
+    const supply = decodeNum(out[3]);
+    const name = decodeString(out[4]);
+
+    if (refused(out[1])) warn('token', `${meta.symbol} ${addr}: symbol() could not be read (endpoint refused) — not verified`);
+    else if (symbol && symbol.toUpperCase() !== meta.symbol.toUpperCase()) {
+      fail('token', `${addr} is configured as ${meta.symbol} but calls itself ${symbol}`);
+    }
+    // The expensive one to get wrong. Every amount is divided by 10**decimals, so a mismatch of 12
+    // overstates or understates by a factor of a trillion — and the result still looks like a number.
+    if (refused(out[2])) {
+      // Not "it does not answer" — we did not get to ask. Saying otherwise would make this tool the
+      // thing it exists to catch.
+      warn('token', `${meta.symbol} ${addr}: decimals() could not be read (endpoint refused) — not verified`);
+    } else if (decimals == null) {
+      warn('token', `${meta.symbol} ${addr} does not answer decimals() — configured as ${meta.decimals}`);
+    } else if (Number(decimals) !== meta.decimals) {
+      fail('token', `${meta.symbol} ${addr} reports ${decimals} decimals, profile says ${meta.decimals}`,
+        `every ${meta.symbol} figure would be wrong by 10^${Math.abs(Number(decimals) - meta.decimals)}`);
+    }
+    if (refused(out[3])) warn('token', `${meta.symbol} ${addr}: totalSupply() could not be read (endpoint refused) — not verified`);
+    else if (supply == null) warn('token', `${meta.symbol} ${addr} does not answer totalSupply()`);
+
+    const human = (supply != null && decimals != null) ? units(supply, Number(decimals)) : null;
+    bySymbol.set(meta.symbol, (bySymbol.get(meta.symbol) || 0) + (human || 0));
+    if (symbol && Number(decimals) === meta.decimals && human != null) {
+      ok('token', `${meta.symbol} ${addr} · ${name || symbol} · ${meta.decimals} dec · supply ${fmt(human)}`);
+    }
+    await sleep(120);
+  }
+  // A symbol carried by several contracts is legitimate (Arc testnet has two USYC deployments) but it
+  // is never accidental, so it is stated rather than left to be discovered in a supply figure.
+  const counts = new Map();
+  for (const m of Object.values(CHAIN.tokens)) counts.set(m.symbol, (counts.get(m.symbol) || 0) + 1);
+  for (const [sym, n] of counts) {
+    if (n > 1) ok('token', `${sym} is tracked across ${n} contracts — supply is reported as their sum (${fmt(bySymbol.get(sym))})`);
+  }
+  return bySymbol;
+}
+
+// ---- 4. what we are not tracking ---------------------------------------------------------------
+// Samples recent blocks for Transfer events, groups them by emitting contract, and asks anything we
+// do not track what it is. This is exactly how USDT and the live USYC contract were found by hand.
+async function checkUntracked(head) {
+  if (head == null) return;
+  const tracked = new Set(Object.keys(CHAIN.tokens).map((a) => a.toLowerCase()));
+  const registry = new Set(PROTOCOLS.flatMap((p) => p.contracts).map((a) => a.toLowerCase()));
+  const counts = new Map();
+
+  // Three windows spread over recent history rather than one contiguous block, so a single quiet or
+  // unusually busy stretch does not decide the answer.
+  const per = Math.max(100, Math.floor(SAMPLE_BLOCKS / 3));
+  for (let w = 0; w < 3; w++) {
+    const end = head - w * per * 12;
+    const start = end - per + 1;
+    if (start < 0) break;
+    const logs = await getLogsSplit(start, end);
+    if (logs == null) { warn('discovery', `log sample ${start}-${end} could not be read`); continue; }
+    for (const l of logs) {
+      const a = l.address.toLowerCase();
+      counts.set(a, (counts.get(a) || 0) + 1);
+    }
+    await sleep(400);
+  }
+  if (!counts.size) { warn('discovery', 'no Transfer events sampled — cannot check for untracked assets'); return; }
+
+  const unknown = [...counts.entries()]
+    .filter(([a, n]) => !tracked.has(a) && n >= DISCOVERY_MIN_EVENTS)
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, 25);
+
+  const trackedEvents = [...counts.entries()].filter(([a]) => tracked.has(a)).reduce((s, [, n]) => s + n, 0);
+  ok('discovery', `${counts.size} contracts emitted Transfer in the sample · ${trackedEvents} events from tracked assets`);
+
+  const others = [];
+  for (const [addr, n] of unknown) {
+    const out = await rpc([call(addr, SEL.symbol), call(addr, SEL.decimals), call(addr, SEL.totalSupply), call(addr, SEL.name)]);
+    const symbol = decodeString(out[0]);
+    const decimals = decodeNum(out[1]);
+    const supply = decodeNum(out[2]);
+    const name = decodeString(out[3]);
+    await sleep(150);
+
+    // No decimals means it is not a fungible token — an NFT collection, or something else entirely.
+    // Reporting those as missing stablecoins would bury the ones that matter.
+    if (decimals == null) continue;
+    const human = supply != null ? units(supply, Number(decimals)) : null;
+
+    // Is it a wrapper? A contract whose supply equals a tracked asset it custodies is repositioning
+    // value, not issuing it, and counting it would report the same money twice — the same reasoning
+    // that keeps Circle Gateway out of issuance. Reported so the answer is "register it as a
+    // protocol", not "add it as a token".
+    const wrapped = await detectWrapper(addr, human);
+    const label = `${name || symbol || 'unnamed'}${symbol ? ` (${symbol})` : ''}`;
+    if (wrapped) {
+      const known = registry.has(addr);
+      // Reported as OK once it is registered: a wrapper we have already accounted for is not an open
+      // question, and leaving it as a warning would train the reader to skip the section.
+      const msg = `${addr} · ${label} · ${n} events · WRAPPER of ${wrapped.symbol} (holds ${fmt(wrapped.held)} against a supply of ${fmt(human)})`;
+      if (known) ok('untracked', msg, 'in the protocol registry — its balance counts once, as TVL, and never as issuance');
+      else warn('untracked', msg, 'do not track as issuance — register it as a protocol so its balance counts once, as TVL');
+    } else if (looksFiat(name, symbol)) {
+      // Named like a fiat-denominated asset, which on a stablecoin index is the set worth a decision.
+      warn('untracked', `${addr} · ${label} · ${Number(decimals)} dec · supply ${fmt(human)} · ${n} events`,
+        registry.has(addr) ? 'already in the protocol registry' : 'named like a fiat-denominated asset and not tracked — decide whether it belongs in ARC_TOKENS');
+    } else {
+      // Everything else is reported once, at the end, as a count rather than a wall of lines: a
+      // memecoin emitting Transfer is not a gap in stablecoin coverage, and listing forty of them
+      // would bury the one that is.
+      others.push(`${symbol || 'unnamed'} (${n})`);
+    }
+  }
+  if (others.length) {
+    ok('untracked', `${others.length} other token(s) above the threshold, none named like a fiat asset: ${others.slice(0, 12).join(', ')}`);
+  }
+  if (!unknown.length) ok('untracked', 'every contract emitting Transfer above the reporting threshold is already tracked');
+}
+
+// Providers cap eth_getLogs by the number of *results*, not by the number of blocks, so a fixed
+// window is not a fixed-size request: fine on a quiet stretch, refused on a busy one. Halving on
+// failure is what the indexer already does for the same reason — without it, a wide sample simply
+// reports "refused" and the discovery check silently stops looking.
+async function getLogsSplit(start, end, depth = 0) {
+  try {
+    const out = await rpc([{ method: 'eth_getLogs', params: [{ fromBlock: hex(start), toBlock: hex(end), topics: [TRANSFER_TOPIC] }] }], 3);
+    if (Array.isArray(out[0])) return out[0];
+  } catch { /* fall through to the split */ }
+  if (end <= start || depth >= 7) return null;
+  const mid = start + Math.floor((end - start) / 2);
+  const left = await getLogsSplit(start, mid, depth + 1);
+  await sleep(250);
+  const right = await getLogsSplit(mid + 1, end, depth + 1);
+  if (left == null && right == null) return null;
+  return [...(left || []), ...(right || [])];
+}
+
+// Compares a candidate's supply against the tracked assets it holds. Equality within a small margin
+// is the wrapper signature.
+async function detectWrapper(addr, supply) {
+  if (!supply || supply <= 0) return null;
+  const tokens = Object.entries(CHAIN.tokens);
+  const out = await rpc(tokens.map(([t]) => call(t, BALANCE_OF + '0'.repeat(24) + addr.slice(2))));
+  for (let i = 0; i < tokens.length; i++) {
+    const [, meta] = tokens[i];
+    const raw = decodeNum(out[i]);
+    if (raw == null) continue;
+    const held = units(raw, meta.decimals);
+    // A real wrapper matches to the cent, because its supply *is* the deposit: Wrapped USDC measured
+    // 68,920,980.30 on both sides. A one-percent tolerance let an LP token through whose backing merely
+    // happened to be close to its share supply — a false "wrapper" here would tell the operator not to
+    // track a genuine asset, so the test has to be tight enough to mean something.
+    if (held > 0 && Math.abs(held - supply) / supply < 0.0005) return { symbol: meta.symbol, held };
+  }
+  return null;
+}
+
+// ---- 5. Gateway --------------------------------------------------------------------------------
+async function checkGateway(head) {
+  if (!CHAIN.gateway) {
+    // Absence is a fact about the network, not a misconfiguration — every bridge-adjusted figure is
+    // then reported as null rather than as a measured zero. Worth restating on a launch day, because
+    // the day Circle adds Arc to the Gateway list this line becomes wrong.
+    ok('gateway', `no Gateway configured for ${CHAIN.label} — bridge figures are reported as null`);
+    return;
+  }
+  const addrs = [CHAIN.gateway.wallet, CHAIN.gateway.minter];
+  const out = await rpc(addrs.map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] })));
+  addrs.forEach((a, i) => {
+    const size = (typeof out[i] === 'string' && out[i] !== '0x') ? (out[i].length - 2) / 2 : 0;
+    if (!size) fail('gateway', `${a} has no bytecode — bridge attribution would silently measure nothing`);
+    else ok('gateway', `${a} · ${size} bytes`);
+  });
+}
+
+// ---- 6. registry -------------------------------------------------------------------------------
+// A registry entry pointing at an empty address attributes TVL to something that is not there.
+async function checkRegistry() {
+  const here = PROTOCOLS.filter((p) => (p.networks || ['testnet', 'mainnet']).includes(NETWORK));
+  const addrs = [...new Set(here.flatMap((p) => p.contracts))];
+  let missing = 0;
+  for (let i = 0; i < addrs.length; i += 6) {
+    const part = addrs.slice(i, i + 6);
+    const out = await rpc(part.map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] })));
+    part.forEach((a, j) => {
+      const size = (typeof out[j] === 'string' && out[j] !== '0x') ? (out[j].length - 2) / 2 : 0;
+      if (!size) {
+        missing += 1;
+        const owner = here.find((p) => p.contracts.includes(a));
+        warn('registry', `${owner?.name || '?'} lists ${a}, which has no bytecode on ${CHAIN.label}`);
+      }
+    });
+    await sleep(200);
+  }
+  if (!missing) ok('registry', `all ${addrs.length} registry contracts for ${NETWORK} are deployed`);
+}
+
+// ---- report ------------------------------------------------------------------------------------
+function report() {
+  const fails = findings.filter((f) => f.level === 'FAIL');
+  const warns = findings.filter((f) => f.level === 'WARN');
+
+  if (JSON_OUT) {
+    console.log(JSON.stringify({
+      network: NETWORK, label: CHAIN.label, chainId: CHAIN.chainId,
+      checkedAt: new Date().toISOString(),
+      pass: fails.length === 0, fails: fails.length, warns: warns.length,
+      findings,
+    }, null, 2));
+    return fails.length ? 1 : 0;
+  }
+
+  const icon = { OK: '  ok  ', WARN: ' warn ', FAIL: ' FAIL ' };
+  let group = null;
+  for (const f of findings) {
+    if (f.check !== group) { group = f.check; console.log(`\n── ${group}`); }
+    console.log(`${icon[f.level]} ${f.message}`);
+    if (f.detail) console.log(`        ↳ ${f.detail}`);
+  }
+  console.log(`\n${'─'.repeat(72)}`);
+  console.log(`${CHAIN.label} (${NETWORK}, chain ${CHAIN.chainId}) · ${fails.length} failed · ${warns.length} to review`);
+  if (fails.length) {
+    console.log('\nThe profile asserts something the chain contradicts. Serving figures under it would');
+    console.log('publish wrong numbers — fix chains.js (or ARC_TOKENS) before deploying.');
+  } else if (warns.length) {
+    console.log('\nNothing published would be wrong, but the chain has moved in ways worth a look.');
+  } else {
+    console.log('\nThe profile matches the chain.');
+  }
+  return fails.length ? 1 : 0;
+}
+
+// ---- run ---------------------------------------------------------------------------------------
+// Only when invoked directly. The classification helpers above are the part that has been wrong twice
+// and they need a test, which means the module has to be importable without firing a live run.
+const invokedDirectly = process.argv[1] && process.argv[1].endsWith('verify-network.js');
+if (!invokedDirectly) { /* imported for its helpers */ } else
+try {
+  await loadProfile();
+  if (!JSON_OUT) console.log(`Verifying ${CHAIN.label} (${NETWORK}, chain ${CHAIN.chainId}) against ${CHAIN.endpoints.length} endpoint(s)…`);
+  const head = await checkEndpoints();
+  if (head != null) {
+    await checkBlockTime(head);
+    await checkTokens();
+    await checkGateway(head);
+    await checkRegistry();
+    await checkUntracked(head);
+  }
+  process.exit(report());
+} catch (e) {
+  // A crash here is itself a finding: the script could not establish what the chain says, which is
+  // not the same as the chain agreeing with us.
+  console.error(`\nverify-network could not complete: ${e.message || e}`);
+  console.error('This is not a pass. Nothing was verified.');
+  process.exit(2);
+}
