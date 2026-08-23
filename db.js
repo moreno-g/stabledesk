@@ -136,6 +136,15 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 
+  -- Usage of the machine-readable surfaces (see usage.js). One row per route label per day.
+  -- Deliberately holds no IP, no user agent and no key: it answers "how many calls hit this
+  -- route today", which is a measure of usage rather than of people. Kept indefinitely — the
+  -- path set is bounded by normalisation, so this is a few rows a day forever.
+  CREATE TABLE IF NOT EXISTS hits (
+    path TEXT NOT NULL, day INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (path, day)
+  );
+
   CREATE TABLE IF NOT EXISTS api_keys (
     key TEXT PRIMARY KEY, label TEXT, tier TEXT NOT NULL DEFAULT 'free',
     created INTEGER, requests INTEGER NOT NULL DEFAULT 0, last_used INTEGER
@@ -1070,6 +1079,35 @@ export function prune(nowSec, latestBlock, blockMs) {
   stmt.trimTop.run(TOP_PER_DAY);
   stmt.pruneTop.run(nowSec - TOP_KEEP_DAYS * 86400);
 }
+
+// ---- usage counters (see usage.js) ----
+
+const ustmt = {
+  hit: db.prepare(`INSERT INTO hits (path, day, count) VALUES (?, ?, 1)
+    ON CONFLICT(path, day) DO UPDATE SET count = count + 1`),
+  byPath: db.prepare(`SELECT path, SUM(count) AS count FROM hits
+    WHERE day >= ? GROUP BY path ORDER BY count DESC`),
+  byDay: db.prepare(`SELECT day, SUM(count) AS count FROM hits
+    WHERE day >= ? GROUP BY day ORDER BY day`),
+  keyCount: db.prepare('SELECT COUNT(*) AS n FROM api_keys'),
+  keysRecent: db.prepare(`SELECT key, label, tier, created, requests, last_used
+    FROM api_keys ORDER BY created DESC LIMIT ?`),
+  keysActive: db.prepare('SELECT COUNT(*) AS n FROM api_keys WHERE last_used >= ?'),
+  keysSince: db.prepare('SELECT COUNT(*) AS n FROM api_keys WHERE created >= ?'),
+};
+
+// Counting must never be able to break a response that already succeeded, so this swallows its own
+// errors. A lost count is a lost count; a 500 caused by bookkeeping would be a real outage.
+export function recordHit(path, day) {
+  try { ustmt.hit.run(path, day); } catch { /* counting is not worth an error */ }
+}
+
+export const hitsByPath = (sinceDay) => ustmt.byPath.all(sinceDay);
+export const hitsByDay = (sinceDay) => ustmt.byDay.all(sinceDay);
+export const keyTotal = () => ustmt.keyCount.get().n;
+export const keysRecent = (n) => ustmt.keysRecent.all(n);
+export const keysActiveSince = (ms) => ustmt.keysActive.get(ms).n;
+export const keysCreatedSince = (ms) => ustmt.keysSince.get(ms).n;
 
 // Close the database (WAL checkpoint) for a clean shutdown.
 export const close = () => { try { db.close(); } catch { /* already closed */ } };

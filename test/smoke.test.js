@@ -2,6 +2,7 @@
 // Run: npm test   (uses the built-in node:test runner — still zero dependencies)
 
 import { test } from 'node:test';
+import { normalizePath, dayOf, countable, keyPrefix } from '../usage.js';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1585,4 +1586,82 @@ test('whalewatch: threshold filtering, drafting, and dedupe', async () => {
   assert.equal(db.pendingTweetDrafts().filter((r) => r.dedupe_key === d.dedupeKey).length, 1);
 
   db.close(); // last test in the file — safe to close the shared connection here
+});
+
+// ---- usage counting (usage.js) ----
+// The point of these is that the table cannot be made to grow without bound by a stranger, and
+// that nothing identifying can end up in it. Both are properties of normalizePath alone, so they
+// are testable without a database.
+
+test('usage: only the machine-readable surfaces are counted', () => {
+  assert.equal(normalizePath('/openapi.json'), '/openapi.json');
+  assert.equal(normalizePath('/llms.txt'), '/llms.txt');
+  assert.equal(normalizePath('/v1/tokens'), '/v1/tokens');
+  // the dashboard's own calls are the site talking to itself — already covered by Umami
+  assert.equal(normalizePath('/api/state'), null);
+  assert.equal(normalizePath('/'), null);
+  assert.equal(normalizePath('/methodology'), null);
+});
+
+test('usage: the route shape is kept, only parameters are replaced', () => {
+  // The endpoints must stay distinguishable — knowing /v1 was called is not the question,
+  // knowing which endpoint was called is.
+  assert.equal(normalizePath('/v1/tvl'), '/v1/tvl');
+  assert.equal(normalizePath('/v1/tvl/history'), '/v1/tvl/history');
+  assert.notEqual(normalizePath('/v1/tvl'), normalizePath('/v1/tvl/history'));
+  assert.notEqual(normalizePath('/v1/addresses/top'), normalizePath('/v1/addresses/filtered'));
+  assert.equal(normalizePath('/v1/network/fees'), '/v1/network/fees');
+});
+
+test('usage: an address cannot create a row of its own', () => {
+  const a = '/v1/address/0x' + 'ab'.repeat(20);
+  const b = '/v1/address/0x' + 'cd'.repeat(20);
+  assert.equal(normalizePath(a), '/v1/address/:id');
+  assert.equal(normalizePath(a), normalizePath(b), 'two addresses must share one row');
+  // and the address itself must not survive into the label
+  assert.ok(!/0x[0-9a-f]{6,}/i.test(normalizePath(a)));
+});
+
+test('usage: a probe cannot write arbitrary bytes into the table', () => {
+  for (const junk of [
+    "/v1/'; DROP TABLE hits;--",
+    '/v1/<script>alert(1)</script>',
+    '/v1/' + 'x'.repeat(500),
+    '/v1/a b',
+    'not-a-path',
+    null,
+    undefined,
+    42,
+  ]) {
+    const out = normalizePath(junk);
+    assert.ok(out === null || /^\/v1(\/(:id|[a-z0-9._-]+))*$/.test(out), `leaked: ${JSON.stringify(out)}`);
+    if (out) assert.ok(out.length <= 60);
+  }
+});
+
+test('usage: only successful responses count, so failures cannot inflate the numbers', () => {
+  assert.equal(countable(200), true);
+  assert.equal(countable(304), true);
+  assert.equal(countable(401), false);
+  assert.equal(countable(404), false);
+  assert.equal(countable(429), false);
+  assert.equal(countable(500), false);
+});
+
+test('usage: days are UTC midnights, so a bucket means the same thing everywhere', () => {
+  const d = dayOf(Date.UTC(2026, 7, 23, 13, 45, 0));
+  assert.equal(d, Math.floor(Date.UTC(2026, 7, 23) / 1000));
+  assert.equal(d % 86400, 0);
+  // every instant of a UTC day lands in the same bucket
+  assert.equal(dayOf(Date.UTC(2026, 7, 23, 0, 0, 0)), dayOf(Date.UTC(2026, 7, 23, 23, 59, 59)));
+});
+
+test('usage: a key is never rendered in full', () => {
+  const key = 'sbd_' + 'a'.repeat(32);
+  const shown = keyPrefix(key);
+  assert.ok(!shown.includes(key), 'the whole key must never be returned');
+  assert.ok(shown.length < key.length);
+  assert.ok(shown.startsWith('sbd_'));
+  assert.equal(keyPrefix(null), '—');
+  assert.equal(keyPrefix('not-a-key'), '—');
 });
