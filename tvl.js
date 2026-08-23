@@ -20,7 +20,10 @@ import { rpcSoft, TOKENS, toUnits } from './rpc.js';
 import * as db from './db.js';
 import { PROTOCOLS, protocolForAddress, publicShape, registryStats } from './protocols.js';
 import { getLabel } from './labels.js';
-import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS } from './constants.js';
+import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_ROTATE_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS } from './constants.js';
+
+// Where the rotation left off, in the same meta table the indexer keeps its checkpoint in.
+const CURSOR_KEY = 'tvl_scan_cursor';
 
 const BALANCE_OF = '0x70a08231';
 const NAME = '0x06fdde03';
@@ -147,6 +150,38 @@ async function probeIdentities() {
   return found;
 }
 
+// Which contracts this pass reads, and which it defers.
+//
+// Registry contracts always, because a listed protocol with no measured balance is indistinguishable
+// from one we simply did not look at. Then the highest-value contracts, because they decide the total
+// and a stale reading there moves the headline figure. Whatever budget is left rotates through the
+// rest in stable address order, so a contract outside the top is visited on a cycle rather than never.
+//
+// Before this, the same top 600 by balance were scanned every pass and 1,505 known contracts were
+// never scanned at all — a systematic blind spot rather than a sampling one, which no amount of
+// waiting would have fixed.
+export function selectTargets(registry, known, opts = {}) {
+  const always = opts.always ?? TVL_ALWAYS_TOP;
+  const slice = opts.slice ?? TVL_ROTATE_SLICE;
+  const cap = opts.cap ?? TVL_MAX_TARGETS;
+
+  const hot = db.knownContracts(always);
+  const cursor = opts.cursor ?? (db.getMetaValue(CURSOR_KEY) || '');
+  const rotation = slice > 0 ? db.contractsAfter(cursor, slice) : { addresses: [], next: cursor };
+
+  // Registry first so it can never be squeezed out by the cap, then value, then the rotation.
+  const targets = [...new Set([...registry, ...hot, ...rotation.addresses])].slice(0, cap);
+  return {
+    targets,
+    cursor: rotation.next,
+    // The cursor moving backwards means the rotation wrapped: every known contract has now been
+    // visited at least once since the last wrap. That is the honest definition of a completed cycle —
+    // not a counter we increment and hope matches reality.
+    wrapped: !!cursor && rotation.next !== '' && rotation.next < cursor,
+    known,
+  };
+}
+
 export async function refresh() {
   try {
     const contractsFound = await discoverContracts(40);
@@ -155,10 +190,13 @@ export async function refresh() {
     // just deployed holds a balance before it shows up in any transfer ranking.
     const registry = PROTOCOLS.flatMap((p) => p.contracts);
     const known = db.knownContractCount();
-    const targets = [...new Set([...registry, ...db.knownContracts(TVL_MAX_TARGETS)])].slice(0, TVL_MAX_TARGETS);
+    const { targets, cursor, wrapped } = selectTargets(registry, known);
 
     const rows = await scanBalances(targets);
     db.upsertBalances(rows);
+    // Advanced only after the scan succeeded. Moving it first would skip a slice whenever a pass was
+    // cut short by the rate limit, and those contracts would wait a full cycle for nothing.
+    db.setMetaValue(CURSOR_KEY, cursor);
     invalidateAggregate();
 
     // Ask the contracts holding real value what they call themselves. The ecosystem page's job is to
@@ -184,7 +222,9 @@ export async function refresh() {
       // an implementation detail. They are now ordered by balance and then volume; they used to be
       // ordered by the hexadecimal value of their address, which decided coverage by accident.
       knownContracts: known, cap: TVL_MAX_TARGETS, atCap: known > TVL_MAX_TARGETS,
+      cursor, wrapped,
     };
+    if (wrapped) console.log(`[tvl] rotation completed a full cycle over ${known} known contracts`);
   } catch (e) {
     lastRun = { ...lastRun, at: Date.now(), error: String(e.message || e) };
     console.error('[tvl]', e.message || e);
@@ -399,8 +439,21 @@ export function snapshot() {
       scanned: lastRun.scanned || 0,
       knownContracts: lastRun.knownContracts ?? null,
       cap: TVL_MAX_TARGETS,
+      // The cap still bounds a single pass, but it no longer bounds what is ever measured: the top
+      // holders are rescanned every pass and the rest rotate, so every known contract is visited on a
+      // cycle. atCap therefore now means "one pass does not cover everything", not "the tail is never
+      // read" — which are very different claims about the same number.
       atCap: !!lastRun.atCap,
-      order: 'balance, then window volume',
+      alwaysTop: TVL_ALWAYS_TOP,
+      rotatingSlice: TVL_ROTATE_SLICE,
+      // How many passes it takes to visit every known contract once, at this slice size.
+      cycleLength: TVL_ROTATE_SLICE > 0 && lastRun.knownContracts
+        ? Math.max(1, Math.ceil(Math.max(0, lastRun.knownContracts - TVL_ALWAYS_TOP) / TVL_ROTATE_SLICE))
+        : 1,
+      // The honest cost of rotating: the oldest balance still counted in the total. A figure mixing
+      // fresh and several-cycles-old readings has to say so, or it looks current and partly is not.
+      oldestReadingMs: db.oldestBalanceReading(),
+      order: 'registry, then balance, then rotating by address',
     },
     method: 'Stablecoin balances held by addresses with bytecode, read with balanceOf. See /methodology.',
   };
