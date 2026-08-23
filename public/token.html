@@ -28,7 +28,7 @@
     --bg:#0B0F14; --panel:#121820; --panel-2:#161D26; --inset:#0E141B;
     --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583;
     --line:#212B36; --line-2:#2B3742; --accent:#25C4B8;
-    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE;
+    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C;
     --good:#37C98A; --warn:#E7A93A; --bad:#E5686A;
     --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
     --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
@@ -37,12 +37,12 @@
   @media (prefers-color-scheme:light){:root{
     --bg:#EEF1F5; --panel:#FFFFFF; --panel-2:#F4F7FA; --inset:#EAEEF3;
     --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2; --line:#E1E6EC; --line-2:#D2DAE2;
-    --accent:#0FA79E; --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0;
+    --accent:#0FA79E; --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69;
     --good:#128A5B; --warn:#B4791A; --bad:#D2494B;
     --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08);
   }}
-  :root[data-theme="dark"]{--bg:#0B0F14; --panel:#121820; --panel-2:#161D26; --inset:#0E141B; --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583; --line:#212B36; --line-2:#2B3742; --accent:#25C4B8; --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --good:#37C98A; --warn:#E7A93A; --bad:#E5686A; --shadow:0 1px 2px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.28)}
-  :root[data-theme="light"]{--bg:#EEF1F5; --panel:#FFFFFF; --panel-2:#F4F7FA; --inset:#EAEEF3; --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2; --line:#E1E6EC; --line-2:#D2DAE2; --accent:#0FA79E; --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --good:#128A5B; --warn:#B4791A; --bad:#D2494B; --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08)}
+  :root[data-theme="dark"]{--bg:#0B0F14; --panel:#121820; --panel-2:#161D26; --inset:#0E141B; --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583; --line:#212B36; --line-2:#2B3742; --accent:#25C4B8; --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C; --good:#37C98A; --warn:#E7A93A; --bad:#E5686A; --shadow:0 1px 2px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.28)}
+  :root[data-theme="light"]{--bg:#EEF1F5; --panel:#FFFFFF; --panel-2:#F4F7FA; --inset:#EAEEF3; --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2; --line:#E1E6EC; --line-2:#D2DAE2; --accent:#0FA79E; --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69; --good:#128A5B; --warn:#B4791A; --bad:#D2494B; --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08)}
   *{box-sizing:border-box} html,body{margin:0}
   body{font-family:var(--sans); background:var(--bg); color:var(--ink); -webkit-font-smoothing:antialiased; line-height:1.5; padding:clamp(14px,3vw,30px)}
   .shell{max-width:1180px; margin:0 auto}
@@ -74,6 +74,12 @@
   .toggles{display:flex; gap:8px; margin-left:auto; flex-wrap:wrap}
   .chartwrap{position:relative; height:230px; margin-top:8px}
   .chartwrap svg{width:100%; height:100%; display:block}
+  /* Y-axis labels, drawn as HTML over the chart rather than inside it: the SVG is stretched with
+     preserveAspectRatio="none", so text placed in it would be distorted horizontally. */
+  .ygrid{position:absolute; inset:0; pointer-events:none}
+  .ygrid span{position:absolute; right:0; transform:translateY(-50%); font-family:var(--mono); font-size:9.5px;
+    color:var(--ink-3); background:var(--panel); padding:0 3px; border-radius:3px; font-variant-numeric:tabular-nums}
+  .ygrid span.zero{color:var(--ink-3); opacity:.75}
   .chart-empty{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--ink-3); font-family:var(--mono); font-size:12px}
   .peak{position:absolute; top:2px; left:0; font-family:var(--mono); font-size:10.5px; color:var(--ink-3)}
   .peak b{color:var(--ink-2); font-weight:600}
@@ -148,6 +154,7 @@
       <div class="chartwrap">
         <div class="peak" id="chartPeak"></div>
         <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <div class="ygrid" id="chartY"></div>
         <div class="chart-empty" id="chartEmpty">collecting data…</div>
       </div>
       <div class="chartaxis" id="chartAxis"></div>
@@ -198,7 +205,11 @@
 const $=(s)=>document.querySelector(s);
 const nf=new Intl.NumberFormat('en-US');
 const TOK={{TOKENS_JSON}};
-const TCOLOR={USDC:'--usdc',EURC:'--eurc',USYC:'--usyc'};
+// Per-token accent. The fallback matters: a token added to the network profile without a palette
+// entry would otherwise emit var(undefined), which paints nothing at all — a blank page that reads
+// as missing data rather than a missing colour.
+const TCOLOR={USDC:'--usdc',EURC:'--eurc',USYC:'--usyc',USDT:'--usdt'};
+const tokenColor=(t)=>`var(${TCOLOR[t]||'--accent'})`;
 const short=(a)=>a?a.slice(0,6)+'…'+a.slice(-4):'—';
 const esc=(s)=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function compact(n){ if(n==null||isNaN(n))return '—'; const a=Math.abs(n);
@@ -216,8 +227,8 @@ if(!TOK.includes(token)) token='USDC';
 let range='24h', metric='real';
 const tokenUrl=(t)=>'/token/'+t.toLowerCase();
 
-document.documentElement.style.setProperty('--c',`var(${TCOLOR[token]})`);
-$('#shell').style.setProperty('--c',`var(${TCOLOR[token]})`);
+document.documentElement.style.setProperty('--c',tokenColor(token));
+$('#shell').style.setProperty('--c',tokenColor(token));
 $('#tokName').textContent=token;
 $('#lt1').textContent=token; $('#lt2').textContent=token;
 // document.title is deliberately NOT overwritten: the server renders a fuller, per-token title
@@ -293,12 +304,29 @@ async function loadToken(){
   }catch(e){ $('#statusDot').className='dot down'; $('#statusText').textContent='network error'; }
 }
 function valOf(p){ if(metric==='raw')return p.volume||0; if(metric==='net')return (p.mint||0)-(p.burn||0); if(metric==='cnt')return p.cnt||0; return p.rvolume||0; }
+// Y-axis labels for the chart. The gridlines were drawn but never labelled, which is worse than
+// having none: two lines across a plot imply a scale the reader is then left to guess. The scale's
+// floor is labelled too, because that is what says the variation is not being exaggerated by a
+// truncated baseline — and on charts that can go negative (net issuance) the floor is not zero.
+//
+// Positions come from the same geometry the SVG uses (viewBox 0 0 1000 260), so a label sits exactly
+// on its line. Drawn as HTML over the chart, not inside it: the SVG is stretched with
+// preserveAspectRatio="none" and text placed in it would be distorted horizontally.
+function renderYAxis(el, lo, hi, pad, fmt){
+  if(!el) return;
+  const H=260, plot=H-2*pad;
+  if(!(hi>lo)) { el.innerHTML=''; return; }
+  const at=(v)=>((H-pad-((v-lo)/(hi-lo))*plot)/H*100).toFixed(2)+'%';
+  const span=hi-lo;
+  el.innerHTML=[[hi,''],[lo+span*2/3,''],[lo+span/3,''],[lo,'zero']]
+    .map(([v,cls])=>`<span class="${cls}" style="top:${at(v)}">${fmt(v)}</span>`).join('');
+}
 function renderChart(payload){
   let series=payload.series||[];
   if(series.length>2 && payload.group && series.at(-1).t+payload.group>Date.now()/1000) series=series.slice(0,-1);
   const svg=$('#chart'), empty=$('#chartEmpty'), peak=$('#chartPeak'), axis=$('#chartAxis');
-  const color=`var(${TCOLOR[token]})`;
-  if(series.length<2){ svg.innerHTML=''; empty.style.display='flex'; peak.textContent=''; axis.textContent=''; return; }
+  const color=tokenColor(token);
+  if(series.length<2){ svg.innerHTML=''; empty.style.display='flex'; peak.textContent=''; axis.textContent=''; const yg=$('#chartY'); if(yg) yg.innerHTML=''; return; }
   empty.style.display='none';
   const vals=series.map(valOf);
   const W=1000,H=260,pad=12;
@@ -312,6 +340,7 @@ function renderChart(payload){
   if(lo<0) grid+=`<line x1="0" y1="${zeroY.toFixed(1)}" x2="${W}" y2="${zeroY.toFixed(1)}" stroke="var(--line-2)" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
   for(let g=1;g<=2;g++){ const y=(H-2*pad)*g/3+pad; grid+=`<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>`; }
   svg.innerHTML=grid+`<path d="${area}" fill="${color}" opacity="0.12"/><path d="M${pts.join(' L')}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
+  renderYAxis($('#chartY'), lo, hi, pad, compact);
   peak.innerHTML=`peak <b>${compact(hi)}</b>`;
   const fmt=(sec)=>{const dte=new Date(sec*1000); return range==='7d'?dte.toLocaleDateString('en-US',{month:'short',day:'numeric'}):dte.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});};
   const mid=series[Math.floor(series.length/2)];

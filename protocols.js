@@ -128,6 +128,21 @@ const REGISTRY = [
     added: '2026-07-26',
   },
   {
+    id: 'wrapped-usdc',
+    name: 'Wrapped USDC',
+    vendor: null,
+    category: 'infra',
+    desc: 'ERC-20 wrapper around USDC at 18 decimals. Its supply is exactly the USDC it custodies, so it '
+      + 'is measured here as a contract holding value, never as issuance — counting both would report the '
+      + 'same dollars twice. Observed on Arc testnet; operator unattributed.',
+    links: {},
+    contracts: ['0x911b4000d3422f482f4062a913885f7b035382df'],
+    networks: ['testnet'],
+    source: 'observed',
+    verified: false,
+    added: '2026-08-22',
+  },
+  {
     id: 'multicall3from',
     name: 'Multicall3From',
     vendor: null,

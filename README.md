@@ -41,7 +41,10 @@ Read-only. Zero dependencies — Node's native `fetch` and `node:sqlite`, nothin
   window and the two limits it was actually judged against.
 - **Network economics** — gas on Arc is paid in USDC, so fees are dollars read straight from
   transaction receipts: no price feed, no oracle. Headline metric is *cost to move $1M*.
-- **Stablecoin supply, share and velocity** per token, plus mint/burn.
+- **Stablecoin supply, share and velocity** per token, plus mint/burn. Assets are configured by
+  *contract*, not by symbol, because a symbol can be deployed more than once on one chain — Arc
+  testnet carries two independent USYC contracts, and the chain's supply of it is the sum. A wrapper
+  whose supply is exactly the USDC it custodies is deliberately not counted as issuance.
 - **Per-block activity** + **largest transfers** over a stated window, in real time.
 - **History past the retention window** — per-day aggregates are kept indefinitely, so `30d`, `90d`,
   `1y` and `all` ranges exist and every series says which table answered it and how far back the
@@ -62,7 +65,7 @@ indexing forward and serves:
 
 - `GET /` — the terminal
 - `GET /api/state` — live snapshot: network stats, 24h summary, top addresses, largest transfers
-- `GET /api/history?token=ALL|USDC|EURC|USYC&range=1h|24h|7d|30d|90d|1y|all` — time series (volume,
+- `GET /api/history?token=ALL|<symbol>&range=1h|24h|7d|30d|90d|1y|all` — time series (volume,
   count, mint, burn). Past 7d the series comes from the per-day rollup; the response states which
   table answered (`source`) and how far back the record reaches (`recordBegan`), so a long range
   over a short record cannot pass for a long one

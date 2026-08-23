@@ -240,6 +240,17 @@ try { db.exec('ALTER TABLE addr_stats ADD COLUMN first_from TEXT'); } catch { /*
 // so an existing deployment understates adjusted volume for about a week after this lands, and a
 // fresh database (mainnet) is never affected. Stated on /methodology rather than left to be noticed.
 try { db.exec('ALTER TABLE addr_stats ADD COLUMN first_block INTEGER'); } catch { /* already present */ }
+// Migration: when this address was last asked what it calls itself. Distinct from `checked`, which the
+// contract-discovery path also writes — so `checked` cannot mean "identity has been probed", and using
+// it as though it did would re-ask every silent contract on every pass, burning the whole per-pass
+// budget on addresses already known to answer nothing and never reaching the ones that would.
+try { db.exec('ALTER TABLE address_meta ADD COLUMN identity_checked INTEGER'); } catch { /* already present */ }
+// Migration: how many times we have asked and got no answer at all. rpcSoft cannot tell a revert
+// ("this contract has no name()") from a refused call ("the endpoint was busy") — both arrive as an
+// empty slot. Treating the second as the first settled the question wrongly and permanently: 53
+// addresses were marked as nameless while the chain answered "Synthra Perpetual Liquidity Token" for
+// one of them on the very next call. Silence is only evidence after it repeats.
+try { db.exec('ALTER TABLE address_meta ADD COLUMN identity_attempts INTEGER NOT NULL DEFAULT 0'); } catch { /* already present */ }
 
 // How much of the raw transfer stream is retained. This was 1,200 rows, which sounded like a
 // window and was not one: at the ~954k transfers/day the testnet actually does, 1,200 rows is
@@ -738,7 +749,13 @@ const emstmt = {
     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(address) DO UPDATE SET
       is_contract = excluded.is_contract, code_hash = excluded.code_hash, code_size = excluded.code_size,
-      token_name = excluded.token_name, token_symbol = excluded.token_symbol, impl = excluded.impl,
+      -- COALESCE, not assignment: the entity deriver and the balance scanner both write here, and
+      -- the deriver does not always read a name. Assigning would let a pass that learned nothing
+      -- erase a name the other writer had already established — observed: the named-holder count
+      -- dropped from 6 to 5 between two passes. A name is a fact; it does not become unknown again.
+      -- A *new* non-null name still wins, so a renamed or upgraded contract updates normally.
+      token_name = COALESCE(excluded.token_name, address_meta.token_name),
+      token_symbol = COALESCE(excluded.token_symbol, address_meta.token_symbol), impl = excluded.impl,
       admin = excluded.admin, interfaces = excluded.interfaces, kind = excluded.kind,
       blocks_made = MAX(address_meta.blocks_made, excluded.blocks_made), checked = excluded.checked`),
   get: db.prepare('SELECT * FROM address_meta WHERE address = ?'),
@@ -794,6 +811,26 @@ const tvstmt = {
     ON CONFLICT(address) DO NOTHING`),
   unchecked: db.prepare(`SELECT a.address FROM addr_stats a LEFT JOIN address_meta m ON m.address = a.address
     WHERE m.address IS NULL ORDER BY a.volume DESC LIMIT ?`),
+  // Writes only what a contract says its own name and symbol are, leaving every column entities.js
+  // derives untouched. A narrow statement rather than upsertAddressMeta, which overwrites the lot:
+  // the balance scanner learns a different, smaller fact than the entity deriver and must not clobber
+  // the deriver's work by writing NULLs over it.
+  // One unanswered attempt is not evidence of anything; a few in a row are. Marks the question
+  // settled only once the attempt count reaches the ceiling, so a busy endpoint costs a retry rather
+  // than a permanent wrong answer.
+  noteIdentityAttempt: db.prepare(`INSERT INTO address_meta(address, is_contract, identity_attempts, checked)
+      VALUES(?, 1, 1, ?)
+    ON CONFLICT(address) DO UPDATE SET
+      identity_attempts = address_meta.identity_attempts + 1,
+      checked = excluded.checked,
+      identity_checked = CASE WHEN address_meta.identity_attempts + 1 >= ? THEN ? ELSE address_meta.identity_checked END`),
+  setIdentity: db.prepare(`INSERT INTO address_meta(address, is_contract, token_name, token_symbol, checked, identity_checked)
+      VALUES(?, 1, ?, ?, ?, ?)
+    ON CONFLICT(address) DO UPDATE SET
+      token_name = COALESCE(excluded.token_name, address_meta.token_name),
+      token_symbol = COALESCE(excluded.token_symbol, address_meta.token_symbol),
+      checked = excluded.checked,
+      identity_checked = excluded.identity_checked`),
   histUp: db.prepare(`INSERT INTO tvl_history(day, protocol, tvl) VALUES(?, ?, ?)
     ON CONFLICT(day, protocol) DO UPDATE SET tvl = excluded.tvl`),
   histSeries: db.prepare('SELECT day, tvl FROM tvl_history WHERE protocol = ? AND day >= ? ORDER BY day'),
@@ -822,6 +859,37 @@ export const knownContracts = (limit = 2000) => tvstmt.contracts.all(limit).map(
 // How many contracts exist to scan, against how many the cap allows. Published for the same reason
 // the noise-set cap is: past the ceiling, coverage is decided by the ceiling and not by the method.
 export const knownContractCount = () => tvstmt.contractCount.get().c;
+// What a contract calls itself, read from the contract. Null when it answers neither name() nor
+// symbol() — which is a fact about the contract, not a gap in the record.
+export function setAddressIdentity(address, name, symbol) {
+  // `identity_checked` is written whether or not anything came back, so "asked and answered nothing"
+  // is recorded as an answer rather than retried forever.
+  const now = Date.now();
+  tvstmt.setIdentity.run(String(address).toLowerCase(), name || null, symbol || null, now, now);
+}
+// How many unanswered attempts settle the question. Three passes is a few minutes apart each, so a
+// transient refusal costs a retry and a genuinely nameless contract stops being asked quickly.
+export const IDENTITY_MAX_ATTEMPTS = 3;
+
+// Records that we asked and heard nothing back. Only settles the question once the attempts reach
+// the ceiling — see the migration note above for why one silence proves nothing.
+export function noteIdentityAttempt(address) {
+  const now = Date.now();
+  tvstmt.noteIdentityAttempt.run(String(address).toLowerCase(), now, IDENTITY_MAX_ATTEMPTS, now);
+}
+
+// Identities for a set of addresses, in one query, for decorating a list.
+export function addressIdentities(addrs) {
+  const list = [...new Set((addrs || []).map((a) => String(a).toLowerCase()))];
+  const out = new Map();
+  for (let i = 0; i < list.length; i += 200) {
+    const part = list.slice(i, i + 200);
+    const ps = db.prepare(`SELECT address, token_name, token_symbol, kind, code_size, identity_checked, identity_attempts FROM address_meta
+      WHERE address IN (${part.map(() => '?').join(',')})`);
+    for (const r of ps.all(...part)) out.set(r.address, r);
+  }
+  return out;
+}
 export const markContract = (a, isContract, codeSize) => tvstmt.markCode.run(a, isContract ? 1 : 0, codeSize || 0, Date.now());
 export const uncheckedAddresses = (limit = 40) => tvstmt.unchecked.all(limit).map((r) => r.address);
 

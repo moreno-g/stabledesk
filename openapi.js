@@ -848,6 +848,13 @@ function build() {
                   address: { type: 'string' },
                   tvl: { type: 'number' },
                   byToken: { type: 'object', additionalProperties: { type: 'number' } },
+                  selfName: {
+                    type: ['string', 'null'],
+                    description: 'What the contract answers to name(). Read from the contract, so it is a fact about the contract — not an attribution to an operator. These rows stay unattributed until a registry entry claims them.',
+                  },
+                  selfSymbol: { type: ['string', 'null'], description: 'What the contract answers to symbol().' },
+                  kind: { type: ['string', 'null'], description: 'Classification derived by the entity deriver, when it has looked at this address.' },
+                  codeSize: { type: ['integer', 'null'], description: 'Bytecode length. Identical sizes across addresses usually mean one contract deployed several times.' },
                 },
                 additionalProperties: true,
               },

@@ -88,17 +88,29 @@ export const DERIVE_DELAY = 600;             // ms between batches
 
 // TVL scanning (see tvl.js and /ecosystem). Batch shape mirrors entity derivation, which is the
 // one already proven against the rate-limited public RPC: TVL_CHUNK holders × one call per indexed
-// stablecoin per batch, spaced by TVL_DELAY. With three tokens that is 24 calls a batch.
+// stablecoin per batch, spaced by TVL_DELAY.
+//
+// The batch size that was proven is ~24 *calls*, not 8 holders — and the two stopped being the same
+// thing the moment the tracked-asset list grew. At three tokens, 8 holders was 24 calls; at five it
+// became 40, and the endpoint started refusing slots. That is not a cosmetic overrun: a refused slot
+// is indistinguishable from a contract that has no such method, so an oversized batch quietly turns
+// into wrong answers downstream. So the holder count is derived from the call budget instead, and
+// adding an asset now costs a shorter batch rather than a louder one.
 export const TVL_ENABLED = process.env.TVL_ENABLED !== 'false';
 export const TVL_REFRESH_MS = 5 * 60 * 1000;
 export const TVL_WARMUP_MS = 25 * 1000;      // retry cadence until the indexer has rankings
-export const TVL_CHUNK = 8;
+export const RPC_CALLS_PER_BATCH = 24;
+export const TVL_CHUNK = Math.max(2, Math.floor(RPC_CALLS_PER_BATCH / Math.max(1, Object.keys(CHAIN.tokens).length)));
 export const TVL_DELAY = 600;
 export const TVL_MAX_TARGETS = 600;          // ceiling on contracts scanned per pass
 // Minimum balance for an unregistered contract to be worth naming. Scaled off the network's own
 // notability threshold, because "a balance worth investigating" means something very different
 // with faucet money than with real deposits.
 export const TVL_CANDIDATE_MIN = Math.max(1, Math.round(CHAIN.notableMin / 10));
+// How many previously-anonymous holders are asked for their name per scan. Bounded so identity
+// probing never competes with the balance scan for the public RPC's rate limit; each address is asked
+// once, so the queue drains on its own over a few passes.
+export const IDENTITY_PER_PASS = 24;
 
 // Daily rankings (see rankings.js). The move threshold exists so the digest reports movement
 // rather than rounding noise — a protocol drifting 0.2% is not news.

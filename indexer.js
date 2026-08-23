@@ -426,8 +426,11 @@ function processLogs(logs, opts = {}, gatewayTxs = null, tsAt = approxTs) {
 async function refreshSupplies() {
   const entries = Object.entries(TOKENS); // [addr, meta]
   const { out } = await rpc(entries.map(([addr]) => ({ method: 'eth_call', params: [{ to: addr, data: TOTAL_SUPPLY }, 'latest'] })));
+  // Summed per symbol, not assigned: a symbol can have more than one contract on the same chain
+  // (two USYC deployments on Arc testnet), and the chain's supply of it is the total across them.
+  // Assigning here silently published whichever contract happened to be iterated last.
   const s = {};
-  entries.forEach(([, meta], i) => { try { s[meta.symbol] = Number(BigInt(out[i])) / 10 ** meta.decimals; } catch {} });
+  entries.forEach(([, meta], i) => { try { s[meta.symbol] = (s[meta.symbol] || 0) + Number(BigInt(out[i])) / 10 ** meta.decimals; } catch {} });
   if (Object.keys(s).length) {
     supplies = s;
     suppliesAt = Date.now();
@@ -555,11 +558,34 @@ async function indexRange(from, to, opts = {}, depth = 0) {
   return false;
 }
 
+// Nothing downstream of this loop runs while it runs, so a long replay leaves the terminal frozen —
+// no supply figure, no fee sample, and no sign that anything is happening — for as long as the replay
+// takes. Measured on a two-week-old database that was 4.1 million blocks behind: fifteen minutes in,
+// the headline supply read "—" and /v1/network/fees answered 503, on a fully reachable chain.
+//
+// So every so often the loop stops to take the two measurements that do not depend on it and rebuild
+// the snapshot from what has been indexed so far. The figures are still marked stale — they are — but
+// they exist and they move.
+async function progressRefresh(latest) {
+  if (Date.now() - suppliesAt > SUPPLY_TTL) {
+    try { await refreshSupplies(); } catch (e) { console.error('[supply]', e.message || e); }
+  }
+  if (latest != null) { try { await sampleFees(latest); } catch { /* a sample is never worth failing over */ } }
+  try { snapshotFromDb(); } catch (e) { console.error('[snapshot]', e.message || e); }
+}
+
+// How many chunks between those refreshes. At 500 blocks and ~1s a chunk this is roughly every
+// 40 seconds of replay — often enough that the page visibly moves, rare enough that it costs nothing
+// against the rate limit.
+const PROGRESS_EVERY = 40;
+
 async function indexThrough(from, to, opts = {}) {
+  let chunks = 0;
   for (let start = from; start <= to; start += CHUNK) {
     const end = Math.min(to, start + CHUNK - 1);
     if (!(await indexRange(start, end, opts))) return false;
     if (end < to) await sleep(CHUNK_DELAY);
+    if (++chunks % PROGRESS_EVERY === 0) await progressRefresh(opts.head ?? null);
   }
   return true;
 }
@@ -607,7 +633,7 @@ async function backfill(latest) {
   if (start > latest) return;
   const cold = cp == null;
   console.log(`[backfill] blocks ${start} → ${latest} (${latest - start + 1})`);
-  if (!(await indexThrough(start, latest))) {
+  if (!(await indexThrough(start, latest, { head: latest }))) {
     console.error('[backfill] stopped — will resume from last successful checkpoint');
     return;
   }
@@ -650,8 +676,9 @@ function dbDerived({ frozen = false } = {}) {
   const known = Object.keys(supplies).length > 0;
   const totalSupply = known ? Object.values(supplies).reduce((a, b) => a + b, 0) : null;
   const supply = {};
-  for (const meta of Object.values(TOKENS)) {
-    const sym = meta.symbol;
+  // Distinct symbols, not contracts: two contracts sharing a symbol describe one asset, and every
+  // figure below is already keyed by symbol.
+  for (const sym of new Set(Object.values(TOKENS).map((m) => m.symbol))) {
     const sup = known ? supplies[sym] ?? null : null;
     const rvol = summary.byToken[sym]?.rvolume || 0;
     const perDay = covSec ? (rvol / covSec) * 86400 : 0;
@@ -904,16 +931,28 @@ async function tickOnce() {
     // classified against current flags rather than a stale set.
     if (Date.now() - noisyAt > NOISY_TTL) refreshNoisy();
 
+    // Head measurements first, *before* the catch-up below.
+    //
+    // Neither of these depends on the index: supply is three totalSupply() calls at the head, and the
+    // fee sample reads receipts from blocks just behind it. Both used to sit after indexThrough, which
+    // meant that whenever there was real history to replay they were never reached — and "real history
+    // to replay" is exactly a restart after downtime, the case this indexer is built to survive.
+    // Measured on a two-week-old database: fifteen minutes after boot the log held one backfill line,
+    // the terminal's headline supply figure read "—", and /v1/network/fees answered 503, on a chain
+    // that was fully reachable the whole time. A number we can measure in one call should never be
+    // absent because a different, slower job is queued in front of it.
+    if (Date.now() - suppliesAt > SUPPLY_TTL) { try { await refreshSupplies(); } catch (e) { console.error('[supply]', e.message); } }
+    try { await sampleFees(latest); } catch (e) { console.error('[fees]', e.message); } // best-effort: never fail a tick over a sample
+
     // index everything new since the checkpoint (chunked — never skip blocks)
     let cp = db.getCheckpoint();
     if (cp == null) cp = latest - 1;
-    if (latest > cp && !(await indexThrough(cp + 1, latest, { live: true }))) {
+    if (latest > cp && !(await indexThrough(cp + 1, latest, { live: true, head: latest }))) {
       throw new Error(`catch-up stalled at block ${db.getCheckpoint() ?? cp}`);
     }
 
-    if (Date.now() - suppliesAt > SUPPLY_TTL) { try { await refreshSupplies(); } catch (e) { console.error('[supply]', e.message); } }
+    // Depends on the rankings the pass above produces, so it stays after it.
     await detectContracts(db.getTop(12).map((r) => r.address));
-    try { await sampleFees(latest); } catch (e) { console.error('[fees]', e.message); } // best-effort: never fail a tick over a sample
 
     buildSnapshot(latest, gasWei, headers);
 
@@ -969,6 +1008,12 @@ export async function start() {
       console.log(`[start] measured block time ${Math.round(avgBlockMs)}ms over ${span} blocks`);
     }
     noteHead(latest);
+    // Before the seed, not after it. backfill() runs ahead of the first tick, so on a database with a
+    // real gap to close every measurement in tickOnce is hours away — including the one the terminal
+    // leads with. Three calls at the head cost nothing and the headline figure is then correct from
+    // the first page load.
+    try { await refreshSupplies(); } catch (e) { console.error('[supply]', e.message || e); }
+    snapshotFromDb();
     await backfill(latest);
   } catch (e) {
     noteRpcFailure(e);
