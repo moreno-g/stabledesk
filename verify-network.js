@@ -598,7 +598,34 @@ const invokedDirectly = process.argv[1] && process.argv[1].endsWith('verify-netw
 // `quiet` suppresses the per-check report and prints only what changed. A scheduled run that logs
 // forty lines an hour buries the one line that matters, which is the same reason chainalert announces
 // transitions and not conditions.
+// One pass at a time, guarded here rather than at the call site — because what needs protecting is
+// module state, not the caller's bookkeeping. `observed` and `findings` are module-level and cleared
+// at the top of every pass, so two overlapping runs do not merely race the database: the second wipes
+// the first's observation mid-flight, and what gets diffed and stored is a merge of two partial
+// passes. That produces GONE and FIRST SEEN events for subjects that never moved.
+//
+// A pass takes ~19s in the ordinary case, but WATCH_EVERY_SEC floors at 300 and a pass under
+// rate-limit pressure bisects its log queries and can run for minutes. The same guard already exists
+// twice in this codebase, in indexer.js and payments.js, for the same reason both times.
+//
+// The irony is worth stating: this watcher's whole rule is that silence must repeat before it counts.
+// An overlapping pass corrupts exactly that counter.
+let running = false;
+
 export async function runOnce({ quiet = false, watch = WATCH } = {}) {
+  if (running) {
+    if (!quiet) console.error('a check is already running — skipping this one');
+    return 0;
+  }
+  running = true;
+  try {
+    return await pass({ quiet, watch });
+  } finally {
+    running = false;
+  }
+}
+
+async function pass({ quiet, watch }) {
   await loadProfile();
   findings.length = 0;
   observed.clear();

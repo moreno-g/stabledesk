@@ -130,6 +130,36 @@ test('a negative limit falls back to the default instead of dumping the table', 
   assert.equal(alignToBucket(1234, 1), 1234, 'a group of one has no grid to align to');
 });
 
+// ---- one check at a time ----
+test('two overlapping checks cannot merge into one corrupted observation', async () => {
+  const src = readFileSync('verify-network.js', 'utf8');
+
+  // observed and findings are module-level and cleared at the top of every pass, so two concurrent
+  // runs do not merely race the database — the second wipes the first's observation mid-flight, and
+  // what gets diffed and stored is a merge of two partial passes. That invents GONE and FIRST SEEN
+  // events for subjects that never moved.
+  //
+  // The guard belongs in runOnce rather than at the call site, because what needs protecting is this
+  // module's state, not the caller's bookkeeping. This pins that: the exported entry point must check
+  // a running flag before doing any work.
+  const entry = src.slice(src.indexOf('export async function runOnce'));
+  const body = entry.slice(0, entry.indexOf('async function pass'));
+  assert.match(body, /if \(running\)/, 'runOnce must refuse to start while a pass is in flight');
+  assert.match(body, /running = true/, 'and claim the flag before running');
+  assert.match(body, /finally/, 'and release it even when the pass throws');
+
+  // The same guard exists twice already, for the same reason both times. If it ever disappears from
+  // those, this codebase has lost a lesson it paid for.
+  assert.match(readFileSync('indexer.js', 'utf8'), /export function nonReentrant/);
+  assert.match(readFileSync('payments.js', 'utf8'), /function nonReentrant/);
+
+  // The watcher's whole rule is that silence must repeat before it counts. An overlapping pass
+  // corrupts exactly that counter, which is why this one matters more than the usual double-work.
+  const cw = readFileSync('chainwatch.js', 'utf8');
+  assert.match(cw, /MISSES_BEFORE_GONE/);
+  assert.match(cw, /MISSES_BEFORE_QUIET/);
+});
+
 // ---- a refused credential is not an outage, in the verifier either ----
 test('the verifier tells a rejected key apart from an endpoint that is not there', async () => {
   const { RPC_AUTH_STATUSES } = await import('../constants.js');
