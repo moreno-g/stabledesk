@@ -83,10 +83,11 @@
     <p style="margin-top:0">Everything is read directly from the chain — no third-party data provider. Blocks and logs come from the
     <strong>{{NET}} public RPC</strong> (with fallback endpoints), chain ID <code>{{CHAIN_ID}}</code>. Arc is an EVM chain where
     gas is paid in USDC and blocks are ~0.5s with no reorgs.</p>
-    <p style="margin-bottom:0">We track the official {{NET}} stablecoins (ERC-20 interface): <strong>USDC</strong><!--testnet-only-->
-    <code>0x3600…0000</code><!--/testnet-only--> (native gas token), <strong>EURC</strong> and <strong>USYC</strong>
-    (yield / tokenized MMF). A historical indexer backfills recent history on first run, then keeps indexing forward
-    and persists aggregates in SQLite.</p>
+    <p style="margin-bottom:0">We track the {{NET}} stablecoins over their ERC-20 interface: {{TOKENS_DETAIL}}. That list is
+    generated from the running configuration rather than written here, so it cannot drift from what is actually indexed — the full
+    set of contract addresses is in <code>/openapi.json</code> and on <code>/v1/status</code>. An asset carried by more than one
+    contract is measured across all of them; see <em>What is counted as a stablecoin</em> below. A historical indexer backfills
+    recent history on first run, then keeps indexing forward and persists aggregates in SQLite.</p>
   </div>
 
   <h2>Three volume measures</h2>
@@ -163,6 +164,31 @@
     <p style="margin-bottom:0"><strong>Where this applies.</strong> {{GATEWAY_STATUS}} Where Gateway is not deployed, every
     bridge-adjusted figure is returned as <code>null</code> rather than <code>0</code>: nothing was measured, so nothing is claimed — a zero
     here would read as "we checked and there was none".</p>
+  </div>
+
+  <h2>What is counted as a stablecoin, and what isn't</h2>
+  <div class="card">
+    <p style="margin-top:0"><strong>Tracked assets are listed by contract, not by symbol</strong>, because a symbol can be
+    deployed more than once on the same chain. Arc testnet carries two independent <strong>USYC</strong> contracts — one an
+    EIP-1967 proxy holding 1.38M and essentially dormant, one a standalone contract holding 12.2M with all of the activity
+    (722 transfers against 1, over the same six-day sample). Nothing on-chain says which is canonical, and we will not guess:
+    <strong>both are measured, and the chain's USYC supply is reported as the sum.</strong> Both addresses appear in the API's
+    token list. If Circle publishes a canonical address, the other is removed and this paragraph goes with it.</p>
+
+    <p><strong>Wrapped USDC is deliberately not counted as issuance.</strong> Its supply is exactly the USDC it custodies —
+    68,920,819.86 on both sides when measured — so reporting it as a separate stablecoin would count the same dollars twice,
+    once under USDC and once under WUSDC. It is in the <a href="/ecosystem">registry</a> instead, where the USDC it holds is
+    measured as value locked in a contract. Same reasoning as Circle Gateway above: a wrapper moves value, it does not create it.</p>
+
+    <p style="margin-bottom:0"><strong>Native USDC transfers are a known blind spot.</strong> USDC is Arc's gas asset, so it
+    exists twice: as the ERC-20 contract we index, and as the chain's native balance, whose movements the protocol surfaces at the
+    reserved address <code>0xffff…fffe</code> at 18-decimal scale. Measured over a 44-hour sample, <strong>87% of native transfer
+    events are exact duplicates</strong> of an ERC-20 event we already count — same transaction, same parties, same amount — so
+    indexing that address would roughly double every USDC figure on this site. The remainder is real and uncounted:
+    <strong>24% of native transfer events, but 4.1% of native volume</strong>, and inspection of a sample showed most of it is
+    <code>msg.value</code> being forwarded between contracts inside one transaction, which is exactly what the real-volume filter
+    removes anyway. Plain wallet-to-wallet native payments exist and are not counted. We would rather state the gap than close it
+    with a number that double-counts.</p>
   </div>
 
   <h2>Network fees &amp; economics</h2>

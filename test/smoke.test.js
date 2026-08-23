@@ -39,7 +39,7 @@ test('ADDR_RE matches lowercase 40-hex only', () => {
   assert.ok(!ADDR_RE.test('0x1234'));
 });
 test('config surface is sane', () => {
-  assert.deepEqual([...TOKEN_SYMBOLS].sort(), ['EURC', 'USDC', 'USYC']);
+  assert.deepEqual([...TOKEN_SYMBOLS].sort(), ['EURC', 'USDC', 'USDT', 'USYC']);
   assert.ok(TIERS.free.rpm < TIERS.pro.rpm);
   for (const [name, r] of Object.entries(RANGES)) {
     assert.ok(r.group > 0, `${name} groups into buckets`);
@@ -51,6 +51,68 @@ test('config surface is sane', () => {
     // or the range would silently return a truncated series.
     if (r.span != null && r.span > 7 * 86400) assert.ok(r.daily, `${name} must read the daily rollup`);
   }
+});
+
+// ---- a refused call is not an answer ----
+test('the network verifier tells a refusal apart from a contract declining', async () => {
+  const { refused, decodeString } = await import('../verify-network.js');
+
+  // The failure this encodes, twice over. Arc's public RPC refuses with "request limit reached",
+  // which matched none of the first pattern's alternatives — so the verifier reported that EURC does
+  // not answer decimals(), about a contract that answers it on every endpoint, every time. A tool
+  // built to catch confident wrong statements had become one.
+  for (const msg of ['request limit reached', 'rate limit exceeded', 'too many requests',
+                     'daily limit', 'capacity exceeded', 'service unavailable', 'request timed out']) {
+    assert.equal(refused({ __err: msg }), true, msg);
+  }
+  // A short batch is a question that was never put, not a null answer.
+  assert.equal(refused({ __err: 'no slot in response', __transient: true }), true);
+
+  // A real contract-level refusal is an answer and must NOT be retried away: this is how "has no
+  // name()" is established at all.
+  assert.equal(refused({ __err: 'execution reverted' }), false);
+  assert.equal(refused('0x1234'), false, 'a result is not a refusal');
+  assert.equal(refused(undefined), false);
+  assert.equal(refused(null), false);
+
+  // The fiat-name hint that decides how the untracked report is ordered. It is a triage aid, not a
+  // classifier — but its first version knew eight currencies and sorted QCAD, a Canadian-dollar
+  // stablecoin trading on this chain, into the pile labelled 'nothing to see'.
+  const { looksFiat } = await import('../verify-network.js');
+  for (const [name, sym] of [['QCAD', 'QCAD'], ['USD Coin', 'USDC.b'], ['', 'XSGD'], ['', 'ZUSD'],
+                             ['', 'GYEN'], ['EURC', 'EURC'], ['US Yield Coin', 'USYC']]) {
+    assert.equal(looksFiat(name, sym), true, `${name} / ${sym} should read as fiat-denominated`);
+  }
+  // Some ISO codes are also ordinary words. Matched loosely they drag memecoins into the list that
+  // matters, which defeats the ordering the hint exists for, so they only count as a whole symbol.
+  for (const [name, sym] of [['Penguin Token', 'PENGU'], ['Poultry', 'TRY2'], ['CAT Token', 'CAT'],
+                             ['ARC WIF CAT', 'AWIF'], ['Circle Wrapped Bitcoin', 'cirBTC']]) {
+    assert.equal(looksFiat(name, sym), false, `${name} / ${sym} should not`);
+  }
+  assert.equal(looksFiat('', 'PEN'), true, 'but the bare currency symbol still counts');
+
+  // The verifier decodes the same self-reported strings the balance scanner does.
+  const enc = (str) => '0x' + (32).toString(16).padStart(64, '0')
+    + str.length.toString(16).padStart(64, '0')
+    + Buffer.from(str, 'utf8').toString('hex').padEnd(64, '0');
+  assert.equal(decodeString(enc('EURC')), 'EURC');
+  assert.equal(decodeString('0x'), null);
+});
+
+// ---- the RPC batch budget is in calls, not holders ----
+test('adding a tracked asset shortens the balance batch instead of enlarging the request', async () => {
+  const { TVL_CHUNK, RPC_CALLS_PER_BATCH } = await import('../constants.js');
+  const { CHAIN } = await import('../chains.js');
+  const contracts = Object.keys(CHAIN.tokens).length;
+
+  // One balanceOf per holder per tracked contract, so the request size is the product. Holding the
+  // holder count fixed meant the batch grew every time an asset was added: 24 calls at three
+  // contracts, 40 at five — past what the public endpoint was proven to accept. And an overrun is
+  // not merely slow: a refused slot arrives looking exactly like a contract that has no such
+  // method, so it turns into a wrong answer rather than a retry.
+  assert.ok(TVL_CHUNK * contracts <= RPC_CALLS_PER_BATCH,
+    `${TVL_CHUNK} holders x ${contracts} contracts = ${TVL_CHUNK * contracts} calls, over the ${RPC_CALLS_PER_BATCH} budget`);
+  assert.ok(TVL_CHUNK >= 2, 'never degenerates to one holder per request');
 });
 
 // ---- DB round-trip (isolated temp database) ----
@@ -1112,6 +1174,128 @@ test('the balance scanner picks its targets by value and publishes the ceiling',
   // Asserted against the rows themselves rather than a literal: earlier tests share this database.
   assert.equal(db.totalBalance(), db.balanceRows().reduce((a, r) => a + r.balance, 0));
   assert.ok(db.totalBalance() >= 5_000_000);
+});
+
+// ---- unattributed value gets a name, from the chain ----
+test('a holding contract is asked what it calls itself, and a non-answer stays a non-answer', async () => {
+  const db = await import('../db.js');
+  const { decodeString } = await import('../tvl.js');
+
+  // A real ABI-encoded string: offset 0x20, length 6, "Synthra" trimmed to fit the example.
+  const enc = (s) => {
+    const hexs = Buffer.from(s, 'utf8').toString('hex').padEnd(64, '0');
+    return '0x' + (32).toString(16).padStart(64, '0') + s.length.toString(16).padStart(64, '0') + hexs;
+  };
+  assert.equal(decodeString(enc('PerpDEX LP')), 'PerpDEX LP');
+  assert.equal(decodeString(enc('SYNPLP')), 'SYNPLP');
+
+  // Everything that is not a string has to come back null rather than as mojibake. rpcSoft hands
+  // back undefined for a reverted call by design, and a contract without name() reverts — so the
+  // common case here is "not a string", and a garbled label on the ecosystem page would be worse
+  // than no label at all.
+  assert.equal(decodeString('0x'), null, 'empty return');
+  assert.equal(decodeString(undefined), null, 'reverted slot');
+  assert.equal(decodeString(null), null);
+  assert.equal(decodeString('0x' + '0'.repeat(64)), null, 'a bare uint is not a string');
+  assert.equal(decodeString('0xdeadbeef'), null, 'truncated data');
+
+  // Stored narrowly: the balance scanner learns a smaller fact than the entity deriver, and must not
+  // write NULLs over the columns the deriver filled.
+  const addr = '0x' + 'f1'.repeat(20);
+  db.upsertAddressMeta({ address: addr, isContract: true, kind: 'token', codeHash: '0xabc', codeSize: 1234 });
+  db.setAddressIdentity(addr, 'Synthra Perpetual Liquidity Token', 'SYNPLP');
+  const m = db.addressMeta(addr);
+  assert.equal(m.token_name, 'Synthra Perpetual Liquidity Token');
+  assert.equal(m.token_symbol, 'SYNPLP');
+  assert.equal(m.kind, 'token', 'the deriver\'s classification survives');
+  assert.equal(m.code_hash, '0xabc', 'and so does its bytecode fingerprint');
+
+  // A contract that answers nothing is still recorded as asked, so the next pass spends its budget
+  // on an address that has not been.
+  const mute = '0x' + 'f2'.repeat(20);
+  db.setAddressIdentity(mute, null, null);
+  assert.equal(db.addressMeta(mute).token_name, null);
+  assert.ok(db.addressMeta(mute).identity_checked > 0, 'asked and answered nothing is a recorded answer');
+
+  // The marker has to be distinct from `checked`, which contract discovery also writes. Sharing one
+  // column would make every silent contract look un-probed forever, so each pass would re-ask the
+  // same addresses and never reach the ones that would actually answer.
+  const discovered = '0x' + 'f4'.repeat(20);
+  db.markContract(discovered, true, 900);
+  const dm = db.addressMeta(discovered);
+  assert.ok(dm.checked > 0, 'discovery records that it looked at the address');
+  assert.equal(dm.identity_checked, null, 'but that is not the same as having asked its name');
+
+  // Silence is not an answer until it repeats. rpcSoft leaves a slot undefined both when a call
+  // reverted (no such method) and when it was refused (rate limit) — opposite facts arriving
+  // identically. Settling on the first silence wrote off 53 addresses as nameless while the chain
+  // answered 'Synthra Perpetual Liquidity Token' for one of them on the very next call.
+  const quiet = '0x' + 'f6'.repeat(20);
+  for (let i = 1; i < db.IDENTITY_MAX_ATTEMPTS; i++) {
+    db.noteIdentityAttempt(quiet);
+    assert.equal(db.addressMeta(quiet).identity_checked, null, `attempt ${i} does not settle it`);
+  }
+  db.noteIdentityAttempt(quiet);
+  assert.ok(db.addressMeta(quiet).identity_checked > 0, 'repeated silence does settle it');
+  assert.equal(db.addressMeta(quiet).identity_attempts, db.IDENTITY_MAX_ATTEMPTS);
+
+  // An answer settles it immediately, however many attempts came before.
+  const late = '0x' + 'f7'.repeat(20);
+  db.noteIdentityAttempt(late);
+  assert.equal(db.addressMeta(late).identity_checked, null);
+  db.setAddressIdentity(late, 'Answered At Last', 'ALA');
+  assert.ok(db.addressMeta(late).identity_checked > 0);
+  assert.equal(db.addressMeta(late).token_name, 'Answered At Last');
+
+  // Two writers touch this table. The entity deriver does not always read a name, and assignment
+  // let a pass that learned nothing erase one the balance scanner had already found — the named
+  // count was observed dropping between passes. A name does not become unknown again.
+  db.upsertAddressMeta({ address: addr, isContract: true, kind: 'proxy', codeSize: 4321 });
+  assert.equal(db.addressMeta(addr).token_name, 'Synthra Perpetual Liquidity Token', 'a nameless pass does not erase a name');
+  assert.equal(db.addressMeta(addr).kind, 'proxy', 'while everything the deriver did learn is applied');
+  // A genuinely new name still wins, so an upgraded contract updates normally. Done on its own
+  // address so the assertions below still describe the one named above.
+  const renamed = '0x' + 'f5'.repeat(20);
+  db.setAddressIdentity(renamed, 'Old Name', 'OLD');
+  db.upsertAddressMeta({ address: renamed, isContract: true, tokenName: 'New Name', tokenSymbol: 'NEW' });
+  assert.equal(db.addressMeta(renamed).token_name, 'New Name');
+  assert.equal(db.addressMeta(renamed).token_symbol, 'NEW');
+
+  // Bulk read, which is what decorates the candidate list.
+  const ids = db.addressIdentities([addr, mute, '0x' + 'f3'.repeat(20)]);
+  assert.equal(ids.get(addr).token_symbol, 'SYNPLP');
+  assert.ok(!ids.has('0x' + 'f3'.repeat(20)), 'an address never seen is absent, not null-filled');
+});
+
+// ---- one asset can be deployed more than once ----
+test('a symbol with two contracts is measured across both, not by whichever came last', async () => {
+  const { CHAIN } = await import('../chains.js');
+  const { TOKEN_SYMBOLS } = await import('../constants.js');
+  const { getLabel } = await import('../labels.js');
+
+  const bySymbol = {};
+  for (const [addr, m] of Object.entries(CHAIN.tokens)) (bySymbol[m.symbol] ||= []).push(addr);
+
+  // Arc testnet carries two independent USYC deployments. Only the dormant one was tracked, so the
+  // site published a supply of 1.38M and a volume of zero for an asset that was moving 722 transfers
+  // over the same window the tracked contract moved one.
+  assert.equal(bySymbol.USYC.length, 2, 'both USYC contracts are tracked');
+  assert.ok(bySymbol.USYC.includes('0x825ae482558415310c71b7e03d2bbbe409345903'), 'including the live one');
+
+  // The symbol set stays deduplicated — two contracts describe one asset, and every stored figure is
+  // keyed by symbol.
+  assert.equal([...TOKEN_SYMBOLS].filter((s) => s === 'USYC').length, 1);
+
+  // Both addresses label as the asset, so neither shows up as an anonymous contract in a feed.
+  for (const a of bySymbol.USYC) assert.equal(getLabel(a).name, 'USYC');
+
+  // USDT is 18 decimals here, not the 6 it uses on Ethereum. Hardcoding 6 anywhere would overstate
+  // every USDT figure by a factor of a trillion.
+  assert.equal(CHAIN.tokens['0x175cdb1d338945f0d851a741ccf787d343e57952'].decimals, 18);
+
+  // The wrapper is deliberately absent: its supply is exactly the USDC it custodies, so tracking it
+  // would count the same dollars twice — once as USDC, once as WUSDC.
+  assert.ok(!CHAIN.tokens['0x911b4000d3422f482f4062a913885f7b035382df'], 'Wrapped USDC is not tracked as issuance');
 });
 
 // ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----

@@ -64,7 +64,20 @@ function applyNetwork(html) {
     ? `${CHAIN.label} is a Gateway chain and is measured as described: Gateway's contracts are `
       + `<code>${CHAIN.gateway.wallet}</code> and <code>${CHAIN.gateway.minter}</code>.`
     : `Circle Gateway is not deployed on ${CHAIN.label}, so there is no bridge flow to attribute here.`;
+  // One line per tracked asset, with what it is and how many contracts carry it. Generated because
+  // a hand-written list is a list that goes stale: it said "USDC, EURC and USYC" for a month after
+  // USDT started trading on the chain, and said nothing about USYC having two deployments.
+  const bySymbol = new Map();
+  for (const [addr, m] of Object.entries(CHAIN.tokens)) {
+    if (!bySymbol.has(m.symbol)) bySymbol.set(m.symbol, { kind: m.kind, addrs: [] });
+    bySymbol.get(m.symbol).addrs.push(addr);
+  }
+  const tokensDetail = [...bySymbol.entries()]
+    .map(([sym, t]) => `<strong>${sym}</strong> (${t.kind}${t.addrs.length > 1 ? `, ${t.addrs.length} contracts` : ''})`)
+    .join(', ');
+
   const out = html
+    .replaceAll('{{TOKENS_DETAIL}}', tokensDetail)
     .replaceAll('{{GATEWAY_STATUS}}', gatewayStatus)
     .replaceAll('{{NET}}', CHAIN.label)
     .replaceAll('{{CHAIN_ID}}', String(CHAIN.chainId))
@@ -222,7 +235,11 @@ const server = http.createServer(async (req, res) => {
   // its own cadence, and tvl.total() is a single summed query so the dashboard's polling stays cheap.
   // Chain state is read live rather than taken from the snapshot: the snapshot is only rebuilt on
   // a poll, so a copy taken at boot would still read "unknown" minutes into a long backfill.
-  if (path === '/api/state') return json(res, { ...live.snapshot, chain: chainStatus(), tvl: TVL_ENABLED ? tvl.total() : null });
+  // `index` rides along for the same reason `chain` does: both are read live, and the snapshot they
+  // accompany is only rebuilt when a tick completes. Without it the page cannot tell a halted chain
+  // from a catch-up, and was captioning the latter 'no blocks being produced' — a false statement
+  // about Arc, made by us, on a chain that was running fine.
+  if (path === '/api/state') return json(res, { ...live.snapshot, chain: chainStatus(), index: indexProgress(), tvl: TVL_ENABLED ? tvl.total() : null });
   if (path === '/api/alerts') return json(res, { feed: alertFeed });
   if (path === '/api/history') {
     const token = (u.searchParams.get('token') || 'ALL').toUpperCase();

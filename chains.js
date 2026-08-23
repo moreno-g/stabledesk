@@ -57,11 +57,34 @@ const TESTNET = {
     'https://rpc.quicknode.testnet.arc.io',
     'https://rpc.blockdaemon.testnet.arc.io',
   ],
+  // Keyed by contract, not by symbol: a symbol can be deployed more than once on the same chain,
+  // and when it is, the chain's supply of it is the sum. See the USYC pair below.
   tokens: {
     '0x3600000000000000000000000000000000000000': { symbol: 'USDC', decimals: 6, kind: 'native gas' },
     '0x89b50855aa3be2f677cd6303cec089b5f319d72a': { symbol: 'EURC', decimals: 6, kind: 'euro' },
+    // Two independent USYC deployments exist on Arc testnet, and nothing on-chain says which one is
+    // canonical. The first is an EIP-1967 proxy (implementation 0xc8ad161a…) holding 1.38M and
+    // essentially dormant — one transfer in 16,000 blocks sampled across six days. The second is a
+    // standalone contract holding 12.2M with all of the activity: 722 transfers over the same sample.
+    // Verified in August 2026 that the first is not a proxy *to* the second; they are unrelated.
+    //
+    // Tracking only the first — which is what shipped until now — published a USYC supply of 1.38M and
+    // a volume of zero for an asset that was moving. Picking the second instead would assert a
+    // canonical address we cannot verify. So both are measured and reported together, and both
+    // addresses are published on /methodology. If Circle names one, deleting the other line here is
+    // the whole change.
     '0xe9185f0c5f296ed1797aae4238d26ccabeadb86c': { symbol: 'USYC', decimals: 6, kind: 'yield / MMF' },
+    '0x825ae482558415310c71b7e03d2bbbe409345903': { symbol: 'USYC', decimals: 6, kind: 'yield / MMF' },
+    // USDT on Arc testnet — 18 decimals, not the 6 it uses on Ethereum. Left untracked until now,
+    // which made it the third-busiest token contract on the chain and invisible here.
+    '0x175cdb1d338945f0d851a741ccf787d343e57952': { symbol: 'USDT', decimals: 18, kind: 'stablecoin' },
   },
+  // Deliberately NOT tracked as issuance, though it is a stablecoin balance and looks like one:
+  //   Wrapped USDC 0x911b4000d3422f482f4062a913885f7b035382df (18 decimals)
+  // Its supply is exactly the USDC it custodies — 68,920,819.86 on both sides when measured — so
+  // counting it would report the same dollars twice, once in USDC's supply and once in its own. It is
+  // in the protocol registry instead, where the USDC it holds is measured as TVL. Same reasoning as
+  // Circle Gateway: a wrapper repositions value, it does not create it.
   // Faucet-funded play money: the interesting threshold is low, and a short backfill is enough.
   notableMin: 1000,
   tweetWorthyMin: 250000,

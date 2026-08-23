@@ -100,11 +100,11 @@ What does need a human:
 A reply is a post. Everything above applies to it — including the network label, which is easier to
 drop in a fast reply than anywhere else.
 
-**@MrLazeem replies. @getStabledesk measures.**
+**@morenog_dev replies. @getStabledesk measures.**
 
 A product account with a small following replying under an ecosystem post reads as placement. A
 named person saying "I index this chain, here is what I see" reads as a contributor. The account
-bio already says *Built by @MrLazeem*: the human is the credential, not the other way round. And a
+bio already says *Built by @morenog_dev*: the human is the credential, not the other way round. And a
 reply that goes wrong from a personal account is someone being wrong; from the measurement brand it
 is the thing that sells precision being imprecise.
 
@@ -173,7 +173,7 @@ value; use it to keep cadence between the other two, never as the main output.
 | Channel | Gate |
 |---|---|
 | [@getStabledesk](https://x.com/getStabledesk) | Manual. This file is the gate. Data replies only — see *Replies* above. |
-| [@MrLazeem](https://x.com/MrLazeem) | Manual. Conversation and replies. Same network rule, no exception for being a person. |
+| [@morenog_dev](https://x.com/morenog_dev) | Manual. Conversation and replies. Same network rule, no exception for being a person. |
 | `stabledesk-brief` | Drafts the figures to Telegram and stops there. It has no X client and is not to be given one. |
 | Whale posts (Telegram) | `WHALEWATCH_ENABLED=true` — off by default, so a deploy can never start publishing as a side effect. |
 | README + `/methodology` | Ship-gated. Changed in the same commit as the behaviour they describe. |

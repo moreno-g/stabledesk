@@ -20,10 +20,28 @@ import { rpcSoft, TOKENS, toUnits } from './rpc.js';
 import * as db from './db.js';
 import { PROTOCOLS, protocolForAddress, publicShape, registryStats } from './protocols.js';
 import { getLabel } from './labels.js';
-import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_CANDIDATE_MIN } from './constants.js';
+import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS } from './constants.js';
 
 const BALANCE_OF = '0x70a08231';
+const NAME = '0x06fdde03';
+const SYMBOL = '0x95d89b41';
 const DAY = 86400;
+
+// Decodes a Solidity `string` return. Returns null on anything that isn't one — a contract that
+// doesn't implement name() reverts, and rpcSoft hands back undefined for that slot by design.
+export function decodeString(hex) {
+  try {
+    if (typeof hex !== 'string' || hex === '0x' || hex.length < 130) return null;
+    const b = hex.slice(2);
+    const off = parseInt(b.slice(0, 64), 16) * 2;
+    const len = parseInt(b.slice(off, off + 64), 16) * 2;
+    if (!Number.isFinite(off) || !Number.isFinite(len) || len <= 0 || len > 256) return null;
+    const s = Buffer.from(b.slice(off + 64, off + 64 + len), 'hex').toString('utf8');
+    // Control characters mean we decoded something that wasn't a string after all.
+    const clean = s.replace(/[^\x20-\x7e]/g, '').trim();
+    return clean.length ? clean.slice(0, 64) : null;
+  } catch { return null; }
+}
 
 // balanceOf(address) calldata: selector + the address left-padded to 32 bytes.
 const balanceCall = (token, holder) => ({
@@ -81,6 +99,54 @@ async function scanBalances(targets) {
   return rows;
 }
 
+// Reads name()/symbol() for holders that carry a balance worth naming and have not been asked yet.
+// Bounded per pass so it never competes with the balance scan for the rate limit, and asked once per
+// address: a contract that answered nothing is a contract without a name, which is an answer.
+async function probeIdentities() {
+  // Read from the stored balances rather than from the scan that just ran. A pass whose balanceOf
+  // calls were partly refused by the rate limit returns a short list, and keying the queue off that
+  // list starved it: measured, the three largest holders on the chain went unasked while the budget
+  // was spent on whatever happened to answer that minute. What is worth naming is a property of the
+  // balances we hold, not of one scan's luck.
+  const holding = new Map();
+  for (const r of db.balanceRows()) holding.set(r.address, (holding.get(r.address) || 0) + r.balance);
+  const known = db.addressIdentities([...holding.keys()]);
+  const targets = [...holding.entries()]
+    // Skip whatever the question is already settled for — named, or asked enough times to conclude
+    // it has no name. Re-asking a settled address would spend the budget re-answering itself.
+    .filter(([a, bal]) => bal >= TVL_CANDIDATE_MIN && !protocolForAddress(a) && !known.get(a)?.identity_checked)
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, IDENTITY_PER_PASS)
+    .map(([a]) => a);
+  if (!targets.length) return 0;
+
+  let found = 0;
+  for (const part of chunk(targets, TVL_CHUNK)) {
+    const { out } = await rpcSoft(part.flatMap((a) => [
+      { method: 'eth_call', params: [{ to: a, data: NAME }, 'latest'] },
+      { method: 'eth_call', params: [{ to: a, data: SYMBOL }, 'latest'] },
+    ]));
+    part.forEach((a, i) => {
+      const rawName = out[i * 2];
+      const rawSymbol = out[i * 2 + 1];
+      // Did the endpoint answer at all? rpcSoft leaves a slot undefined both when the call reverted
+      // (no such method) and when it was refused (rate limit), and those are opposite facts. A string
+      // back — even '0x' — means the contract answered and simply has no name; nothing back means we
+      // did not get to ask, and recording that as "nameless" is how 53 addresses were written off
+      // while the chain answered for them on the next call.
+      const answered = typeof rawName === 'string' || typeof rawSymbol === 'string';
+      const name = decodeString(rawName);
+      const symbol = decodeString(rawSymbol);
+      if (answered) db.setAddressIdentity(a, name, symbol);
+      else db.noteIdentityAttempt(a);
+      if (name || symbol) found += 1;
+    });
+    await sleep(TVL_DELAY);
+  }
+  if (found) console.log(`[tvl] named ${found} previously anonymous holder(s)`);
+  return found;
+}
+
 export async function refresh() {
   try {
     const contractsFound = await discoverContracts(40);
@@ -94,6 +160,15 @@ export async function refresh() {
     const rows = await scanBalances(targets);
     db.upsertBalances(rows);
     invalidateAggregate();
+
+    // Ask the contracts holding real value what they call themselves. The ecosystem page's job is to
+    // turn unattributed value into named value, and its work queue was a column of bare hex — while
+    // the contracts themselves answer name() and symbol() perfectly well. Measured on Arc testnet:
+    // the second- and fifth-largest unnamed holders identify as "Synthra Perpetual Liquidity Token"
+    // and "PerpDEX LP". This is derived from the chain, not asserted: a contract's own name is a
+    // fact about the contract, and it is never treated as a claim about who operates it.
+    const named = await probeIdentities();
+    if (named) invalidateAggregate();
 
     // Persist today's level so tomorrow has something to diff against.
     const agg = aggregate();
@@ -180,17 +255,29 @@ export function computeAggregate() {
   // Contracts holding real balances that no registry entry claims. This is the work queue: the
   // page shows them so they can be identified and listed, which is how the registry grows from
   // evidence instead of assumption.
-  const candidates = [...byAddress.entries()]
+  const shortlist = [...byAddress.entries()]
     .filter(([addr, e]) => e.total >= TVL_CANDIDATE_MIN && !protocolForAddress(addr))
-    .map(([address, e]) => ({
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, 50);
+  // What each one says it is, read from the contract itself. A column of bare hex is a work queue
+  // nobody can act on; "Synthra Perpetual Liquidity Token" is one somebody can. Derived, never
+  // asserted — a contract's own name() is a fact about the contract and says nothing about who runs
+  // it, which is exactly why these stay *unattributed* until a registry entry claims them.
+  const ids = db.addressIdentities(shortlist.map(([a]) => a));
+  const candidates = shortlist.map(([address, e]) => {
+    const id = ids.get(address);
+    return {
       address,
       tvl: e.total,
       byToken: e.byToken,
       label: getLabel(address)?.name || null,
+      selfName: id?.token_name || null,
+      selfSymbol: id?.token_symbol || null,
+      kind: id?.kind || null,
+      codeSize: id?.code_size ?? null,
       ...db.volumeForAddresses([address]),
-    }))
-    .sort((a, b) => b.tvl - a.tvl)
-    .slice(0, 50);
+    };
+  });
 
   return {
     totals: {

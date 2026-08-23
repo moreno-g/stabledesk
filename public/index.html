@@ -30,7 +30,7 @@
     --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583;
     --line:#212B36; --line-2:#2B3742;
     --accent:#25C4B8; --accent-2:#3AD7CB;
-    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE;
+    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C;
     --good:#37C98A; --warn:#E7A93A; --bad:#E5686A;
     --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
     --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
@@ -43,7 +43,7 @@
       --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2;
       --line:#E1E6EC; --line-2:#D2DAE2;
       --accent:#0FA79E; --accent-2:#0B7E77;
-      --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0;
+      --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69;
       --good:#128A5B; --warn:#B4791A; --bad:#D2494B;
       --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08);
     }
@@ -54,7 +54,7 @@
     --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583;
     --line:#212B36; --line-2:#2B3742;
     --accent:#25C4B8; --accent-2:#3AD7CB;
-    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE;
+    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C;
     --good:#37C98A; --warn:#E7A93A; --bad:#E5686A;
     --shadow:0 1px 2px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.28);
   }
@@ -63,7 +63,7 @@
     --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2;
     --line:#E1E6EC; --line-2:#D2DAE2;
     --accent:#0FA79E; --accent-2:#0B7E77;
-    --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0;
+    --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69;
     --good:#128A5B; --warn:#B4791A; --bad:#D2494B;
     --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08);
   }
@@ -141,6 +141,12 @@
 
   .chartwrap{position:relative; height:210px; margin-top:8px}
   .chartwrap svg{width:100%; height:100%; display:block}
+  /* Y-axis labels, drawn as HTML over the chart rather than inside it: the SVG is stretched with
+     preserveAspectRatio="none", so text placed in it would be distorted horizontally. */
+  .ygrid{position:absolute; inset:0; pointer-events:none}
+  .ygrid span{position:absolute; right:0; transform:translateY(-50%); font-family:var(--mono); font-size:9.5px;
+    color:var(--ink-3); background:var(--panel); padding:0 3px; border-radius:3px; font-variant-numeric:tabular-nums}
+  .ygrid span.zero{color:var(--ink-3); opacity:.75}
   .chart-empty{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--ink-3); font-family:var(--mono); font-size:12px}
   .peak{position:absolute; top:2px; left:0; font-family:var(--mono); font-size:10.5px; color:var(--ink-3)}
   .peak b{color:var(--ink-2); font-weight:600}
@@ -156,7 +162,7 @@
   .flowrow:first-child{border-top:0}
   .flowrow .sy{display:flex; align-items:center; gap:8px; font-weight:700; font-size:13px; width:74px; flex:none}
   .flowrow .sy i{width:9px; height:9px; border-radius:3px; background:var(--c)}
-  .flowrow.usdc{--c:var(--usdc)} .flowrow.eurc{--c:var(--eurc)} .flowrow.usyc{--c:var(--usyc)}
+  .flowrow.usdc{--c:var(--usdc)} .flowrow.eurc{--c:var(--eurc)} .flowrow.usyc{--c:var(--usyc)} .flowrow.usdt{--c:var(--usdt)}
   .flowrow .big{font-family:var(--mono); font-size:17px; font-weight:600; font-variant-numeric:tabular-nums}
   .flowrow .sub{font-size:10.5px; color:var(--ink-3); font-family:var(--mono); margin-top:1px}
   .flowrow .rt{margin-left:auto; text-align:right}
@@ -167,7 +173,7 @@
   th.r,td.r{text-align:right}
   td{padding:8px 0; border-top:1px solid var(--line); font-variant-numeric:tabular-nums}
   .chip{font-family:var(--mono); font-size:10.5px; font-weight:700; padding:2px 7px; border-radius:5px; background:color-mix(in srgb,var(--c) 16%,transparent); color:var(--c)}
-  .chip.usdc{--c:var(--usdc)} .chip.eurc{--c:var(--eurc)} .chip.usyc{--c:var(--usyc)}
+  .chip.usdc{--c:var(--usdc)} .chip.eurc{--c:var(--eurc)} .chip.usyc{--c:var(--usyc)} .chip.usdt{--c:var(--usdt)}
   .addr{font-family:var(--mono); color:var(--ink-2)}
   .amt{font-family:var(--mono); font-weight:600}
   .rank{font-family:var(--mono); color:var(--ink-3); width:20px}
@@ -179,7 +185,7 @@
   .stbl td:first-child{text-align:left}
   .stbl .sy{display:inline-flex; align-items:center; gap:6px; font-weight:700; font-family:var(--sans)}
   .stbl .sy i{width:8px; height:8px; border-radius:2px; background:var(--c)}
-  .stbl tr.usdc{--c:var(--usdc)} .stbl tr.eurc{--c:var(--eurc)} .stbl tr.usyc{--c:var(--usyc)}
+  .stbl tr.usdc{--c:var(--usdc)} .stbl tr.eurc{--c:var(--eurc)} .stbl tr.usyc{--c:var(--usyc)} .stbl tr.usdt{--c:var(--usdt)}
   .sharecell{min-width:52px}
   .sharebar{height:5px; border-radius:3px; background:var(--inset); overflow:hidden; margin-top:4px}
   .sharebar span{display:block; height:100%; background:var(--c); border-radius:3px; transition:width .4s ease}
@@ -330,6 +336,7 @@
       <div class="chartwrap">
         <div class="peak" id="chartPeak"></div>
         <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <div class="ygrid" id="chartY"></div>
         <div class="chart-empty" id="chartEmpty">collecting data…</div>
       </div>
       <div class="chartaxis" id="chartAxis"></div>
@@ -443,7 +450,11 @@ const getWatch=()=>{ try{return JSON.parse(localStorage.getItem(WKEY)||'[]')}cat
 const isWatched=(a)=> a? getWatch().includes(a.toLowerCase()) : false;
 function toggleWatch(a){ a=a.toLowerCase(); let w=getWatch(); w=w.includes(a)?w.filter(x=>x!==a):[...w,a]; localStorage.setItem(WKEY,JSON.stringify(w)); renderWatch(); poll(); }
 const TOK={{TOKENS_JSON}};
-const TCOLOR={ALL:'--accent',USDC:'--usdc',EURC:'--eurc',USYC:'--usyc'};
+// Per-token chart colour. Falls back to the accent rather than emitting var(undefined), which
+// renders as no stroke at all — an empty chart that looks like missing data rather than a missing
+// palette entry. Adding a token to the network profile must never be able to blank a chart.
+const TCOLOR={ALL:'--accent',USDC:'--usdc',EURC:'--eurc',USYC:'--usyc',USDT:'--usdt'};
+const tokenColor=(t)=>`var(${TCOLOR[t]||'--accent'})`;
 
 let chart = { token:'ALL', range:'24h', metric:'real' };
 
@@ -551,8 +562,16 @@ function renderState(d){
     $('#strip').innerHTML=lb.map(b=>`<div class="blk" style="height:${Math.max(4,b.tx/maxTx*100)}%" title="block #${b.n} · ${b.tx} tx"></div>`).join('');
     $('#striplab').innerHTML=`<span>#${nf.format(lb[0].n)}</span><span>transactions / block</span><span>#${nf.format(lb.at(-1).n)}</span>`;
   } else {
+    // An empty strip means we have no *live* headers, which is not the same as the chain having
+    // stopped: it is also what a catch-up looks like, and during one the chain is producing blocks
+    // perfectly well. Saying 'no blocks being produced' there states something false about Arc — the
+    // exact misattribution the chain/indexer split exists to prevent, leaking back in through copy.
+    const why = d.chain && d.chain.state==='halted' ? 'no blocks being produced'
+      : d.chain && (d.chain.state==='unreachable'||d.chain.state==='unauthorized') ? 'chain not readable right now'
+      : (d.index && d.index.catchingUp) ? 'catching up — live blocks resume at the head'
+      : 'no live blocks yet';
     $('#strip').innerHTML='';
-    $('#striplab').innerHTML='<span></span><span style="color:var(--ink-3)">no blocks being produced</span><span></span>';
+    $('#striplab').innerHTML='<span></span><span style="color:var(--ink-3)">'+why+'</span><span></span>';
   }
 
   const acell=(addr,label)=> label? `<span class="lblchip">${esc(label)}</span>` : `<span class="addr">${short(addr)}</span>`;
@@ -623,13 +642,30 @@ function renderNoise(n){
 }
 
 // ---- chart ----
+// Y-axis labels for the chart. The gridlines were drawn but never labelled, which is worse than
+// having none: two lines across a plot imply a scale the reader is then left to guess. The scale's
+// floor is labelled too, because that is what says the variation is not being exaggerated by a
+// truncated baseline — and on charts that can go negative (net issuance) the floor is not zero.
+//
+// Positions come from the same geometry the SVG uses (viewBox 0 0 1000 260), so a label sits exactly
+// on its line. Drawn as HTML over the chart, not inside it: the SVG is stretched with
+// preserveAspectRatio="none" and text placed in it would be distorted horizontally.
+function renderYAxis(el, lo, hi, pad, fmt){
+  if(!el) return;
+  const H=260, plot=H-2*pad;
+  if(!(hi>lo)) { el.innerHTML=''; return; }
+  const at=(v)=>((H-pad-((v-lo)/(hi-lo))*plot)/H*100).toFixed(2)+'%';
+  const span=hi-lo;
+  el.innerHTML=[[hi,''],[lo+span*2/3,''],[lo+span/3,''],[lo,'zero']]
+    .map(([v,cls])=>`<span class="${cls}" style="top:${at(v)}">${fmt(v)}</span>`).join('');
+}
 function renderChart(payload){
   let series=payload.series||[];
   // drop the final, still-incomplete bucket so the line doesn't fake a drop-off
   if(series.length>2 && payload.group && series.at(-1).t + payload.group > Date.now()/1000) series=series.slice(0,-1);
   const svg=$('#chart'), empty=$('#chartEmpty'), peak=$('#chartPeak'), axis=$('#chartAxis');
-  const color=`var(${TCOLOR[chart.token]})`;
-  if(series.length<2){ svg.innerHTML=''; empty.style.display='flex'; peak.textContent=''; axis.textContent=''; return; }
+  const color=tokenColor(chart.token);
+  if(series.length<2){ svg.innerHTML=''; empty.style.display='flex'; peak.textContent=''; axis.textContent=''; const yg=$('#chartY'); if(yg) yg.innerHTML=''; return; }
   empty.style.display='none';
   const val=(p)=> chart.metric==='raw' ? (p.volume||0) : chart.metric==='adj' ? (p.avolume||0) : (p.rvolume||0);
   const W=1000,H=260,pad=10;
@@ -643,6 +679,7 @@ function renderChart(payload){
   svg.innerHTML = grid
     + `<path d="${area}" fill="${color}" opacity="0.12"/>`
     + `<path d="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
+  renderYAxis($('#chartY'), 0, maxV, pad, compact);
   peak.innerHTML=`peak <b>${compact(maxV)}</b>`;
   // Buckets are days once the series comes from the rollup, so the axis follows what the response
   // says answered it rather than a hardcoded list of range names.

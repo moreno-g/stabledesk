@@ -56,6 +56,10 @@ export const PROTOCOL_COLUMNS = [
 export const CANDIDATE_COLUMNS = [
   ['address', 'address'],
   ['label', 'label'],
+  // What the contract answers to name()/symbol(). Exported because the CSV is the format people
+  // actually work the identification queue in, and a spreadsheet of bare hex is not workable.
+  ['self_name', 'selfName'],
+  ['self_symbol', 'selfSymbol'],
   ['tvl', 'tvl'],
   ['volume', 'volume'],
   ['transfers', 'transfers'],
