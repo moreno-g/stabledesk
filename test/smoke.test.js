@@ -68,6 +68,38 @@ test('config surface is sane', () => {
   }
 });
 
+// ---- a caller-supplied limit cannot become no limit ----
+test('a negative limit falls back to the default instead of dumping the table', async () => {
+  const { clampLimit, alignToBucket } = await import('../constants.js');
+
+  // SQLite reads a negative LIMIT as *no limit*, and Math.min(max, Number(raw) || dflt) has no floor.
+  // Measured against production: /v1/addresses/top?limit=-5 returned 335,520 rows and 35 MB in 3.2
+  // seconds, against 2.3 KB for the same call with a sane limit. On a free tier allowing 60 requests
+  // a minute, in a single-threaded process, that is an availability problem rather than a tidy-up.
+  assert.equal(clampLimit('-5', 100, 20), 20, 'the exact production payload');
+  assert.equal(clampLimit('-1', 100, 20), 20);
+  assert.equal(clampLimit(-1e9, 100, 20), 20);
+
+  // Everything that is not a usable count is treated as no preference expressed.
+  for (const junk of ['0', 'abc', '', ' ', null, undefined, NaN, Infinity, -Infinity]) {
+    assert.equal(clampLimit(junk, 100, 20), 20, `${String(junk)} should fall back`);
+  }
+  // Real values are honoured and capped.
+  assert.equal(clampLimit('20', 100, 20), 20);
+  assert.equal(clampLimit('99999', 100, 20), 100, 'clamped to the ceiling');
+  assert.equal(clampLimit('7.9', 100, 20), 7, 'fractions floor rather than reaching the database');
+  assert.equal(clampLimit(1, 100, 20), 1, 'one row is a legitimate request');
+
+  // Bucket alignment. A series labels each bucket with the floor of its group, so an unaligned
+  // `since` puts the first label *before* the requested window and that bucket holds only part of
+  // its interval — an artificially low first point, which is the same defect the terminal already
+  // avoids at the other end by dropping the final, still-filling bucket.
+  assert.equal(alignToBucket(1000, 900), 1800, 'aligned up to the next whole bucket');
+  assert.equal(alignToBucket(1800, 900), 1800, 'an already-aligned instant is left alone');
+  assert.equal(alignToBucket(0, 86400), 0);
+  assert.equal(alignToBucket(1234, 1), 1234, 'a group of one has no grid to align to');
+});
+
 // ---- what changed since the last look ----
 test('the watcher reports differences, and makes absence prove itself first', async () => {
   const { diffObservations, describe, severity, MISSES_BEFORE_GONE, MISSES_BEFORE_QUIET } =

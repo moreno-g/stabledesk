@@ -22,7 +22,7 @@ import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
 import { specJson, llmsTxt } from './openapi.js';
-import { RANGES, ADDR_RE, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED, WHALEWATCH_ENABLED, SITE_ORIGIN } from './constants.js';
+import { RANGES, ADDR_RE, clampLimit, alignToBucket, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED, WHALEWATCH_ENABLED, SITE_ORIGIN } from './constants.js';
 import { CHAIN, NETWORK } from './chains.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -249,7 +249,8 @@ const server = http.createServer(async (req, res) => {
     // empty plot next to KPIs that show figures, which reads as a broken chart rather than a
     // stopped chain.
     const endSec = Math.floor((live.snapshot.windowEnd || Date.now()) / 1000);
-    const since = r.span == null ? 0 : endSec - r.span;
+    // Aligned to the bucket grid — see alignToBucket. Every point is a whole interval.
+    const since = r.span == null ? 0 : alignToBucket(endSec - r.span, r.group);
     return json(res, {
       token, group: r.group, windowEnd: endSec * 1000,
       // Which table answered, which instant the range asked for, and how far back that table
@@ -263,7 +264,7 @@ const server = http.createServer(async (req, res) => {
     });
   }
   if (path === '/api/top') {
-    const limit = Math.min(50, Number(u.searchParams.get('limit')) || 10);
+    const limit = clampLimit(u.searchParams.get('limit'), 50, 10);
     return json(res, { top: db.getTop(limit) });
   }
   if (path === '/api/token') {
