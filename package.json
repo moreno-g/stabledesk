@@ -9,7 +9,8 @@
     "start": "node server.js",
     "dev": "node server.js",
     "test": "node --test",
-    "verify": "node verify-network.js"
+    "verify": "node verify-network.js",
+    "watch": "node verify-network.js --watch"
   },
   "engines": {
     "node": ">=22.5.0"

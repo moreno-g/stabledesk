@@ -5,6 +5,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+
+// db.js opens its database at module load and keeps one connection for the whole process, so
+// whichever import reaches it first decides which file the entire suite writes to. It has happened: a
+// test that imported chainwatch.js — which used to import db.js at its top — bound the singleton to the
+// real arc.db before this ran, and the suite wrote synthetic keys, buckets and a nine-million-unit
+// transfer into the live testnet database. Aggregates there are additive, so that is not something a
+// later cleanup fully undoes.
+//
+// ES module imports are hoisted, so this assignment does *not* run before the static imports below —
+// it cannot. What makes it work is that none of them reaches db.js, and every test loads db.js through
+// a dynamic import, which runs after this line. The invariant is therefore: **nothing statically
+// imported by this file may reach db.js.** `usingTempDb` below checks the outcome rather than trusting
+// the invariant, because a comment cannot fail a build.
+process.env.DB_PATH = join(tmpdir(), `stabledesk-test-${process.pid}-${Date.now()}.db`);
 
 import { validateWebhook } from '../validate.js';
 import { ADDR_RE, RANGES, TIERS, TOKEN_SYMBOLS } from '../constants.js';
@@ -51,6 +66,84 @@ test('config surface is sane', () => {
     // or the range would silently return a truncated series.
     if (r.span != null && r.span > 7 * 86400) assert.ok(r.daily, `${name} must read the daily rollup`);
   }
+});
+
+// ---- what changed since the last look ----
+test('the watcher reports differences, and makes absence prove itself first', async () => {
+  const { diffObservations, describe, severity, MISSES_BEFORE_GONE, MISSES_BEFORE_QUIET } =
+    await import('../chainwatch.js');
+
+  const prev = (id, facts, over = {}) => ({ id, kind: 'token', facts, firstSeen: 1, lastSeen: 1000, lastCheck: 1000, misses: 0, ...over });
+  const now = 100000;
+
+  // Nothing to compare against: everything is recorded, nothing is announced. Saying "12 new
+  // contracts" on a first run is true and useless.
+  const first = diffObservations(new Map(), new Map([['seen:0xa', { kind: 'seen', facts: { symbol: 'FOO' } }]]), now);
+  assert.equal(first.events.length, 1, 'a contract we had never seen is reported');
+  assert.equal(first.rows.length, 1);
+
+  // Config subjects are ours. A token appearing in the profile means we added it — not news about
+  // the chain, and announcing our own edits back to us is noise.
+  const added = diffObservations(new Map(), new Map([['token:0xb', { kind: 'token', facts: { symbol: 'USDT' } }]]), now);
+  assert.equal(added.events.length, 0, 'a token we just configured is not a discovery');
+
+  // Volatile values must not register as changes, or every run reports one. Supply moves every block.
+  const same = diffObservations(
+    new Map([['token:0xb', prev('token:0xb', { symbol: 'USDC', decimals: 6, hasCode: true, supply: 1 })]]),
+    new Map([['token:0xb', { kind: 'token', facts: { symbol: 'USDC', decimals: 6, hasCode: true, supply: 999999 } }]]), now);
+  assert.equal(same.events.length, 0, 'a moving supply is not a change of identity');
+
+  // Identity moving under a stable address is the expensive kind: a decimals field that shifts makes
+  // every figure derived from it wrong by a power of ten.
+  const moved = diffObservations(
+    new Map([['token:0xb', prev('token:0xb', { symbol: 'USDC', decimals: 6, hasCode: true })]]),
+    new Map([['token:0xb', { kind: 'token', facts: { symbol: 'USDC', decimals: 18, hasCode: true } }]]), now);
+  assert.equal(moved.events[0].type, 'changed');
+  assert.equal(severity(moved.events[0]), 'high', 'a tracked token changing identity is worth interrupting someone');
+  assert.match(describe(moved.events[0]), /decimals: 6 → 18/);
+
+  // The USYC case, which is the whole reason this exists: deployed, answering every call, and no
+  // longer moving. No snapshot can report it, because nothing about it is wrong.
+  let state = new Map([['token:0xb', prev('token:0xb', { symbol: 'USYC', decimals: 6, hasCode: true })]]);
+  const quietNow = new Map([['token:0xb', { kind: 'token', facts: { symbol: 'USYC', decimals: 6, hasCode: true }, active: false }]]);
+  for (let i = 1; i < MISSES_BEFORE_QUIET; i++) {
+    const r = diffObservations(state, quietNow, now);
+    assert.equal(r.events.length, 0, `silence is not yet evidence at check ${i}`);
+    state = new Map(r.rows.map((x) => [x.id, x]));
+  }
+  const called = diffObservations(state, quietNow, now);
+  assert.equal(called.events[0].type, 'quiet');
+  assert.equal(severity(called.events[0]), 'high');
+  assert.match(describe(called.events[0]), /no transfers/);
+
+  // And announced once, not on every check thereafter — a condition repeated hourly trains the
+  // reader to ignore the channel, which is how the four-day outage stayed invisible.
+  const after = diffObservations(new Map(called.rows.map((x) => [x.id, x])), quietNow, now);
+  assert.equal(after.events.length, 0, 'a standing condition is not re-announced');
+
+  // A sampled absence is not a disappearance: the discovery pass looks at a slice of blocks, so a
+  // contract missing from one sample may simply have been quiet for those few hundred.
+  let s2 = new Map([['seen:0xc', { id: 'seen:0xc', kind: 'seen', facts: { symbol: 'FOO' }, firstSeen: 1, lastSeen: 1000, lastCheck: 1000, misses: 0 }]]);
+  for (let i = 1; i < MISSES_BEFORE_GONE; i++) {
+    const r = diffObservations(s2, new Map(), now);
+    assert.equal(r.events.length, 0, `one missed sample is not a disappearance (check ${i})`);
+    s2 = new Map(r.rows.map((x) => [x.id, x]));
+  }
+  const gone = diffObservations(s2, new Map(), now);
+  assert.equal(gone.events[0].type, 'gone');
+  // The row survives, so the contract is not announced as a fresh discovery the next time a sample
+  // happens to catch it.
+  assert.equal(gone.rows.length, 1);
+
+  // Reappearing clears the count rather than counting as a new contract.
+  const back = diffObservations(new Map(gone.rows.map((x) => [x.id, x])),
+    new Map([['seen:0xc', { kind: 'seen', facts: { symbol: 'FOO' } }]]), now);
+  assert.equal(back.events.length, 0, 'a contract we already knew is not rediscovered');
+  assert.equal(back.rows[0].misses, 0);
+
+  // Severity keeps the channel readable: a memecoin appearing is a log line, a fiat-named one is not.
+  assert.equal(severity({ type: 'new', kind: 'seen', facts: { fiat: false } }), 'low');
+  assert.equal(severity({ type: 'new', kind: 'seen', facts: { fiat: true } }), 'high');
 });
 
 // ---- a refused call is not an answer ----
@@ -117,8 +210,12 @@ test('adding a tracked asset shortens the balance batch instead of enlarging the
 
 // ---- DB round-trip (isolated temp database) ----
 test('db round-trips keys, buckets, addresses', async () => {
-  process.env.DB_PATH = join(tmpdir(), `stabledesk-test-${process.pid}-${Date.now()}.db`);
   const db = await import('../db.js');
+  // The guard, not the hope: if any static import had reached db.js first, the singleton would be
+  // bound to arc.db and this file would never have been created.
+  db.createKey('sbd_probe', 'temp-db check', 'free');
+  assert.ok(existsSync(process.env.DB_PATH),
+    `tests are not using the temp database — db.js was bound elsewhere before DB_PATH took effect`);
 
   // api keys
   db.createKey('sbd_test', 'unit', 'free');

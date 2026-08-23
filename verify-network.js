@@ -44,6 +44,11 @@ const flag = (name, dflt) => {
   return i >= 0 && args[i + 1] ? Number(args[i + 1]) : dflt;
 };
 const SAMPLE_BLOCKS = flag('--blocks', 1500);
+// --watch compares this run against the last one and reports the difference. It is the only mode that
+// writes anything: a plain run stays strictly read-only, which is what makes it safe to point at a
+// production deployment. --every turns it into a loop for a host that has no scheduler.
+const WATCH = args.includes('--watch');
+const EVERY = flag('--every', 0);
 
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const SEL = { name: '0x06fdde03', symbol: '0x95d89b41', decimals: '0x313ce567', totalSupply: '0x18160ddd' };
@@ -96,6 +101,16 @@ const hex = (n) => '0x' + n.toString(16);
 // something the chain contradicts — serving figures under it would publish a wrong number. WARN
 // means something changed that a human should look at but that does not make any published figure
 // false. Only FAIL sets the exit code, so this can gate a deploy without crying wolf.
+// What this check saw, as identities rather than as prose. The findings above are for a human
+// reading one run; this is what a *later* run compares against, so it deliberately holds only what
+// should be stable — symbol, decimals, whether there is code — and never supply or event counts,
+// which move on their own and would make every run look like a change. `active` records whether the
+// subject was seen moving, which is the difference a snapshot cannot express and the whole reason
+// USYC going dormant took a manual audit to notice.
+const observed = new Map();
+const observe = (kind, address, facts, opts = {}) =>
+  observed.set(`${kind}:${String(address).toLowerCase()}`, { kind, facts, active: opts.active !== false, detail: opts.detail });
+
 const findings = [];
 const add = (level, check, message, detail) => findings.push({ level, check, message, detail });
 const fail = (check, message, detail) => add('FAIL', check, message, detail);
@@ -264,7 +279,11 @@ async function checkTokens() {
     ]);
     const code = out[0];
     const size = (typeof code === 'string' && code !== '0x') ? (code.length - 2) / 2 : 0;
-    if (!size) { fail('token', `${meta.symbol} ${addr} has no bytecode — nothing is deployed there`); continue; }
+    if (!size) {
+      observe('token', addr, { symbol: meta.symbol, decimals: meta.decimals, hasCode: false });
+      fail('token', `${meta.symbol} ${addr} has no bytecode — nothing is deployed there`);
+      continue;
+    }
 
     const symbol = decodeString(out[1]);
     const decimals = decodeNum(out[2]);
@@ -289,6 +308,8 @@ async function checkTokens() {
     }
     if (refused(out[3])) warn('token', `${meta.symbol} ${addr}: totalSupply() could not be read (endpoint refused) — not verified`);
     else if (supply == null) warn('token', `${meta.symbol} ${addr} does not answer totalSupply()`);
+
+    observe('token', addr, { symbol: symbol || meta.symbol, decimals: decimals == null ? meta.decimals : Number(decimals), name, hasCode: true });
 
     const human = (supply != null && decimals != null) ? units(supply, Number(decimals)) : null;
     bySymbol.set(meta.symbol, (bySymbol.get(meta.symbol) || 0) + (human || 0));
@@ -338,6 +359,15 @@ async function checkUntracked(head) {
     .sort((x, y) => y[1] - x[1])
     .slice(0, 25);
 
+  // Whether each tracked contract was seen moving in this sample. A tracked asset that is deployed,
+  // answers every call, and produces no transfers is exactly the shape USYC had — and the shape no
+  // single check can report, because nothing about it is wrong.
+  for (const addr of tracked) {
+    const n = counts.get(addr) || 0;
+    const prior = observed.get(`token:${addr}`);
+    if (prior) observed.set(`token:${addr}`, { ...prior, active: n > 0 });
+  }
+
   const trackedEvents = [...counts.entries()].filter(([a]) => tracked.has(a)).reduce((s, [, n]) => s + n, 0);
   ok('discovery', `${counts.size} contracts emitted Transfer in the sample · ${trackedEvents} events from tracked assets`);
 
@@ -361,6 +391,12 @@ async function checkUntracked(head) {
     // protocol", not "add it as a token".
     const wrapped = await detectWrapper(addr, human);
     const label = `${name || symbol || 'unnamed'}${symbol ? ` (${symbol})` : ''}`;
+    // Recorded whether or not it is interesting today: the point of the record is that a later run
+    // can tell this contract from one that was not here before.
+    observe('seen', addr, {
+      name, symbol, decimals: Number(decimals), hasCode: true,
+      fiat: looksFiat(name, symbol), wrapper: wrapped ? wrapped.symbol : null,
+    }, { detail: wrapped ? `wrapper of ${wrapped.symbol}` : (registry.has(addr) ? 'in the registry' : 'not tracked') });
     if (wrapped) {
       const known = registry.has(addr);
       // Reported as OK once it is registered: a wrapper we have already accounted for is not an open
@@ -436,6 +472,7 @@ async function checkGateway(head) {
   const out = await rpc(addrs.map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] })));
   addrs.forEach((a, i) => {
     const size = (typeof out[i] === 'string' && out[i] !== '0x') ? (out[i].length - 2) / 2 : 0;
+    observe('gateway', a, { hasCode: size > 0 });
     if (!size) fail('gateway', `${a} has no bytecode — bridge attribution would silently measure nothing`);
     else ok('gateway', `${a} · ${size} bytes`);
   });
@@ -452,9 +489,11 @@ async function checkRegistry() {
     const out = await rpc(part.map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] })));
     part.forEach((a, j) => {
       const size = (typeof out[j] === 'string' && out[j] !== '0x') ? (out[j].length - 2) / 2 : 0;
+      const owner0 = here.find((p) => p.contracts.includes(a));
+      observe('registry', a, { name: owner0?.name || null, hasCode: size > 0 });
       if (!size) {
         missing += 1;
-        const owner = here.find((p) => p.contracts.includes(a));
+        const owner = owner0;
         warn('registry', `${owner?.name || '?'} lists ${a}, which has no bytecode on ${CHAIN.label}`);
       }
     });
@@ -498,13 +537,34 @@ function report() {
   return fails.length ? 1 : 0;
 }
 
+// ---- watch -------------------------------------------------------------------------------------
+// Diffing needs storage, so db.js is loaded only here — importing it unconditionally would open (and
+// migrate) a database on a plain read-only run, and would drag chains.js in through the static import
+// that loadProfile() exists to avoid.
+async function reportChanges() {
+  const [{ record, describe, severity }, dbmod] = await Promise.all([import('./chainwatch.js'), import('./db.js')]);
+  void dbmod;
+  const { events, notable, firstRun } = await record(observed);
+
+  if (firstRun) {
+    // Nothing to compare against yet. Saying "12 new contracts" on the first run would be true and
+    // useless — everything is new the first time you look.
+    console.log(`\n── changes\n  ok   baseline recorded: ${observed.size} subject(s). Differences are reported from the next run.`);
+    return;
+  }
+  console.log('\n── changes');
+  if (!events.length) { console.log('  ok   nothing changed since the last check'); return; }
+  for (const e of events) console.log(`${severity(e) === 'high' ? '  !!  ' : '  ··  '} ${describe(e)}`);
+  if (notable.length) console.log(`\n  ${notable.length} of ${events.length} worth acting on${JSON_OUT ? '' : ' · delivered to Telegram when configured'}`);
+}
+
 // ---- run ---------------------------------------------------------------------------------------
 // Only when invoked directly. The classification helpers above are the part that has been wrong twice
 // and they need a test, which means the module has to be importable without firing a live run.
 const invokedDirectly = process.argv[1] && process.argv[1].endsWith('verify-network.js');
-if (!invokedDirectly) { /* imported for its helpers */ } else
-try {
-  await loadProfile();
+async function runOnce() {
+  findings.length = 0;
+  observed.clear();
   if (!JSON_OUT) console.log(`Verifying ${CHAIN.label} (${NETWORK}, chain ${CHAIN.chainId}) against ${CHAIN.endpoints.length} endpoint(s)…`);
   const head = await checkEndpoints();
   if (head != null) {
@@ -514,7 +574,28 @@ try {
     await checkRegistry();
     await checkUntracked(head);
   }
-  process.exit(report());
+  const code = report();
+  // Only after the checks have run: a run that could not read the chain has nothing to compare, and
+  // storing its empty observation would make every subject look like it had disappeared.
+  if (WATCH && head != null) await reportChanges();
+  return code;
+}
+
+if (!invokedDirectly) { /* imported for its helpers */ } else
+try {
+  await loadProfile();
+  if (EVERY > 0) {
+    // A loop for a host with no scheduler. Deliberately not the default: one pass and exit composes
+    // with cron, with a Railway job, and with && in a deploy line, and none of those want a process
+    // that never returns.
+    const every = Math.max(60, EVERY);
+    console.log(`Watching every ${every}s. Ctrl-C to stop.`);
+    for (;;) {
+      try { await runOnce(); } catch (e) { console.error(`check failed: ${e.message || e}`); }
+      await sleep(every * 1000);
+    }
+  }
+  process.exit(await runOnce());
 } catch (e) {
   // A crash here is itself a finding: the script could not establish what the chain says, which is
   // not the same as the chain agreeing with us.
