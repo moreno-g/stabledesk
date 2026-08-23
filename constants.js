@@ -130,6 +130,21 @@ export const RPC_CALLS_PER_BATCH = 24;
 export const TVL_CHUNK = Math.max(2, Math.floor(RPC_CALLS_PER_BATCH / Math.max(1, Object.keys(CHAIN.tokens).length)));
 export const TVL_DELAY = 600;
 export const TVL_MAX_TARGETS = 600;          // ceiling on contracts scanned per pass
+// How the ceiling is spent.
+//
+// Scanning the same top 600 by balance every pass left 1,505 known contracts never scanned at all —
+// measured on testnet, the published total covered 29% of them. That is a systematic blind spot, not
+// a sampling one: the same contracts were missing every time, so no amount of waiting fixed it.
+//
+// Raising the ceiling is the wrong answer. A pass is already 90s of pure inter-batch delay inside a
+// 300s interval, and tripling the targets would make a pass outlast its own schedule.
+//
+// So the budget is split. The contracts holding the most value are rescanned every pass, because they
+// decide the total and a stale reading there moves the headline figure. The rest rotate in stable
+// address order, so every known contract is visited on a cycle instead of never. TVL is a level that
+// moves slowly; refreshing the tail every few cycles costs accuracy that is not there to lose.
+export const TVL_ALWAYS_TOP = 300;           // rescanned every pass, ordered by balance then volume
+export const TVL_ROTATE_SLICE = TVL_MAX_TARGETS - TVL_ALWAYS_TOP;
 // Minimum balance for an unregistered contract to be worth naming. Scaled off the network's own
 // notability threshold, because "a balance worth investigating" means something very different
 // with faucet money than with real deposits.

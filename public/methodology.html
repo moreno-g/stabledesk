@@ -223,10 +223,23 @@
     ourselves — which is not a claim about who operates it). Only the first two are marked verified. Two entries may never claim the same
     contract, because that would double-count its balance.</p>
     <p><strong>How many contracts are measured, and which.</strong> One pass reads <code>balanceOf</code> for every tracked asset against
-    every target, so the number of targets is capped — at <strong>600</strong> — to keep a pass inside the public RPC's rate limit. Targets
-    are ordered by the balance we last read, then by the volume they move: the contracts that decide the total are the ones measured first.
-    Whether the cap is binding is published on <code>/v1/tvl</code> as <code>coverage.atCap</code>, with the number of contracts known
-    against the number scanned, and the total carries an explicit warning while it is. Past the cap, chain TVL is a lower bound.</p>
+    every target, so the number of targets per pass is capped — at <strong>600</strong> — to keep a pass inside the public RPC's rate limit.
+    That budget is split rather than spent on the same contracts every time. Registry addresses are always read, because a listed protocol
+    with no measured balance is indistinguishable from one nobody looked at. The <strong>300 highest-value contracts</strong> are re-read
+    every pass, because they decide the total and a stale reading there moves the headline figure. The remaining budget
+    <strong>rotates through every other known contract in address order</strong>, so a contract outside the top is visited on a cycle
+    rather than never.</p>
+    <p><strong>What this replaced.</strong> Until August 2026 the same top 600 by balance were scanned on every pass, and the rest were
+    never scanned at all — 600 of 2,105 known contracts, so the published total covered 29% of them. That is a systematic blind spot rather
+    than a sampling one: the same contracts were missing every time, and waiting did not fix it. Simply raising the ceiling is not the
+    remedy either — a pass already spends 90 seconds in deliberate inter-batch delay inside a five-minute cycle, and tripling the targets
+    would make a pass outlast its own schedule.</p>
+    <p style="margin-bottom:0"><strong>The cost, stated.</strong> Rotating means some balances in the total were read a few cycles ago.
+    TVL is a level and moves slowly, so this buys complete coverage for very little accuracy — but a figure that mixes fresh and older
+    readings has to say so. <code>/v1/tvl</code> publishes <code>coverage.cycleLength</code> (how many passes cover everything),
+    <code>coverage.oldestReadingMs</code> (the oldest reading still counted), and <code>coverage.atCap</code>. Note that
+    <code>atCap</code> now means "one pass does not cover everything", not "the rest is never read" — different claims about the same
+    number.</p>
     <p style="margin-bottom:0"><strong>Known limits.</strong> Value held in assets other than the indexed stablecoins is invisible to this
     method. A protocol's own accounting may therefore be higher than ours, and where we know that to be the case the entry says so. TVL
     history begins the day measurement began — nothing is back-filled or estimated. Registry submissions and corrections:

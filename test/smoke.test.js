@@ -130,6 +130,52 @@ test('a negative limit falls back to the default instead of dumping the table', 
   assert.equal(alignToBucket(1234, 1), 1234, 'a group of one has no grid to align to');
 });
 
+// ---- the scan ceiling bounds a pass, not what is ever measured ----
+test('rotation visits every known contract instead of the same top slice forever', async () => {
+  const db = await import('../db.js');
+  const { selectTargets } = await import('../tvl.js');
+
+  // Scanning the same top N by balance every pass left the rest never scanned at all — measured on
+  // production, 600 of 2,105 known contracts, so the published total covered 29% of them. That is a
+  // systematic blind spot, not a sampling one: the same contracts were missing every time, and no
+  // amount of waiting fixed it. Raising the ceiling is not the answer either — a pass is already 90s
+  // of pure inter-batch delay inside a 300s interval.
+  const addrs = [];
+  for (let i = 0; i < 40; i++) {
+    const a = '0x' + String(i).padStart(4, '0') + 'c'.repeat(36);
+    addrs.push(a);
+    db.markContract(a, true, 100);
+  }
+  const known = db.knownContractCount();
+  const opts = { always: 2, slice: 5, cap: 7 };
+
+  // A pass stays bounded by the cap, whatever the universe size.
+  const first = selectTargets([], known, { ...opts, cursor: '' });
+  assert.ok(first.targets.length <= opts.cap, 'one pass never exceeds the ceiling');
+
+  // And the rotation reaches everything, with the wrap reported rather than counted.
+  const seen = new Set();
+  let cursor = '';
+  let passes = 0;
+  let wrapped = false;
+  for (let i = 0; i < 200 && !wrapped; i++) {
+    const r = selectTargets([], known, { ...opts, cursor });
+    r.targets.forEach((a) => seen.add(a));
+    cursor = r.cursor;
+    wrapped = r.wrapped;
+    passes += 1;
+  }
+  assert.ok(wrapped, 'the cursor wraps, which is how a completed cycle is known');
+  for (const a of addrs) assert.ok(seen.has(a), `${a} must be visited within one cycle`);
+  assert.ok(passes > 1, 'a cycle takes more than one pass, which is the point of bounding a pass');
+
+  // Registry contracts are never squeezed out by the ceiling: a listed protocol with no measured
+  // balance is indistinguishable from one nobody looked at.
+  const listed = '0x' + 'ab'.repeat(20);
+  const withReg = selectTargets([listed], known, { ...opts, cursor: '' });
+  assert.ok(withReg.targets.includes(listed), 'a registry address is always scanned');
+});
+
 // ---- one check at a time ----
 test('two overlapping checks cannot merge into one corrupted observation', async () => {
   const src = readFileSync('verify-network.js', 'utf8');

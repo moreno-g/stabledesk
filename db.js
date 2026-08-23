@@ -825,6 +825,18 @@ const tvstmt = {
     WHERE m.is_contract = 1
     ORDER BY COALESCE(t.b, 0) DESC, COALESCE(a.volume, 0) DESC, m.address LIMIT ?`),
   contractCount: db.prepare('SELECT COUNT(*) AS c FROM address_meta WHERE is_contract = 1'),
+  // The rotating half of the scan, ordered by address rather than by value.
+  //
+  // Ordering the rotation by balance would be self-defeating: the balances shift as we read them, so
+  // the cursor would skip contracts and revisit others, and "everything gets covered eventually" would
+  // stop being true. Address order is stable, which is the only property a cursor needs.
+  contractsAfter: db.prepare(`SELECT m.address FROM address_meta m
+    WHERE m.is_contract = 1 AND m.address > ?
+    ORDER BY m.address LIMIT ?`),
+  // How stale the oldest balance behind the published total is. With rotation some readings are a few
+  // cycles old, and a figure mixing fresh and stale readings has to say so — the alternative is a
+  // total that looks current and is partly hours behind.
+  oldestReading: db.prepare('SELECT MIN(checked) AS t FROM tvl WHERE balance > 0'),
   // Records only whether an address has bytecode, and never overwrites an existing row — so the
   // TVL scanner can discover contracts on its own without clobbering anything entities.js derived.
   markCode: db.prepare(`INSERT INTO address_meta(address, is_contract, code_size, checked) VALUES(?, ?, ?, ?)
@@ -879,6 +891,21 @@ export const knownContracts = (limit = 2000) => tvstmt.contracts.all(limit).map(
 // How many contracts exist to scan, against how many the cap allows. Published for the same reason
 // the noise-set cap is: past the ceiling, coverage is decided by the ceiling and not by the method.
 export const knownContractCount = () => tvstmt.contractCount.get().c;
+
+// The next slice of the rotation, in stable address order, wrapping at the end. Returns the slice and
+// the cursor to store for next time, so the caller never has to reason about the wrap itself.
+export function contractsAfter(cursor, limit) {
+  const first = tvstmt.contractsAfter.all(cursor || '', limit).map((r) => r.address);
+  if (first.length >= limit) return { addresses: first, next: first[first.length - 1] };
+  // Ran off the end: wrap to the beginning and take the rest. A cycle is therefore complete when the
+  // cursor comes back around, not when some counter says so.
+  const rest = tvstmt.contractsAfter.all('', limit - first.length).map((r) => r.address);
+  const all = [...new Set([...first, ...rest])];
+  return { addresses: all, next: rest.length ? rest[rest.length - 1] : '' };
+}
+
+// When the oldest balance behind the published total was read, in ms. Null when nothing is held.
+export const oldestBalanceReading = () => tvstmt.oldestReading.get()?.t ?? null;
 // What a contract calls itself, read from the contract. Null when it answers neither name() nor
 // symbol() — which is a fact about the contract, not a gap in the record.
 export function setAddressIdentity(address, name, symbol) {
