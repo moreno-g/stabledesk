@@ -68,6 +68,36 @@ test('config surface is sane', () => {
   }
 });
 
+// ---- the honesty signals are part of the machine contract ----
+test('a truncated flag set is declared in the spec, not just present in the JSON', async () => {
+  const { specJson } = await import('../openapi.js');
+  const doc = JSON.parse(specJson());
+
+  // atCap, qualifying and cap are how a consumer learns that adjusted volume is a lower bound —
+  // that the flag set was decided by a ceiling and an ORDER BY rather than by the published
+  // thresholds. They were served for weeks without being declared, so a generated typed client
+  // dropped them and its user could never find out. A caveat that exists only in raw JSON is a
+  // caveat for people reading curl output, which is not who the spec is for.
+  const p = doc.components.schemas.FilteredAddresses.properties;
+  for (const field of ['flagged', 'qualifying', 'cap', 'atCap', 'warning']) {
+    assert.ok(p[field], `FilteredAddresses must declare ${field}`);
+    assert.ok(p[field].description, `${field} needs to say what it means, not just its type`);
+  }
+  assert.ok(/lower bound/i.test(p.atCap.description), 'atCap must state the consequence, not just the condition');
+
+  // The same signal on the TVL side: past the scan ceiling the total covers the contracts that fit.
+  const tvl = doc.components.schemas.TvlTotals.properties;
+  assert.ok(tvl.coverage, 'TvlTotals must declare coverage');
+  assert.ok(tvl.warning, 'TvlTotals must declare the truncation warning');
+
+  // And the series must say which table answered and how far back it reaches, or a 90-day range
+  // drawn from a week-old record passes for ninety days.
+  const hist = doc.components.schemas.History.properties;
+  for (const field of ['source', 'since', 'recordBegan', 'windowEnd']) {
+    assert.ok(hist[field], `History must declare ${field}`);
+  }
+});
+
 // ---- a caller-supplied limit cannot become no limit ----
 test('a negative limit falls back to the default instead of dumping the table', async () => {
   const { clampLimit, alignToBucket } = await import('../constants.js');
