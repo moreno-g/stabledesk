@@ -145,6 +145,15 @@ export const TVL_MAX_TARGETS = 600;          // ceiling on contracts scanned per
 // moves slowly; refreshing the tail every few cycles costs accuracy that is not there to lose.
 export const TVL_ALWAYS_TOP = 300;           // rescanned every pass, ordered by balance then volume
 export const TVL_ROTATE_SLICE = TVL_MAX_TARGETS - TVL_ALWAYS_TOP;
+// A few slots per pass go to the stalest readings still counted in the total, whatever they are.
+// The rotation walks address_meta contracts, but the tvl table holds rows written under earlier
+// selection policies — measured: an address outside today's universe kept a frozen positive balance,
+// pinning the published oldestReadingMs at the moment of the rotation deploy, forever. A staleness
+// bound that is enforced by construction — the oldest rows are always the next to be re-read —
+// survives every future change of selection policy; one that relies on the universe staying
+// consistent just broke once already. Taken out of the always-top budget, so a pass stays the same
+// size and the cursor arithmetic is untouched.
+export const TVL_STALEST_SWEEP = 8;
 // Minimum balance for an unregistered contract to be worth naming. Scaled off the network's own
 // notability threshold, because "a balance worth investigating" means something very different
 // with faucet money than with real deposits.
