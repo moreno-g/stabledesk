@@ -113,6 +113,9 @@ const hex = (n) => '0x' + n.toString(16);
 // subject was seen moving, which is the difference a snapshot cannot express and the whole reason
 // USYC going dormant took a manual audit to notice.
 const observed = new Map();
+// Contracts seen emitting a Transfer in the last discovery sample. Collected on every run, written
+// only in watch mode — see reportChanges().
+let emitters = [];
 const observe = (kind, address, facts, opts = {}) =>
   observed.set(`${kind}:${String(address).toLowerCase()}`, { kind, facts, active: opts.active !== false, detail: opts.detail });
 
@@ -400,6 +403,11 @@ async function checkUntracked(head) {
   const trackedEvents = [...counts.entries()].filter(([a]) => tracked.has(a)).reduce((s, [, n]) => s + n, 0);
   ok('discovery', `${counts.size} contracts emitted Transfer in the sample · ${trackedEvents} events from tracked assets`);
 
+  // Every emitter is a contract — only a contract can emit a log — so this sample is a free census of
+  // contract addresses that the balance scanner would otherwise never learn about. Handed to the
+  // writer below rather than written here, so a read-only `npm run verify` stays read-only.
+  emitters = [...counts.keys()];
+
   const others = [];
   for (const [addr, n] of unknown) {
     const out = await rpc([call(addr, SEL.symbol), call(addr, SEL.decimals), call(addr, SEL.totalSupply), call(addr, SEL.name)]);
@@ -572,8 +580,29 @@ function report() {
 // that loadProfile() exists to avoid.
 async function reportChanges() {
   const [{ record, describe, severity }, dbmod] = await Promise.all([import('./chainwatch.js'), import('./db.js')]);
-  void dbmod;
   const { events, notable, firstRun } = await record(observed);
+
+  // Hand the discovery sample to the balance scanner's queue.
+  //
+  // Discovery used to be fed only by addr_stats, which prune() trims to a rolling week — so an
+  // address entered the measurement universe only if it MOVED a tracked token while being watched.
+  // A contract that received USDC and then sat still was pruned before discovery reached it, and
+  // could never be scanned again. Measured on testnet: a second Wrapped USDC deployment holding
+  // 1,190,036 USDC, absent from the published TVL entirely. The bias had a direction — it missed
+  // exactly the contracts that hold value without moving it, which is what TVL is.
+  //
+  // This pass already reads those logs to find untracked assets, so the census is free: no extra
+  // RPC call, one INSERT OR IGNORE per emitter.
+  // Two sources, because neither alone is enough. The sample catches contracts that are active now;
+  // the watcher's own subject memory catches the ones it identified in an earlier pass and that emit
+  // too rarely to appear in every sample — which is precisely what the 1,190,036 USDC wrapper did.
+  const queue = [...new Set([...emitters, ...dbmod.watchedAddresses()])];
+  if (queue.length) {
+    const before = dbmod.seenContractsPending();
+    dbmod.noteSeenContracts(queue);
+    const added = dbmod.seenContractsPending() - before;
+    if (added > 0) console.log(`\n── discovery queue\n  ··   ${added} contract(s) queued for a balance check that addr_stats would not have surfaced`);
+  }
 
   if (firstRun) {
     // Nothing to compare against yet. Saying "12 new contracts" on the first run would be true and
