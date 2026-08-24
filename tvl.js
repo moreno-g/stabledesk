@@ -20,7 +20,7 @@ import { rpcSoft, TOKENS, toUnits } from './rpc.js';
 import * as db from './db.js';
 import { PROTOCOLS, protocolForAddress, publicShape, registryStats } from './protocols.js';
 import { getLabel } from './labels.js';
-import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_ROTATE_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS } from './constants.js';
+import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_STALEST_SWEEP, TVL_ROTATE_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS } from './constants.js';
 
 // Where the rotation left off, in the same meta table the indexer keeps its checkpoint in.
 const CURSOR_KEY = 'tvl_scan_cursor';
@@ -165,12 +165,20 @@ export function selectTargets(registry, known, opts = {}) {
   const slice = opts.slice ?? TVL_ROTATE_SLICE;
   const cap = opts.cap ?? TVL_MAX_TARGETS;
 
-  const hot = db.knownContracts(always);
+  const sweepN = Math.min(opts.sweep ?? TVL_STALEST_SWEEP, always);
+  // The stalest counted balances, re-read before anything else. The rotation only walks addresses
+  // the current policy selects, but the total sums every row the table holds — including rows
+  // written under policies that no longer exist. Sweeping by staleness bounds oldestReadingMs by
+  // construction: whatever a row's provenance, being old is what queues it. Paid for out of the
+  // always-top budget so a pass keeps its size and the cursor arithmetic is untouched.
+  const sweep = sweepN > 0 ? db.stalestBalanceAddresses(sweepN) : [];
+  const hot = db.knownContracts(always - sweep.length);
   const cursor = opts.cursor ?? (db.getMetaValue(CURSOR_KEY) || '');
   const rotation = slice > 0 ? db.contractsAfter(cursor, slice) : { addresses: [], next: cursor };
 
-  // Registry first so it can never be squeezed out by the cap, then value, then the rotation.
-  const targets = [...new Set([...registry, ...hot, ...rotation.addresses])].slice(0, cap);
+  // Registry first so it can never be squeezed out by the cap, then the stale, then value, then
+  // the rotation.
+  const targets = [...new Set([...registry, ...sweep, ...hot, ...rotation.addresses])].slice(0, cap);
   return {
     targets,
     cursor: rotation.next,

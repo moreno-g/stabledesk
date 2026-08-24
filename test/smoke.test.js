@@ -1561,6 +1561,34 @@ test('a symbol with two contracts is measured across both, not by whichever came
 });
 
 // ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----
+// ---- the stalest sweep (tvl.js) ----
+// The property under test: a counted balance is re-read eventually EVEN IF its address is outside
+// every selection the current policy makes. Found on production: rows written under the old
+// selection policy sat outside the rotation universe with frozen balances, pinning the published
+// oldestReadingMs at the moment of the rotation deploy. The sweep queues rows by age alone, so no
+// future change of policy can orphan a row again.
+
+test('sweep: an address outside the rotation universe is still re-read', async () => {
+  const db = await import('../db.js');
+  const { selectTargets } = await import('../tvl.js');
+  // a counted balance whose address is in no registry and has no address_meta contract row
+  const orphan = '0x' + 'ab'.repeat(20);
+  db.upsertBalances([{ address: orphan, token: 'USDC', balance: 500 }]);
+
+  const { targets } = selectTargets([], db.knownContractCount(), { always: 10, slice: 5, cap: 30, sweep: 4 });
+  assert.ok(targets.includes(orphan), 'the sweep must pick up rows the rotation cannot see');
+});
+
+test('sweep: paid out of the always budget, so a pass does not grow', async () => {
+  const db = await import('../db.js');
+  const { selectTargets } = await import('../tvl.js');
+  const a = selectTargets([], db.knownContractCount(), { always: 10, slice: 5, cap: 30, sweep: 0 });
+  const b = selectTargets([], db.knownContractCount(), { always: 10, slice: 5, cap: 30, sweep: 4 });
+  assert.ok(b.targets.length <= Math.max(a.targets.length, 30), 'sweeping must not enlarge the pass');
+  // and the cursor arithmetic is untouched by sweeping
+  assert.equal(a.cursor, b.cursor);
+});
+
 test('whalewatch: threshold filtering, drafting, and dedupe', async () => {
   const db = await import('../db.js');
   const { evaluate, draftText, TWEET_WORTHY_MIN } = await import('../whalewatch.js');

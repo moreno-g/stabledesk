@@ -862,6 +862,10 @@ const tvstmt = {
   // cycles old, and a figure mixing fresh and stale readings has to say so — the alternative is a
   // total that looks current and is partly hours behind.
   oldestReading: db.prepare('SELECT MIN(checked) AS t FROM tvl WHERE balance > 0'),
+  // The addresses whose counted balances have gone longest unread — the sweep's work queue. An
+  // address is as stale as its oldest row, and one visit refreshes every token row it has.
+  stalest: db.prepare(`SELECT address, MIN(checked) AS c FROM tvl
+    WHERE balance > 0 GROUP BY address ORDER BY c LIMIT ?`),
   // Records only whether an address has bytecode, and never overwrites an existing row — so the
   // TVL scanner can discover contracts on its own without clobbering anything entities.js derived.
   markCode: db.prepare(`INSERT INTO address_meta(address, is_contract, code_size, checked) VALUES(?, ?, ?, ?)
@@ -931,6 +935,7 @@ export function contractsAfter(cursor, limit) {
 
 // When the oldest balance behind the published total was read, in ms. Null when nothing is held.
 export const oldestBalanceReading = () => tvstmt.oldestReading.get()?.t ?? null;
+export const stalestBalanceAddresses = (n) => tvstmt.stalest.all(n).map((r) => r.address);
 // What a contract calls itself, read from the contract. Null when it answers neither name() nor
 // symbol() — which is a fact about the contract, not a gap in the record.
 export function setAddressIdentity(address, name, symbol) {
