@@ -267,15 +267,22 @@ async function maybeSendDigest(now = new Date()) {
     totalKeys: db.keyTotal(), quietDays,
   });
 
-  // The day is marked reported either way. A quiet day that produced no message is still a day that
-  // has been looked at, and re-examining it tomorrow would double-count the silence.
-  db.setMetaValue(DIGEST_KEY, String(yesterday));
+  // Marked reported only once the report actually reached someone. Marking before the send meant a
+  // single transient Telegram failure at the first check of the day lost that day's digest with no
+  // retry — the next hourly check read "already reported" and moved on. For the project whose own
+  // alerting notes that a verdict nobody reads is not monitoring, that was the same defect one
+  // storey up. A quiet day that produced no message involves no delivery, so it is marked at once;
+  // a failed send marks nothing, and the next hourly check recomputes the same values and tries
+  // again — idempotent, because nothing was written.
   const busy = routes.length > 0 || created.length > 0;
-  db.setMetaValue(QUIET_KEY, busy ? '0' : String(quietDays >= QUIET_DAYS_BEFORE_HEARTBEAT ? 0 : quietDays));
+  const markReported = () => {
+    db.setMetaValue(DIGEST_KEY, String(yesterday));
+    db.setMetaValue(QUIET_KEY, busy ? '0' : String(quietDays >= QUIET_DAYS_BEFORE_HEARTBEAT ? 0 : quietDays));
+  };
 
-  if (!text) return false;
-  try { await sendTelegram(text); return true; }
-  catch (e) { console.error('[digest] send failed:', e.message); return false; }
+  if (!text) { markReported(); return false; }
+  try { await sendTelegram(text); markReported(); return true; }
+  catch (e) { console.error('[digest] send failed — will retry on the next hourly check:', e.message); return false; }
 }
 
 const server = http.createServer(async (req, res) => {
