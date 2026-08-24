@@ -228,7 +228,10 @@
     with no measured balance is indistinguishable from one nobody looked at. The <strong>300 highest-value contracts</strong> are re-read
     every pass, because they decide the total and a stale reading there moves the headline figure. The remaining budget
     <strong>rotates through every other known contract in address order</strong>, so a contract outside the top is visited on a cycle
-    rather than never. A few slots per pass are reserved for the <strong>stalest readings still counted in the total</strong>,
+    rather than never. Contracts enter that universe from two sources: addresses seen moving a tracked stablecoin, and
+    contracts seen <strong>emitting any Transfer on chain</strong> — the second because the first is kept to a rolling week, so a
+    contract that received a stablecoin and then sat still would otherwise never be measured at all. That is the wrong thing to
+    miss: holding value without moving it is what TVL is. A few slots per pass are reserved for the <strong>stalest readings still counted in the total</strong>,
     whatever their provenance — so <code>oldestReadingMs</code> is bounded by construction, not by the selection policy staying
     consistent with every balance the table has ever recorded.</p>
     <p><strong>What this replaced.</strong> Until August 2026 the same top 600 by balance were scanned on every pass, and the rest were

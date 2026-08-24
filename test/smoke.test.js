@@ -1561,6 +1561,41 @@ test('a symbol with two contracts is measured across both, not by whichever came
 });
 
 // ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----
+// ---- discovery from the chain (db.js + verify-network.js) ----
+// Found by following a watcher notification: a second Wrapped USDC deployment held 1,190,036 USDC
+// and was absent from the published TVL. The cause was that discovery read only addr_stats, which
+// prune() trims to a rolling week — so a contract that received a stablecoin and then sat still was
+// pruned before discovery reached it, and could never be scanned. The bias had a direction: it
+// missed exactly the contracts that hold value without moving it.
+
+test('discovery: a quiet contract still reaches the scan queue', async () => {
+  const db = await import('../db.js');
+  // a contract seen emitting a Transfer, but with no activity row — the pruned case
+  const quiet = '0x' + 'de5d'.repeat(10);
+  db.noteSeenContracts([quiet]);
+  const queued = db.uncheckedAddresses(500);
+  assert.ok(queued.includes(quiet), 'a contract with no addr_stats row must still be discoverable');
+});
+
+test('discovery: queuing does not invent a code size', async () => {
+  const db = await import('../db.js');
+  const quiet = '0x' + 'beef'.repeat(10);
+  db.noteSeenContracts([quiet]);
+  // address_meta is written only by discoverContracts, after a real eth_getCode — a fabricated zero
+  // would be indistinguishable from a measured one.
+  assert.equal(db.contractCodeSize ? db.contractCodeSize(quiet) : undefined, undefined);
+  assert.ok(db.uncheckedAddresses(500).includes(quiet), 'still queued, not yet resolved');
+});
+
+test('discovery: re-queuing the same contract is idempotent', async () => {
+  const db = await import('../db.js');
+  const a = '0x' + 'cafe'.repeat(10);
+  db.noteSeenContracts([a]);
+  const first = db.seenContractsPending();
+  db.noteSeenContracts([a, a, a.toUpperCase()]);
+  assert.equal(db.seenContractsPending(), first, 'a watcher runs hourly — repeats must not accumulate');
+});
+
 // ---- the stalest sweep (tvl.js) ----
 // The property under test: a counted balance is re-read eventually EVEN IF its address is outside
 // every selection the current policy makes. Found on production: rows written under the old

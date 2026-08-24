@@ -149,6 +149,20 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_key_daily_day ON key_daily(day);
 
+  -- Contracts observed emitting a Transfer on-chain — the discovery queue.
+  --
+  -- Only a contract can emit a log, so appearing here is proof of contract-ness that costs no RPC
+  -- call to establish. This exists because the other source of discovery, addr_stats, is pruned to
+  -- a rolling week: an address only ever entered the measurement universe if it MOVED a tracked
+  -- token during the week it was observed. A contract that received USDC and then sat still was
+  -- pruned before discovery reached it, and could never be scanned again. Measured on testnet: a
+  -- second Wrapped USDC deployment holding 1,190,036 USDC, entirely absent from the published TVL.
+  -- The bias had a direction — it missed exactly the contracts that hold value without moving it,
+  -- which is what TVL is.
+  CREATE TABLE IF NOT EXISTS seen_contracts (
+    address TEXT PRIMARY KEY, first_seen INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS hits (
     path TEXT NOT NULL, day INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (path, day)
@@ -868,10 +882,33 @@ const tvstmt = {
     WHERE balance > 0 GROUP BY address ORDER BY c LIMIT ?`),
   // Records only whether an address has bytecode, and never overwrites an existing row — so the
   // TVL scanner can discover contracts on its own without clobbering anything entities.js derived.
+  seen: db.prepare('INSERT OR IGNORE INTO seen_contracts(address, first_seen) VALUES(?, ?)'),
+  watched: db.prepare(`SELECT lower(substr(id, instr(id, ':') + 1)) AS a FROM watch_subjects
+    WHERE id LIKE '%:0x%'`),
+  seenPending: db.prepare(`SELECT COUNT(*) AS n FROM seen_contracts s
+    LEFT JOIN address_meta m ON m.address = s.address WHERE m.address IS NULL`),
   markCode: db.prepare(`INSERT INTO address_meta(address, is_contract, code_size, checked) VALUES(?, ?, ?, ?)
     ON CONFLICT(address) DO NOTHING`),
-  unchecked: db.prepare(`SELECT a.address FROM addr_stats a LEFT JOIN address_meta m ON m.address = a.address
-    WHERE m.address IS NULL ORDER BY a.volume DESC LIMIT ?`),
+  // Both sources. addr_stats supplies addresses seen moving a tracked token (pruned weekly);
+  // seen_contracts supplies contracts seen emitting any Transfer (never pruned). Neither alone is
+  // the universe: the first misses value that sits still, the second misses a plain wallet.
+  //
+  // seen_contracts is drained first, and the order is not a preference — it is what makes the
+  // second source work at all. addr_stats holds ~342k rows, nearly all of them wallets; at the
+  // bounded discovery rate its backlog is a month deep. Ranked behind it, a guaranteed contract
+  // would wait a month for a balance check. Ranked ahead, the queue is small (it only grows when
+  // the chain produces a new contract), it drains in about two hours, and every row in it is
+  // certain to be a contract — because only a contract can emit a log. High yield, small queue,
+  // first.
+  unchecked: db.prepare(`SELECT u.address AS address FROM (
+      SELECT s.address AS address, 0 AS vol, 0 AS tier FROM seen_contracts s
+      UNION ALL
+      SELECT a.address AS address, a.volume AS vol, 1 AS tier FROM addr_stats a
+    ) u
+    LEFT JOIN address_meta m ON m.address = u.address
+    WHERE m.address IS NULL
+    GROUP BY u.address
+    ORDER BY MIN(u.tier), MAX(u.vol) DESC LIMIT ?`),
   // Writes only what a contract says its own name and symbol are, leaving every column entities.js
   // derives untouched. A narrow statement rather than upsertAddressMeta, which overwrites the lot:
   // the balance scanner learns a different, smaller fact than the entity deriver and must not clobber
@@ -968,6 +1005,29 @@ export function addressIdentities(addrs) {
   return out;
 }
 export const markContract = (a, isContract, codeSize) => tvstmt.markCode.run(a, isContract ? 1 : 0, codeSize || 0, Date.now());
+
+// Queue contracts the watcher saw emitting a Transfer. Deliberately does NOT write address_meta:
+// code size is a fact read from the chain, and inventing a zero here would be indistinguishable
+// from a measured one. discoverContracts drains this queue through the existing bounded
+// eth_getCode batches, so every address_meta row still carries a code size that was really read.
+export function noteSeenContracts(addresses) {
+  if (!addresses || !addresses.length) return 0;
+  const now = Date.now();
+  db.exec('BEGIN');
+  try {
+    for (const a of addresses) tvstmt.seen.run(String(a).toLowerCase(), now);
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  return addresses.length;
+}
+export const seenContractsPending = () => tvstmt.seenPending.get().n;
+
+// Addresses the watcher has committed to memory, whatever the reason it noticed them. Subject ids
+// are "kind:0xaddress", and a subject exists because a pass decided it was worth remembering — so
+// this is the watcher's own judgement, not a second heuristic. It matters because the discovery
+// sample is three windows of recent blocks: a contract that emits rarely can be identified once and
+// then miss every later sample, which is exactly what the 1,190,036 USDC wrapper did.
+export const watchedAddresses = () => tvstmt.watched.all().map((r) => r.a).filter(Boolean);
 export const uncheckedAddresses = (limit = 40) => tvstmt.unchecked.all(limit).map((r) => r.address);
 
 // Written once per scan; the same day is overwritten rather than added to, because TVL is a level.
