@@ -63,6 +63,25 @@ const RPC_AUTH_STATUSES = new Set([401, 403, 407]);
 // Below this it is noise: a test deployment nobody uses is not a gap in our coverage.
 const DISCOVERY_MIN_EVENTS = 20;
 
+// Arc implements EIP-7708: a native value movement emits a Transfer log of its own, from this
+// system address, alongside any ERC-20 Transfer the token contract emits. Since gas on Arc is paid
+// in USDC, every transaction on the chain produces one — measured on testnet, this address emitted
+// 49,709 Transfer logs across 3,000 blocks, more than the USDC contract itself (39,234).
+//
+// The indexer is unaffected: it passes address: TOKEN_ADDRS to eth_getLogs, so it never sees these
+// and cannot double-count a movement. Discovery is the surface that hurts, because it samples logs
+// with no address filter in order to find assets we are not tracking.
+//
+// Left alone, this address is the single largest untracked emitter on the chain, so it takes the
+// first of the 25 discovery slots on every pass, spends four eth_calls and a sleep asking a
+// codeless address what it is called, and then vanishes from the report — decimals() reverts, so
+// the "not a fungible token" branch drops it. A silent, permanent 4% tax on the one probe that
+// found USDT and the live USYC contract by hand.
+//
+// Excluded by name and reported as excluded, rather than filtered quietly: a discovery tool that
+// hides part of what it saw is exactly the kind of thing this file exists to catch.
+const NATIVE_TRANSFER_EMITTER = '0xfffffffffffffffffffffffffffffffffffffffe';
+
 // A textual marker that an asset is denominated in a fiat unit. Deliberately a note on the name, not
 // a judgement about the asset: a token called USDC.b is worth a human look on a stablecoin index and
 // a token called ARC WIF CAT is not, and saying which is which is the reader's job, not this script's.
@@ -387,7 +406,7 @@ async function checkUntracked(head) {
   if (!counts.size) { warn('discovery', 'no Transfer events sampled — cannot check for untracked assets'); return; }
 
   const unknown = [...counts.entries()]
-    .filter(([a, n]) => !tracked.has(a) && n >= DISCOVERY_MIN_EVENTS)
+    .filter(([a, n]) => a !== NATIVE_TRANSFER_EMITTER && !tracked.has(a) && n >= DISCOVERY_MIN_EVENTS)
     .sort((x, y) => y[1] - x[1])
     .slice(0, 25);
 
@@ -406,7 +425,13 @@ async function checkUntracked(head) {
   // Every emitter is a contract — only a contract can emit a log — so this sample is a free census of
   // contract addresses that the balance scanner would otherwise never learn about. Handed to the
   // writer below rather than written here, so a read-only `npm run verify` stays read-only.
-  emitters = [...counts.keys()];
+  const nativeLogs = counts.get(NATIVE_TRANSFER_EMITTER) || 0;
+  if (nativeLogs) {
+    ok('discovery', `${nativeLogs} native EIP-7708 transfer log(s) from ${NATIVE_TRANSFER_EMITTER.slice(0, 10)}… excluded — gas is paid in USDC, so every transaction emits one; the indexer filters by token address and never counts them`);
+  }
+  // Queued for a balance check, minus the system emitter: it has no bytecode, so asking the chain
+  // for its code every cycle would answer the same nothing forever.
+  emitters = [...counts.keys()].filter((a) => a !== NATIVE_TRANSFER_EMITTER);
 
   const others = [];
   for (const [addr, n] of unknown) {
