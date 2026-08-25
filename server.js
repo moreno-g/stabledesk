@@ -83,6 +83,7 @@ function applyNetwork(html) {
     .replaceAll('{{TOKENS_DETAIL}}', tokensDetail)
     .replaceAll('{{GATEWAY_STATUS}}', gatewayStatus)
     .replaceAll('{{NET}}', CHAIN.label)
+    .replaceAll('{{RPC_URL}}', CHAIN.endpoints[0] || '')
     .replaceAll('{{CHAIN_ID}}', String(CHAIN.chainId))
     // Lets the page reason about the network in JS, not only in markup: some caveats belong on a
     // rendered value ("faucet-inflated" next to a supply figure) rather than in a block of copy
