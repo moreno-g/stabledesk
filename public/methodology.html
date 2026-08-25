@@ -83,6 +83,12 @@
     <p style="margin-top:0">Everything is read directly from the chain — no third-party data provider. Blocks and logs come from the
     <strong>{{NET}} public RPC</strong> (with fallback endpoints), chain ID <code>{{CHAIN_ID}}</code>. Arc is an EVM chain where
     gas is paid in USDC and blocks are ~0.5s with no reorgs.</p>
+    <p><strong>Two Transfer logs, one movement.</strong> Arc implements EIP-7708, so a native value movement emits its own
+    Transfer log from the system address <code>0xff…fe</code>, in addition to any ERC-20 Transfer the token contract emits. Because
+    gas on Arc is paid in USDC, every transaction on the chain produces one — on testnet that address emits more Transfer logs than
+    the USDC contract does. Counting both would report the same money twice. We read logs filtered by token contract address, so a
+    native log is never seen and never counted; the discovery probe that looks for assets we do not track excludes this address by
+    name and says so on every run.</p>
     <p style="margin-bottom:0">We track the {{NET}} stablecoins over their ERC-20 interface: {{TOKENS_DETAIL}}. That list is
     generated from the running configuration rather than written here, so it cannot drift from what is actually indexed — the full
     set of contract addresses is in <code>/openapi.json</code> and on <code>/v1/status</code>. An asset carried by more than one
