@@ -149,8 +149,24 @@
   .chart-tip b{font-family:var(--mono); font-size:12px}
   .chart-tip i{display:block; font-style:normal; color:var(--ink-3); font-size:10.5px}
   .chartwrap.hastip{cursor:crosshair}
-  #rpcBtn{cursor:pointer; font:inherit}
+  /* Header controls carry a real icon rather than a typographic glyph: ⧉ and ↗ are borrowed from
+     whatever font happens to be installed, so they shift size and weight between machines. These
+     are drawn at the same 24-unit grid and stroke width as the theme control, and inherit colour
+     through currentColor, so they follow the theme without a second palette. */
+  .hlico{display:inline-flex; align-items:center; gap:6px; line-height:1}
+  .hlico svg{width:13px; height:13px; display:block; flex:none; opacity:.75}
+  .hlico:hover svg{opacity:1}
+  /* font-family only, never the `font` shorthand: the shorthand resets size and line-height to the
+     inherited values, and at ID specificity it beat .headlink's 12px — the button rendered at 16px
+     and stood 11px taller than the link beside it. */
+  #rpcBtn{cursor:pointer; font-family:inherit; background:none; color:inherit}
+  /* The copied state swaps which icon is shown rather than rewriting the button's contents —
+     replacing textContent would delete the SVG nodes and they would not come back. */
+  .hlico .i-done{display:none}
   #rpcBtn.done{color:var(--good); border-color:var(--good)}
+  #rpcBtn.done svg{opacity:1}
+  #rpcBtn.done .i-copy{display:none}
+  #rpcBtn.done .i-done{display:block}
   /* Whether a tile leaves the page or scrolls down it — the two were indistinguishable. */
   .feat .fk::after{content:attr(data-nav); font-size:9.5px; color:var(--ink-3); margin-left:5px; vertical-align:1px}
   /* Y-axis labels, drawn as HTML over the chart rather than inside it: the SVG is stretched with
@@ -269,8 +285,14 @@
     <span class="badge" id="chainBadge">chain {{CHAIN_ID}}</span>
     <span class="live"><span class="dot down" id="statusDot"></span><span id="statusText">connecting…</span></span>
     <span class="meta" id="metaLine"></span>
-    <button class="headlink" id="rpcBtn" type="button" data-rpc="{{RPC_URL}}" title="Copy the {{NET}} RPC endpoint">RPC ⧉</button>
-    <a class="headlink" href="/docs">API ↗</a>
+    <button class="headlink hlico" id="rpcBtn" type="button" data-rpc="{{RPC_URL}}" title="Copy the {{NET}} RPC endpoint" aria-label="Copy the {{NET}} RPC endpoint">
+      <span class="hlt" id="rpcLabel">RPC</span>
+      <svg class="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2.2"/><path d="M5.5 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v.5"/></svg>
+      <svg class="i-done" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6.5 9.5 17 4 11.5"/></svg>
+    </button>
+    <a class="headlink hlico" href="/docs"><span class="hlt">API</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-8.5 8.5M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>
+    </a>
     <button class="iconbtn" id="themeBtn" type="button" title="Toggle theme" aria-label="Toggle light / dark theme"></button>
   </div>
 
@@ -722,8 +744,9 @@ function attachTip(series, val, byDay, X, Y, W, H, color){
   b.addEventListener('click', async ()=>{
     try{ await navigator.clipboard.writeText(url); }
     catch{ /* clipboard refused (insecure context, or denied) — say nothing rather than claim success */ return; }
-    const was=b.textContent; b.textContent='copied ✓'; b.classList.add('done');
-    setTimeout(()=>{ b.textContent=was; b.classList.remove('done'); }, 1600);
+    const lab=document.getElementById('rpcLabel'), was=lab.textContent;
+    lab.textContent='copied'; b.classList.add('done');
+    setTimeout(()=>{ lab.textContent=was; b.classList.remove('done'); }, 1600);
   });
 })();
 
