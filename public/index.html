@@ -141,6 +141,18 @@
 
   .chartwrap{position:relative; height:210px; margin-top:8px}
   .chartwrap svg{width:100%; height:100%; display:block}
+  /* Reading an exact value off a chart is not decoration on a measurement product — a figure you
+     cannot read precisely is a figure you cannot check. */
+  .chart-tip{position:absolute; pointer-events:none; z-index:3; background:var(--panel); border:1px solid var(--line-2);
+    border-radius:8px; padding:6px 9px; font-size:11.5px; line-height:1.5; color:var(--ink); white-space:nowrap;
+    box-shadow:0 4px 14px rgba(0,0,0,.28); transform:translate(-50%,-100%); margin-top:-9px}
+  .chart-tip b{font-family:var(--mono); font-size:12px}
+  .chart-tip i{display:block; font-style:normal; color:var(--ink-3); font-size:10.5px}
+  .chartwrap.hastip{cursor:crosshair}
+  #rpcBtn{cursor:pointer; font:inherit}
+  #rpcBtn.done{color:var(--good); border-color:var(--good)}
+  /* Whether a tile leaves the page or scrolls down it — the two were indistinguishable. */
+  .feat .fk::after{content:attr(data-nav); font-size:9.5px; color:var(--ink-3); margin-left:5px; vertical-align:1px}
   /* Y-axis labels, drawn as HTML over the chart rather than inside it: the SVG is stretched with
      preserveAspectRatio="none", so text placed in it would be distorted horizontally. */
   .ygrid{position:absolute; inset:0; pointer-events:none}
@@ -257,6 +269,7 @@
     <span class="badge" id="chainBadge">chain {{CHAIN_ID}}</span>
     <span class="live"><span class="dot down" id="statusDot"></span><span id="statusText">connecting…</span></span>
     <span class="meta" id="metaLine"></span>
+    <button class="headlink" id="rpcBtn" type="button" data-rpc="{{RPC_URL}}" title="Copy the {{NET}} RPC endpoint">RPC ⧉</button>
     <a class="headlink" href="/docs">API ↗</a>
     <button class="iconbtn" id="themeBtn" type="button" title="Toggle theme" aria-label="Toggle light / dark theme"></button>
   </div>
@@ -281,27 +294,27 @@
        they are in the markup for crawlers too. -->
   <nav class="feats" aria-label="What you can do here">
     <a class="feat" href="/ecosystem">
-      <div class="fk">Ecosystem</div>
+      <div class="fk" data-nav="↗">Ecosystem</div>
       <div class="ft">Every protocol on Arc</div>
       <div class="fd">TVL, flow and status per protocol</div>
     </a>
     <a class="feat" href="/docs">
-      <div class="fk">API</div>
+      <div class="fk" data-nav="↗">API</div>
       <div class="ft">Free REST API</div>
       <div class="fd">Free key, 60 req/min, no signup</div>
     </a>
     <a class="feat" href="#alerts">
-      <div class="fk">Alerts</div>
+      <div class="fk" data-nav="↓">Alerts</div>
       <div class="ft">Watch any address</div>
       <div class="fd">Live feed + browser watchlist</div>
     </a>
     <a class="feat" href="/docs">
-      <div class="fk">Webhooks</div>
+      <div class="fk" data-nav="↗">Webhooks</div>
       <div class="ft">Push to Discord or Slack</div>
       <div class="fd">Fires when a transfer matches</div>
     </a>
     <a class="feat" href="#whales">
-      <div class="fk">Whales</div>
+      <div class="fk" data-nav="↓">Whales</div>
       <div class="ft">Largest transfers, live</div>
       <div class="fd">Every big move as it lands</div>
     </a>
@@ -338,6 +351,7 @@
         <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true"></svg>
         <div class="ygrid" id="chartY"></div>
         <div class="chart-empty" id="chartEmpty">collecting data…</div>
+        <div class="chart-tip" id="chartTip" hidden></div>
       </div>
       <div class="chartaxis" id="chartAxis"></div>
 
@@ -659,6 +673,60 @@ function renderYAxis(el, lo, hi, pad, fmt){
   el.innerHTML=[[hi,''],[lo+span*2/3,''],[lo+span/3,''],[lo,'zero']]
     .map(([v,cls])=>`<span class="${cls}" style="top:${at(v)}">${fmt(v)}</span>`).join('');
 }
+// Reading a precise value off the chart. The SVG is drawn with preserveAspectRatio="none", so its
+// user units do not map to screen pixels — the pointer position is converted through the wrapper's
+// own box instead, which is the only element whose pixels are real.
+let tipState=null;
+function attachTip(series, val, byDay, X, Y, W, H, color){
+  const wrap=document.querySelector('.chartwrap'), tip=$('#chartTip'), svg=$('#chart');
+  if(!wrap||!tip) return;
+  tipState={series,val,byDay,X,Y,W,H,color};
+  wrap.classList.add('hastip');
+  if(wrap.dataset.tipBound) return;      // one listener for the life of the page, not one per render
+  wrap.dataset.tipBound='1';
+
+  const hide=()=>{ tip.hidden=true; const m=svg.querySelector('#tipmark'); if(m) m.remove(); };
+  wrap.addEventListener('pointerleave', hide);
+  wrap.addEventListener('pointermove', (e)=>{
+    const st=tipState; if(!st||st.series.length<2) return hide();
+    const r=wrap.getBoundingClientRect();
+    const frac=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width));
+    const i=Math.round(frac*(st.series.length-1));
+    const p=st.series[i], v=st.val(p);
+
+    const d=new Date(p.t*1000);
+    const when = st.byDay
+      ? d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})
+      : d.toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    // The exact figure, not the abbreviated one: the compact form is for the axis, and a reader
+    // hovering a point is asking precisely because the rounded number was not enough.
+    tip.innerHTML=`<b>${Math.round(v).toLocaleString('en-US')}</b><i>${when}</i>`;
+    tip.hidden=false;
+    const x=(st.X(i)/st.W)*r.width;
+    tip.style.left=Math.min(r.width-8,Math.max(8,x))+'px';
+    tip.style.top=((st.Y(v)/st.H)*r.height)+'px';
+
+    let m=svg.querySelector('#tipmark');
+    if(!m){ m=document.createElementNS('http://www.w3.org/2000/svg','g'); m.id='tipmark'; svg.appendChild(m); }
+    m.innerHTML=`<line x1="${st.X(i)}" y1="0" x2="${st.X(i)}" y2="${st.H}" stroke="${st.color}" stroke-width="1" stroke-dasharray="3 3" opacity=".55" vector-effect="non-scaling-stroke"/>`;
+  });
+}
+
+// Copy the RPC endpoint. A developer who lands here during launch week and leaves with the endpoint
+// on their clipboard has a reason to come back; the value is distribution, not decoration. The URL
+// comes from chains.js through a substitution, so it can never name the wrong network.
+(function(){
+  const b=document.getElementById('rpcBtn'); if(!b) return;
+  const url=b.dataset.rpc||'';
+  if(!url){ b.remove(); return; }   // no endpoint configured: no button, rather than a button that lies
+  b.addEventListener('click', async ()=>{
+    try{ await navigator.clipboard.writeText(url); }
+    catch{ /* clipboard refused (insecure context, or denied) — say nothing rather than claim success */ return; }
+    const was=b.textContent; b.textContent='copied ✓'; b.classList.add('done');
+    setTimeout(()=>{ b.textContent=was; b.classList.remove('done'); }, 1600);
+  });
+})();
+
 function renderChart(payload){
   let series=payload.series||[];
   // drop the final, still-incomplete bucket so the line doesn't fake a drop-off
@@ -687,6 +755,9 @@ function renderChart(payload){
   const fmt=(sec)=>{ const dte=new Date(sec*1000);
     return byDay ? dte.toLocaleDateString('en-US',{month:'short',day:'numeric'})
       : dte.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}); };
+  // Hover readout. The series, the accessor and the label formatter are handed to the wrapper's
+  // handler rather than recomputed there, so the tooltip can never disagree with the drawn line.
+  attachTip(series, val, byDay, X, Y, W, H, color);
   const mid=series[Math.floor(series.length/2)];
   axis.innerHTML=`<span>${fmt(series[0].t)}</span><span>${fmt(mid.t)}</span><span>${fmt(series.at(-1).t)}</span>`;
   // A long range drawn from a record that began recently is a short series wearing a long label. The
