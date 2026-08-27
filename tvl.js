@@ -20,10 +20,11 @@ import { rpcSoft, TOKENS, toUnits } from './rpc.js';
 import * as db from './db.js';
 import { PROTOCOLS, protocolForAddress, publicShape, registryStats } from './protocols.js';
 import { getLabel } from './labels.js';
-import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_STALEST_SWEEP, TVL_ROTATE_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS } from './constants.js';
+import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_STALEST_SWEEP, TVL_ROTATE_SLICE, TVL_FAST_SLICE, TVL_SLOW_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS } from './constants.js';
 
 // Where the rotation left off, in the same meta table the indexer keeps its checkpoint in.
-const CURSOR_KEY = 'tvl_scan_cursor';
+const CURSOR_KEY = 'tvl_scan_cursor';            // fast lane
+const SLOW_CURSOR_KEY = 'tvl_scan_cursor_slow';  // verified-empty lane
 
 const BALANCE_OF = '0x70a08231';
 const NAME = '0x06fdde03';
@@ -173,19 +174,31 @@ export function selectTargets(registry, known, opts = {}) {
   // always-top budget so a pass keeps its size and the cursor arithmetic is untouched.
   const sweep = sweepN > 0 ? db.stalestBalanceAddresses(sweepN) : [];
   const hot = db.knownContracts(always - sweep.length);
+
+  // Two lanes, two cursors. The fast lane carries holders, never-scanned contracts and anything
+  // active this week; the slow lane re-confirms the verified-empty. If the slow lane comes up
+  // short — a young deployment where nothing is verified-empty yet — its unused slots go to the
+  // fast lane rather than being burned on nothing.
+  const fastSlice = opts.fastSlice ?? TVL_FAST_SLICE;
+  const slowSlice = opts.slowSlice ?? TVL_SLOW_SLICE;
   const cursor = opts.cursor ?? (db.getMetaValue(CURSOR_KEY) || '');
-  const rotation = slice > 0 ? db.contractsAfter(cursor, slice) : { addresses: [], next: cursor };
+  const slowCursor = opts.slowCursor ?? (db.getMetaValue(SLOW_CURSOR_KEY) || '');
+  const slow = slowSlice > 0 ? db.slowContractsAfter(slowCursor, slowSlice) : { addresses: [], next: slowCursor };
+  const spare = Math.max(0, slowSlice - slow.addresses.length);
+  const fast = fastSlice + spare > 0 ? db.fastContractsAfter(cursor, fastSlice + spare) : { addresses: [], next: cursor };
 
   // Registry first so it can never be squeezed out by the cap, then the stale, then value, then
-  // the rotation.
-  const targets = [...new Set([...registry, ...sweep, ...hot, ...rotation.addresses])].slice(0, cap);
+  // the two rotations.
+  const targets = [...new Set([...registry, ...sweep, ...hot, ...fast.addresses, ...slow.addresses])].slice(0, cap);
   return {
     targets,
-    cursor: rotation.next,
-    // The cursor moving backwards means the rotation wrapped: every known contract has now been
-    // visited at least once since the last wrap. That is the honest definition of a completed cycle —
-    // not a counter we increment and hope matches reality.
-    wrapped: !!cursor && rotation.next !== '' && rotation.next < cursor,
+    cursor: fast.next,
+    slowCursor: slow.next,
+    // A cursor moving backwards means that lane wrapped: everything in it has been visited at least
+    // once since the last wrap. That is the honest definition of a completed cycle — not a counter
+    // we increment and hope matches reality.
+    wrapped: !!cursor && fast.next !== '' && fast.next < cursor,
+    slowWrapped: !!slowCursor && slow.next !== '' && slow.next < slowCursor,
     known,
   };
 }
@@ -198,13 +211,15 @@ export async function refresh() {
     // just deployed holds a balance before it shows up in any transfer ranking.
     const registry = PROTOCOLS.flatMap((p) => p.contracts);
     const known = db.knownContractCount();
-    const { targets, cursor, wrapped } = selectTargets(registry, known);
+    const lanes = db.laneUniverse();
+    const { targets, cursor, slowCursor, wrapped } = selectTargets(registry, known);
 
     const rows = await scanBalances(targets);
     db.upsertBalances(rows);
     // Advanced only after the scan succeeded. Moving it first would skip a slice whenever a pass was
     // cut short by the rate limit, and those contracts would wait a full cycle for nothing.
     db.setMetaValue(CURSOR_KEY, cursor);
+    db.setMetaValue(SLOW_CURSOR_KEY, slowCursor);
     invalidateAggregate();
 
     // Ask the contracts holding real value what they call themselves. The ecosystem page's job is to
@@ -230,7 +245,7 @@ export async function refresh() {
       // an implementation detail. They are now ordered by balance and then volume; they used to be
       // ordered by the hexadecimal value of their address, which decided coverage by accident.
       knownContracts: known, cap: TVL_MAX_TARGETS, atCap: known > TVL_MAX_TARGETS,
-      cursor, wrapped,
+      cursor, wrapped, lanes,
     };
     if (wrapped) console.log(`[tvl] rotation completed a full cycle over ${known} known contracts`);
   } catch (e) {
@@ -454,10 +469,32 @@ export function snapshot() {
       atCap: !!lastRun.atCap,
       alwaysTop: TVL_ALWAYS_TOP,
       rotatingSlice: TVL_ROTATE_SLICE,
-      // How many passes it takes to visit every known contract once, at this slice size.
-      cycleLength: TVL_ROTATE_SLICE > 0 && lastRun.knownContracts
-        ? Math.max(1, Math.ceil(Math.max(0, lastRun.knownContracts - TVL_ALWAYS_TOP) / TVL_ROTATE_SLICE))
-        : 1,
+      // Two lanes, published separately, because their staleness guarantees are different claims.
+      // The fast lane carries holders, never-scanned contracts and anything active this week; the
+      // slow lane re-confirms the verified-empty. Discovery on a spam testnet grew the universe
+      // tenfold in four days, and one flat cycle number averaged a minutes-fresh total with a
+      // days-old sweep of zeros — true, and useless.
+      lanes: lastRun.lanes ? {
+        fast: {
+          universe: lastRun.lanes.fast,
+          slice: TVL_FAST_SLICE,
+          cycleLength: Math.max(1, Math.ceil(Math.max(0, lastRun.lanes.fast) / Math.max(1, TVL_FAST_SLICE))),
+        },
+        slow: {
+          universe: lastRun.lanes.slow,
+          slice: TVL_SLOW_SLICE,
+          cycleLength: Math.max(1, Math.ceil(Math.max(0, lastRun.lanes.slow) / Math.max(1, TVL_SLOW_SLICE))),
+        },
+      } : null,
+      // Passes to visit every known contract once — the slower lane decides it. Kept because
+      // consumers already read it; the lane breakdown above is the number that means something.
+      cycleLength: lastRun.lanes
+        ? Math.max(
+            Math.ceil(Math.max(0, lastRun.lanes.fast) / Math.max(1, TVL_FAST_SLICE)),
+            Math.ceil(Math.max(0, lastRun.lanes.slow) / Math.max(1, TVL_SLOW_SLICE)), 1)
+        : (TVL_ROTATE_SLICE > 0 && lastRun.knownContracts
+          ? Math.max(1, Math.ceil(Math.max(0, lastRun.knownContracts - TVL_ALWAYS_TOP) / TVL_ROTATE_SLICE))
+          : 1),
       // The honest cost of rotating: the oldest balance still counted in the total. A figure mixing
       // fresh and several-cycles-old readings has to say so, or it looks current and partly is not.
       oldestReadingMs: db.oldestBalanceReading(),

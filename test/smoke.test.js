@@ -150,7 +150,9 @@ test('rotation visits every known contract instead of the same top slice forever
     db.markContract(a, true, 100);
   }
   const known = db.knownContractCount();
-  const opts = { always: 2, slice: 5, cap: 7 };
+  // These 40 contracts are never-scanned, so they all live in the fast lane; the rotation under
+  // test is that lane's. slowSlice is zeroed so the slow lane cannot absorb part of the cap.
+  const opts = { always: 2, fastSlice: 5, slowSlice: 0, cap: 7, sweep: 0, slowCursor: '' };
 
   // A pass stays bounded by the cap, whatever the universe size.
   const first = selectTargets([], known, { ...opts, cursor: '' });
@@ -1563,6 +1565,69 @@ test('a symbol with two contracts is measured across both, not by whichever came
 });
 
 // ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----
+// ---- the two-lane rotation (db.js + tvl.js) ----
+// Discovery admits every Transfer emitter, and on a spam testnet the universe grew tenfold in four
+// days — a flat rotation spent most of its budget re-reading verified zeros while holders queued
+// behind them. The properties that matter: emptiness demotes, activity promotes, and no contract
+// ever leaves the universe entirely.
+
+test('lanes: a holder stays fast, a verified-empty quiet contract goes slow', async () => {
+  const db = await import('../db.js');
+  const { DatabaseSync } = await import('node:sqlite');
+  const raw = new DatabaseSync(process.env.DB_PATH);
+
+  const holder = '0x' + '11'.repeat(20);
+  const empty = '0x' + '22'.repeat(20);
+  db.markContract(holder, true, 100);
+  db.markContract(empty, true, 100);
+  db.upsertBalances([{ address: holder, token: 'USDC', balance: 5000 }]);
+  db.upsertBalances([{ address: empty, token: 'USDC', balance: 0 }]);   // scanned, holds nothing
+  raw.prepare('DELETE FROM addr_stats WHERE address IN (?, ?)').run(holder, empty);
+
+  const fast = db.fastContractsAfter('', 10000).addresses;
+  const slow = db.slowContractsAfter('', 10000).addresses;
+  assert.ok(fast.includes(holder), 'a contract holding a balance belongs to the fast lane');
+  assert.ok(slow.includes(empty), 'scanned + empty + quiet belongs to the slow lane');
+  assert.ok(!fast.includes(empty) && !slow.includes(holder), 'the lanes must not overlap');
+  raw.close();
+});
+
+test('lanes: a never-scanned contract is fast — first look before re-confirming zeros', async () => {
+  const db = await import('../db.js');
+  const fresh = '0x' + '33'.repeat(20);
+  db.markContract(fresh, true, 100);   // discovered, no tvl row yet
+  assert.ok(db.fastContractsAfter('', 10000).addresses.includes(fresh));
+});
+
+test('lanes: receiving a tracked transfer promotes an empty contract on the next pass', async () => {
+  const db = await import('../db.js');
+  const { DatabaseSync } = await import('node:sqlite');
+  const raw = new DatabaseSync(process.env.DB_PATH);
+  const woke = '0x' + '44'.repeat(20);
+  db.markContract(woke, true, 100);
+  db.upsertBalances([{ address: woke, token: 'USDC', balance: 0 }]);
+  raw.prepare('DELETE FROM addr_stats WHERE address = ?').run(woke);
+  assert.ok(db.slowContractsAfter('', 10000).addresses.includes(woke), 'starts slow');
+  // the indexer writes this row the moment the contract moves a tracked token — presence in the
+  // weekly-pruned table IS the recency test
+  raw.prepare('INSERT INTO addr_stats(address, transfers, volume, last_block, first_block) VALUES(?, 1, 10, 999999, 999999)').run(woke);
+  assert.ok(db.fastContractsAfter('', 10000).addresses.includes(woke), 'activity promotes it');
+  assert.ok(!db.slowContractsAfter('', 10000).addresses.includes(woke), 'and removes it from slow');
+  raw.close();
+});
+
+test('lanes: both cursors advance independently and no lane starves the other', async () => {
+  const db = await import('../db.js');
+  const { selectTargets } = await import('../tvl.js');
+  const r1 = selectTargets([], db.knownContractCount(), { always: 4, fastSlice: 3, slowSlice: 2, cap: 30, sweep: 0, cursor: '', slowCursor: '' });
+  const r2 = selectTargets([], db.knownContractCount(), { always: 4, fastSlice: 3, slowSlice: 2, cap: 30, sweep: 0, cursor: r1.cursor, slowCursor: r1.slowCursor });
+  assert.notEqual(r1.cursor, r2.cursor, 'the fast cursor moves');
+  assert.ok(r1.targets.length <= 30 && r2.targets.length <= 30, 'the cap still bounds a pass');
+  // laneUniverse partitions the whole universe: nothing falls between the lanes
+  const u = db.laneUniverse();
+  assert.equal(u.fast + u.slow, db.knownContractCount(), 'every known contract is in exactly one lane');
+});
+
 // ---- denomination (constants.js) ----
 // The property: two currencies can never end up in the same total. This was not hypothetical —
 // "total stablecoin supply" was the arithmetic sum of face values across currencies, and on testnet

@@ -243,8 +243,12 @@
     That budget is split rather than spent on the same contracts every time. Registry addresses are always read, because a listed protocol
     with no measured balance is indistinguishable from one nobody looked at. The <strong>300 highest-value contracts</strong> are re-read
     every pass, because they decide the total and a stale reading there moves the headline figure. The remaining budget
-    <strong>rotates through every other known contract in address order</strong>, so a contract outside the top is visited on a cycle
-    rather than never. Contracts enter that universe from two sources: addresses seen moving a tracked stablecoin, and
+    <strong>rotates through every other known contract in address order, in two lanes</strong>. The fast lane carries contracts
+    that hold a balance, have never been scanned, or moved a tracked token within the retention week — the rows the total is made
+    of, plus the ones that could change it. The slow lane re-confirms contracts already verified empty and quiet, on a longer
+    published cycle; any activity promotes a contract back to the fast lane on the next pass. The split exists because discovery
+    admits every contract seen emitting a Transfer, and on a test network that universe grew tenfold in four days — a single flat
+    rotation was spending most of its budget re-reading zeros while actual holders queued behind them. Contracts enter that universe from two sources: addresses seen moving a tracked stablecoin, and
     contracts seen <strong>emitting any Transfer on chain</strong> — the second because the first is kept to a rolling week, so a
     contract that received a stablecoin and then sat still would otherwise never be measured at all. That is the wrong thing to
     miss: holding value without moving it is what TVL is. A few slots per pass are reserved for the <strong>stalest readings still counted in the total</strong>,

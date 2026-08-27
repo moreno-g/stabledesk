@@ -394,12 +394,26 @@ export async function handleV1(req, res, u) {
 
   if (path === '/v1/search') {
     const limit = clampLimit(u.searchParams.get('limit'), 25, 10);
-    return json(res, search(u.searchParams.get('q'), limit), 200, H);
+    // Protocols and tokens come from registries and are timeless; address matches come from the
+    // same weekly-pruned activity table as /v1/addresses/top, and the response has to say which
+    // part of it carries a window.
+    return json(res, {
+      ...search(u.searchParams.get('q'), limit),
+      note: 'Address matches cover a rolling ~7-day activity window; protocol and token matches are registry lookups.',
+    }, 200, H);
   }
 
   if (path === '/v1/addresses/top') {
     const limit = clampLimit(u.searchParams.get('limit'), 100, 20);
-    return json(res, { top: db.getTop(limit).map((x) => ({ ...x, label: getLabel(x.address)?.name || null })) }, 200, H);
+    // The ranking reads addr_stats, which prune() keeps to a rolling ~7 days — so this is the top of
+    // the week, not of all time, and an integrator reading it as an all-time ranking would build on
+    // a claim this API never made. /v1/transfers/largest already states its window for exactly this
+    // reason; this endpoint just never got the same treatment.
+    return json(res, {
+      windowDays: 7,
+      note: 'Ranked over a rolling ~7-day window (the address-activity retention), not all time.',
+      top: db.getTop(limit).map((x) => ({ ...x, label: getLabel(x.address)?.name || null })),
+    }, 200, H);
   }
 
   // Largest transfers over an explicit number of days, from the retained per-day set. This used to

@@ -869,9 +869,39 @@ const tvstmt = {
   // Ordering the rotation by balance would be self-defeating: the balances shift as we read them, so
   // the cursor would skip contracts and revisit others, and "everything gets covered eventually" would
   // stop being true. Address order is stable, which is the only property a cursor needs.
-  contractsAfter: db.prepare(`SELECT m.address FROM address_meta m
+  // The two rotation lanes. Discovery feeds every Transfer emitter into the universe, and on a
+  // testnet where thousands of contracts deploy daily that grew it tenfold in four days —
+  // measured: 2,988 → 26,188 contracts, a full cycle stretching from under an hour to eleven, on
+  // its way to days. Nearly all of that universe is scanned-and-empty spam, and one flat rotation
+  // spent ~95% of its budget re-reading zeros while actual holders waited in the same queue.
+  //
+  // FAST: contracts that hold a balance, have never been scanned at all, or moved a tracked token
+  // within the retention week — addr_stats is pruned to ~7 days, so mere presence there IS the
+  // recency test, no block arithmetic needed. These are the rows the total is made of, plus the
+  // ones that could change it.
+  fastAfter: db.prepare(`SELECT m.address FROM address_meta m
     WHERE m.is_contract = 1 AND m.address > ?
+      AND (EXISTS (SELECT 1 FROM tvl t WHERE t.address = m.address AND t.balance > 0)
+        OR NOT EXISTS (SELECT 1 FROM tvl t2 WHERE t2.address = m.address)
+        OR EXISTS (SELECT 1 FROM addr_stats a WHERE a.address = m.address))
     ORDER BY m.address LIMIT ?`),
+  // SLOW: scanned before, holds nothing, moved nothing tracked in a week. Verified empty is a fact
+  // worth refreshing occasionally, not every cycle — and any activity promotes the contract back to
+  // the fast lane on the very next pass, because the promotion test is the same addr_stats row the
+  // indexer writes when the transfer happens.
+  slowAfter: db.prepare(`SELECT m.address FROM address_meta m
+    WHERE m.is_contract = 1 AND m.address > ?
+      AND EXISTS (SELECT 1 FROM tvl t WHERE t.address = m.address)
+      AND NOT EXISTS (SELECT 1 FROM tvl t2 WHERE t2.address = m.address AND t2.balance > 0)
+      AND NOT EXISTS (SELECT 1 FROM addr_stats a WHERE a.address = m.address)
+    ORDER BY m.address LIMIT ?`),
+  laneCounts: db.prepare(`SELECT
+    SUM(CASE WHEN EXISTS (SELECT 1 FROM tvl t WHERE t.address = m.address AND t.balance > 0)
+          OR NOT EXISTS (SELECT 1 FROM tvl t2 WHERE t2.address = m.address)
+          OR EXISTS (SELECT 1 FROM addr_stats a WHERE a.address = m.address)
+        THEN 1 ELSE 0 END) AS fast,
+    COUNT(*) AS total
+    FROM address_meta m WHERE m.is_contract = 1`),
   // How stale the oldest balance behind the published total is. With rotation some readings are a few
   // cycles old, and a figure mixing fresh and stale readings has to say so — the alternative is a
   // total that looks current and is partly hours behind.
@@ -960,14 +990,20 @@ export const knownContractCount = () => tvstmt.contractCount.get().c;
 
 // The next slice of the rotation, in stable address order, wrapping at the end. Returns the slice and
 // the cursor to store for next time, so the caller never has to reason about the wrap itself.
-export function contractsAfter(cursor, limit) {
-  const first = tvstmt.contractsAfter.all(cursor || '', limit).map((r) => r.address);
+// One lane's next slice, wrapping at the end. A cycle is complete when the cursor comes back
+// around, not when some counter says so — same contract for both lanes.
+function laneAfter(stmt, cursor, limit) {
+  const first = stmt.all(cursor || '', limit).map((r) => r.address);
   if (first.length >= limit) return { addresses: first, next: first[first.length - 1] };
-  // Ran off the end: wrap to the beginning and take the rest. A cycle is therefore complete when the
-  // cursor comes back around, not when some counter says so.
-  const rest = tvstmt.contractsAfter.all('', limit - first.length).map((r) => r.address);
+  const rest = stmt.all('', limit - first.length).map((r) => r.address);
   const all = [...new Set([...first, ...rest])];
   return { addresses: all, next: rest.length ? rest[rest.length - 1] : '' };
+}
+export const fastContractsAfter = (cursor, limit) => laneAfter(tvstmt.fastAfter, cursor, limit);
+export const slowContractsAfter = (cursor, limit) => laneAfter(tvstmt.slowAfter, cursor, limit);
+export function laneUniverse() {
+  const r = tvstmt.laneCounts.get() || { fast: 0, total: 0 };
+  return { fast: r.fast || 0, slow: (r.total || 0) - (r.fast || 0) };
 }
 
 // When the oldest balance behind the published total was read, in ms. Null when nothing is held.
