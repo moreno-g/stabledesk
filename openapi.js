@@ -677,7 +677,7 @@ function build() {
             supply: num('Read with `totalSupply()`. Null — not zero — when the chain has never been reachable: zero is a measurement, null is the absence of one.'),
             denomination: { type: ['string', 'null'], description: 'The currency this token is denominated in (ISO code), declared rather than inferred. Null when undeclared.' },
             dominance: num('Share of the supply denominated in the same currency, 0–1 — not of a cross-currency sum.'),
-            volShare: num('Share of real volume, 0–1.'),
+            volShare: num('Share of the real volume moved in the same currency, 0–1 — not of a cross-currency sum.'),
             velocity: num('Real transfers per day ÷ supply.'),
             rvolume24h: { type: 'number' },
             avolume24h: { type: 'number' },

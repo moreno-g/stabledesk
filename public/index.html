@@ -557,28 +557,29 @@ function renderState(d){
   // Frozen, the 24h window ends at the last block indexed rather than at now, so the tiles have
   // to say so — an unqualified "24h volume" on week-old data claims to describe today.
   const win = d.degraded && d.windowEnd ? 'real · 24h to '+ago(d.windowEnd) : 'real';
-// The supply tile, denominated.
+// The denominated tiles.
 //
-// It used to read "Total stable supply" and show the arithmetic sum of every tracked token's face
-// value — dollars and euros added together as if they were one unit. On testnet that number was 86%
-// euros, so the headline figure of a dollar-denominated chain was mostly not dollars, and nothing on
-// the page said so.
+// Both the supply and the 24h volume figures used to be sums of face values across currencies:
+// dollars, euros and pesos added together. Converting would need an exchange rate, and there is no
+// price feed and no oracle in this codebase by design — so each tile leads with one denomination
+// and names it, and the others are counted rather than listed.
 //
-// Converting would need an exchange rate, and there is no price feed and no oracle in this codebase
-// by design. So the tile leads with the denomination that has the most supply and names it, and the
-// others are listed beside it rather than folded in.
-function supplyKpi(d){
-  const by=d.byDenomination||{};
-  const groups=Object.entries(by).filter(([,g])=>g&&g.supply>0).sort((a,b)=>b[1].supply-a[1].supply);
-  if(!groups.length) return ['Stable supply',compact(d.totalSupply),IS_TESTNET?'faucet-inflated':''];
-  // Lead with the chain's own unit of account when it has supply; only fall back to the largest
-  // group when it does not. Otherwise a faucet mint in one currency renames the headline.
-  const base=d.baseDenomination;
-  const i=base&&by[base]&&by[base].supply>0 ? groups.findIndex(([c])=>c===base) : 0;
-  const [cur,g]=groups[i<0?0:i];
-  const rest=groups.filter((_,k)=>k!==(i<0?0:i)).map(([c,x])=>compact(x.supply)+' '+c).join(' · ');
-  const note=[IS_TESTNET?'faucet-inflated':'', rest].filter(Boolean).join(' · ');
-  return ['Stable supply · '+cur, compact(g.supply), note];
+// Counted, not listed, because listing them does not scale: with five currencies tracked the
+// subtitle wrapped onto three lines and the tile became unreadable. Every figure is in the
+// per-asset table below, which is where a reader who wants all five should be looking anyway.
+//
+// The denomination led with is the chain's own unit of account — the currency it charges gas in —
+// not the largest. Sorting by size let a faucet mint rename the headline: the terminal briefly
+// announced "Stable supply · EUR" on a chain that bills in USDC.
+function denomTile(label, by, base, pick, note){
+  const groups=Object.entries(by||{}).filter(([,g])=>pick(g)>0).sort((a,b)=>pick(b[1])-pick(a[1]));
+  if(!groups.length) return [label, compact(0), note||''];
+  const i=base&&by[base]&&pick(by[base])>0 ? groups.findIndex(([c])=>c===base) : 0;
+  const k=i<0?0:i;
+  const [cur,g]=groups[k];
+  const others=groups.length-1;
+  const rest=others ? `+${others} other ${others===1?'currency':'currencies'}` : '';
+  return [label+' · '+cur, compact(pick(g)), [note, rest].filter(Boolean).join(' · ')];
 }
 
   // Ordered by how much each figure actually describes the network. Supply used to lead, and on
@@ -586,10 +587,10 @@ function supplyKpi(d){
   // orders of magnitude larger than daily volume, so the number is correct, meaningless, and the
   // first thing anyone reads. Measured flow goes first; supply goes last, labelled.
   const kpis=[
-    ['24h volume',compact(s.rvolume),win],
+    denomTile('24h volume', s.byDenomination, d.baseDenomination, (g)=>g.rvolume, win),
     ['TVL',compact(d.tvl),'held by contracts'],
     ['Active addresses · 1h',compact(d.activeAddresses1h),d.degraded?'last indexed hour':''],
-    supplyKpi(d),
+    denomTile('Stable supply', d.byDenomination, d.baseDenomination, (g)=>g.supply, IS_TESTNET?'faucet-inflated':''),
   ].map(([l,v,u])=>`<div class="kpi"><div class="lab">${l}</div><div class="val">${v}<span class="unit">${u}</span></div></div>`).join('');
   $('#kpis').innerHTML=kpis;
 

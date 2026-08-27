@@ -96,7 +96,9 @@
     would require an exchange rate, and there is no price feed and no oracle anywhere in this project — the same rule that makes
     the fee figures directly measured rather than estimated. So each denomination is published on its own, a token's share is
     computed against its own currency, and a tracked asset whose denomination we have not declared is reported separately rather
-    than folded into a total.</p>
+    than folded into a total. <strong>The same applies to volume</strong>: until August 2026 the 24-hour figure was a sum of
+    transferred amounts across currencies, so it answered no question, and every token's share was measured against that mixed
+    total. Volume is grouped the same way now, and each share is a share of the volume moved in its own currency.</p>
     <p style="margin-bottom:0">We track the {{NET}} stablecoins over their ERC-20 interface: {{TOKENS_DETAIL}}. That list is
     generated from the running configuration rather than written here, so it cannot drift from what is actually indexed — the full
     set of contract addresses is in <code>/openapi.json</code> and on <code>/v1/status</code>. An asset carried by more than one
