@@ -703,6 +703,20 @@ function dbDerived({ frozen = false } = {}) {
     }
   }
 
+  // Volume has the same problem supply had, on the figure the terminal shows first. The 24h total
+  // was every token's transferred amount added together — dollars, euros and pesos in one sum, so
+  // "193,963,380 moved" answered no question, and volShare divided by that mixed total exactly as
+  // dominance used to. Grouped here for the same reason and by the same rule: no conversion, ever.
+  const volByDenomination = {};
+  for (const [sym, t] of Object.entries(summary.byToken || {})) {
+    const cur = denominationOf(sym);
+    if (!cur) continue;      // undeclared: reported in undeclaredSupply, never folded into a total
+    const g = volByDenomination[cur] || (volByDenomination[cur] = { rvolume: 0, avolume: 0, tokens: [] });
+    g.rvolume += t.rvolume || 0;
+    g.avolume += t.avolume || 0;
+    if (!g.tokens.includes(sym)) g.tokens.push(sym);
+  }
+
   const supply = {};
   // Distinct symbols, not contracts: two contracts sharing a symbol describe one asset, and every
   // figure below is already keyed by symbol.
@@ -720,7 +734,11 @@ function dbDerived({ frozen = false } = {}) {
         const g = byDenomination[denominationOf(sym)];
         return g && g.supply && sup != null ? sup / g.supply : null;
       })(),
-      volShare: summary.rvolume ? rvol / summary.rvolume : 0,
+      // Share of the real volume moved in the same currency, not of a cross-currency sum.
+      volShare: (() => {
+        const g = volByDenomination[denominationOf(sym)];
+        return g && g.rvolume ? rvol / g.rvolume : 0;
+      })(),
       velocity: sup ? perDay / sup : null, // real transfers/day ÷ supply
       rvolume24h: rvol,
       avolume24h: summary.byToken[sym]?.avolume || 0,
@@ -747,7 +765,7 @@ function dbDerived({ frozen = false } = {}) {
   );
 
   return {
-    summary24h: summary,
+    summary24h: { ...summary, byDenomination: volByDenomination },
     fees: fees ? { ...fees, windowSec: feeWindowSec } : null,
     noise: {
       flagged: noisyRows.length,
