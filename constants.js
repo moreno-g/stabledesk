@@ -170,6 +170,14 @@ export const TVL_MAX_TARGETS = 600;          // ceiling on contracts scanned per
 // moves slowly; refreshing the tail every few cycles costs accuracy that is not there to lose.
 export const TVL_ALWAYS_TOP = 300;           // rescanned every pass, ordered by balance then volume
 export const TVL_ROTATE_SLICE = TVL_MAX_TARGETS - TVL_ALWAYS_TOP;
+// The rotation runs in two lanes. Fast: holders, never-scanned contracts, and anything that moved a
+// tracked token this week — the rows the total is made of, plus the ones that could change it.
+// Slow: contracts already verified empty and quiet — re-confirmed occasionally, not every cycle.
+// The split exists because discovery grew the universe tenfold in four days on a spam-heavy
+// testnet, and a flat rotation spent ~95% of its budget re-reading zeros while holders queued
+// behind them. Activity promotes a contract back to the fast lane on the next pass.
+export const TVL_SLOW_SLICE = 60;
+export const TVL_FAST_SLICE = TVL_ROTATE_SLICE - TVL_SLOW_SLICE;
 // A few slots per pass go to the stalest readings still counted in the total, whatever they are.
 // The rotation walks address_meta contracts, but the tvl table holds rows written under earlier
 // selection policies — measured: an address outside today's universe kept a frozen positive balance,

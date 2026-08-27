@@ -652,7 +652,7 @@ function build() {
 
         TokenSummary: {
           type: 'object',
-          description: 'The three volume measures, side by side. `volume` counts every Transfer event; `rvolume` is real (one largest transfer per transaction per token); `avolume` is adjusted (real, minus infrastructure-to-infrastructure).',
+          description: 'The three volume measures, side by side. `volume` counts every Transfer event; `rvolume` is real (one largest transfer per transaction per token); `avolume` is adjusted (real, minus infrastructure-to-infrastructure). The top-level totals are face values added across every tracked token WITH NO currency conversion — dollars, euros and pesos in one sum. Kept for consumers already reading them; `byDenomination` inside this object carries the per-currency figures, and `byToken` the per-asset ones.',
           properties: {
             volume: { type: 'number' }, transfers: { type: 'integer' },
             rvolume: { type: 'number' }, rtransfers: { type: 'integer' },
@@ -851,7 +851,15 @@ function build() {
                 },
                 alwaysTop: { type: 'integer', description: 'Highest-value contracts re-read on every pass.' },
                 rotatingSlice: { type: 'integer', description: 'Contracts taken from the rotation each pass.' },
-                cycleLength: { type: 'integer', description: 'Passes needed to visit every known contract once.' },
+                lanes: {
+                  type: ['object', 'null'],
+                  description: 'The rotation runs in two lanes with different staleness guarantees. fast: contracts holding a balance, never scanned, or active this week — the rows the total is made of. slow: contracts verified empty and quiet, re-confirmed on a longer cycle. Activity promotes a contract back to the fast lane on the next pass.',
+                  properties: {
+                    fast: { type: 'object', properties: { universe: { type: 'integer' }, slice: { type: 'integer' }, cycleLength: { type: 'integer' } } },
+                    slow: { type: 'object', properties: { universe: { type: 'integer' }, slice: { type: 'integer' }, cycleLength: { type: 'integer' } } },
+                  },
+                },
+                cycleLength: { type: 'integer', description: 'Passes to visit every known contract once — the slower lane decides it. See lanes for the split that means something.' },
                 oldestReadingMs: { type: ['integer', 'null'], description: 'When the oldest balance still counted in the total was read (ms). The honest cost of rotating: a figure mixing fresh and older readings has to say so.' },
                 order: { type: 'string', description: 'How the per-pass budget is spent.' },
               },
