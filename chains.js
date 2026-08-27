@@ -78,6 +78,22 @@ const TESTNET = {
     // USDT on Arc testnet — 18 decimals, not the 6 it uses on Ethereum. Left untracked until now,
     // which made it the third-busiest token contract on the chain and invisible here.
     '0x175cdb1d338945f0d851a741ccf787d343e57952': { symbol: 'USDT', decimals: 18, kind: 'stablecoin' },
+    // Non-USD stablecoins. `npm run watch` had been reporting these as untracked fiat-denominated
+    // assets for weeks, and they stayed untracked for one reason: supply was published as a single
+    // sum of face values, so listing a naira token would have added naira to a dollar figure with
+    // nothing on the page to reveal it. Now that supply is grouped by denomination and never summed
+    // across groups, tracking them costs nothing and leaving them out costs coverage.
+    //
+    // Each was verified against the chain before being listed — symbol, decimals, bytecode, and a
+    // check that it custodies no tracked asset, which would make it a wrapper repositioning value
+    // rather than an independent issuer. All three issue their own supply.
+    //
+    // cNGN answered nothing when asked in a batch of eleven calls and answered all of them when
+    // asked singly: a refused RPC slot is indistinguishable from a missing method, which is why
+    // nothing here is recorded from a batched probe alone.
+    '0x23d7cffd0876f3abb6b074287ba2aeefbc83825d': { symbol: 'QCAD', decimals: 6, kind: 'Canadian dollar' },
+    '0x836f73fbc370a9329ba4957e47912dfdba6ba461': { symbol: 'MXNB', decimals: 6, kind: 'Mexican peso' },
+    '0x9a9c18a371d98200fe910f62c45875f1abb68d20': { symbol: 'cNGN', decimals: 6, kind: 'Nigerian naira' },
   },
   // Deliberately NOT tracked as issuance, though it is a stablecoin balance and looks like one:
   //   Wrapped USDC 0x911b4000d3422f482f4062a913885f7b035382df (18 decimals)
