@@ -4,12 +4,19 @@
 import { rpc, net, hex, topicAddr, toUnits, TOKENS, TOKEN_ADDRS, TRANSFER_TOPIC, ZERO, GATEWAY_ADDRS, HAS_GATEWAY } from './rpc.js';
 import * as db from './db.js';
 import { getLabel } from './labels.js';
-import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES } from './constants.js';
+import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES, denominationOf } from './constants.js';
 import { CHAIN } from './chains.js';
 import * as chainalert from './chainalert.js';
 import { SEEN_KEY, UNOBSERVED } from './chainuptime.js';
 
 const TOTAL_SUPPLY = '0x18160ddd'; // ERC-20 totalSupply() selector
+
+// The denomination the chain itself charges in, read from the token marked as native gas in the
+// network profile. Null if no token is so marked, in which case nothing downstream assumes one.
+const BASE_DENOMINATION = (() => {
+  const gas = Object.values(CHAIN.tokens).find((t) => /gas/i.test(t.kind || ''));
+  return gas ? denominationOf(gas.symbol) : null;
+})();
 const SUPPLY_TTL = 30000;          // refresh supplies at most this often
 
 let supplies = {};                 // symbol -> supply (number)
@@ -674,7 +681,28 @@ function dbDerived({ frozen = false } = {}) {
   // is a measurement; null is the absence of one, and rendering "$0 total supply" would be the
   // most alarming wrong number on the page.
   const known = Object.keys(supplies).length > 0;
+  // Kept for the consumers that already read it, and described in the spec as exactly what it is:
+  // face values added across denominations, with no conversion. It is not a quantity of anything,
+  // which is why nothing on the site leads with it any more.
   const totalSupply = known ? Object.values(supplies).reduce((a, b) => a + b, 0) : null;
+
+  // Supply grouped by the currency it is denominated in. Never summed across groups: converting
+  // would need an exchange rate, and there is no price feed and no oracle anywhere in this codebase.
+  // A symbol with no declared denomination lands in `undeclared` rather than in a currency total —
+  // absent is not zero, and quietly adding one currency to another is the failure this replaces.
+  const byDenomination = {};
+  const undeclared = {};
+  if (known) {
+    for (const [sym, sup] of Object.entries(supplies)) {
+      if (sup == null) continue;
+      const cur = denominationOf(sym);
+      if (!cur) { undeclared[sym] = sup; continue; }
+      const g = byDenomination[cur] || (byDenomination[cur] = { supply: 0, tokens: [] });
+      g.supply += sup;
+      if (!g.tokens.includes(sym)) g.tokens.push(sym);
+    }
+  }
+
   const supply = {};
   // Distinct symbols, not contracts: two contracts sharing a symbol describe one asset, and every
   // figure below is already keyed by symbol.
@@ -684,7 +712,14 @@ function dbDerived({ frozen = false } = {}) {
     const perDay = covSec ? (rvol / covSec) * 86400 : 0;
     supply[sym] = {
       supply: sup,
-      dominance: totalSupply && sup != null ? sup / totalSupply : null,
+      denomination: denominationOf(sym),
+      // Share of the supply denominated in the same currency, not of a cross-currency sum. The old
+      // denominator mixed euros into a dollar figure, so EURC was published at 86% of "supply" —
+      // a ratio between two different units, presented as a market share.
+      dominance: (() => {
+        const g = byDenomination[denominationOf(sym)];
+        return g && g.supply && sup != null ? sup / g.supply : null;
+      })(),
       volShare: summary.rvolume ? rvol / summary.rvolume : 0,
       velocity: sup ? perDay / sup : null, // real transfers/day ÷ supply
       rvolume24h: rvol,
@@ -760,6 +795,15 @@ function dbDerived({ frozen = false } = {}) {
     },
     supply,
     totalSupply,
+    byDenomination,
+    // The chain's own unit of account: the currency its gas is paid in. Not an editorial choice —
+    // sorting denominations by size let a faucet artefact pick the headline, and the terminal
+    // announced "Stable supply · EUR" on a chain whose gas is USDC. Which currency is largest
+    // changes; which one the network charges in does not.
+    baseDenomination: BASE_DENOMINATION,
+    // Empty in the ordinary case. Non-empty means a tracked symbol has no declared denomination,
+    // and its supply is therefore in no currency total — stated rather than dropped.
+    undeclaredSupply: Object.keys(undeclared).length ? undeclared : null,
     suppliesAgeMs: suppliesAt ? Date.now() - suppliesAt : null,
     top,
     largest,

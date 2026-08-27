@@ -89,6 +89,14 @@
     the USDC contract does. Counting both would report the same money twice. We read logs filtered by token contract address, so a
     native log is never seen and never counted; the discovery probe that looks for assets we do not track excludes this address by
     name and says so on every run.</p>
+    <p><strong>Supply is reported per denomination, and never summed across them.</strong> Arc carries stablecoins in more than
+    one currency — USDC, USYC and USDT in dollars, EURC in euros, with cNGN, QCAD and MXNB already deployed on testnet. Adding
+    their face values together produces a figure that is a quantity of nothing: measured here, that sum was 86% euros, so the
+    headline number of a dollar-denominated chain was mostly not dollars, and nothing said so. Converting between currencies
+    would require an exchange rate, and there is no price feed and no oracle anywhere in this project — the same rule that makes
+    the fee figures directly measured rather than estimated. So each denomination is published on its own, a token's share is
+    computed against its own currency, and a tracked asset whose denomination we have not declared is reported separately rather
+    than folded into a total.</p>
     <p style="margin-bottom:0">We track the {{NET}} stablecoins over their ERC-20 interface: {{TOKENS_DETAIL}}. That list is
     generated from the running configuration rather than written here, so it cannot drift from what is actually indexed — the full
     set of contract addresses is in <code>/openapi.json</code> and on <code>/v1/status</code>. An asset carried by more than one

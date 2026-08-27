@@ -557,6 +557,30 @@ function renderState(d){
   // Frozen, the 24h window ends at the last block indexed rather than at now, so the tiles have
   // to say so — an unqualified "24h volume" on week-old data claims to describe today.
   const win = d.degraded && d.windowEnd ? 'real · 24h to '+ago(d.windowEnd) : 'real';
+// The supply tile, denominated.
+//
+// It used to read "Total stable supply" and show the arithmetic sum of every tracked token's face
+// value — dollars and euros added together as if they were one unit. On testnet that number was 86%
+// euros, so the headline figure of a dollar-denominated chain was mostly not dollars, and nothing on
+// the page said so.
+//
+// Converting would need an exchange rate, and there is no price feed and no oracle in this codebase
+// by design. So the tile leads with the denomination that has the most supply and names it, and the
+// others are listed beside it rather than folded in.
+function supplyKpi(d){
+  const by=d.byDenomination||{};
+  const groups=Object.entries(by).filter(([,g])=>g&&g.supply>0).sort((a,b)=>b[1].supply-a[1].supply);
+  if(!groups.length) return ['Stable supply',compact(d.totalSupply),IS_TESTNET?'faucet-inflated':''];
+  // Lead with the chain's own unit of account when it has supply; only fall back to the largest
+  // group when it does not. Otherwise a faucet mint in one currency renames the headline.
+  const base=d.baseDenomination;
+  const i=base&&by[base]&&by[base].supply>0 ? groups.findIndex(([c])=>c===base) : 0;
+  const [cur,g]=groups[i<0?0:i];
+  const rest=groups.filter((_,k)=>k!==(i<0?0:i)).map(([c,x])=>compact(x.supply)+' '+c).join(' · ');
+  const note=[IS_TESTNET?'faucet-inflated':'', rest].filter(Boolean).join(' · ');
+  return ['Stable supply · '+cur, compact(g.supply), note];
+}
+
   // Ordered by how much each figure actually describes the network. Supply used to lead, and on
   // testnet that put a faucet artefact in the first tile: a single mint makes total supply four
   // orders of magnitude larger than daily volume, so the number is correct, meaningless, and the
@@ -565,7 +589,7 @@ function renderState(d){
     ['24h volume',compact(s.rvolume),win],
     ['TVL',compact(d.tvl),'held by contracts'],
     ['Active addresses · 1h',compact(d.activeAddresses1h),d.degraded?'last indexed hour':''],
-    ['Total stable supply',compact(d.totalSupply),IS_TESTNET?'faucet-inflated':'{{TOKENS_PLUS}}'],
+    supplyKpi(d),
   ].map(([l,v,u])=>`<div class="kpi"><div class="lab">${l}</div><div class="val">${v}<span class="unit">${u}</span></div></div>`).join('');
   $('#kpis').innerHTML=kpis;
 
