@@ -26,6 +26,31 @@ export const TIERS = {
   pro: { rpm: 600, maxAlerts: 20 },
 };
 
+// The currency each stablecoin is denominated in — declared here, never inferred from a symbol.
+//
+// This exists because "total stablecoin supply" was an arithmetic sum of face values across
+// currencies: euros and dollars added together as if they were the same unit. Measured on testnet,
+// EURC was 86% of that total and its published `dominance` was therefore a ratio between euros and
+// a euro-plus-dollar sum — a figure with no meaning at the moment it is read. Arc is a stablecoin
+// chain, so more denominations are coming: cNGN, QCAD and MXNB are already deployed on testnet.
+//
+// Converting between them would need an exchange rate, and this project has no price feed and no
+// oracle by design — that rule is why fee figures are trustworthy, and it is not being traded away
+// for a prettier headline. So supply is reported per denomination and never summed across them.
+//
+// A symbol missing from this table has denomination null. It is then reported on its own rather
+// than folded into any currency total: a stablecoin whose denomination we have not declared is not
+// evidence of zero dollars, and silently adding naira to a dollar figure is precisely the failure
+// this table prevents.
+export const DENOMINATION = {
+  USDC: 'USD', USDT: 'USD', USYC: 'USD',
+  EURC: 'EUR',
+  // Deployed on Arc testnet and not tracked yet. Listed in advance so that adding one to ARC_TOKENS
+  // is a one-line change that cannot accidentally contaminate the dollar total.
+  QCAD: 'CAD', MXNB: 'MXN', cNGN: 'NGN',
+};
+export const denominationOf = (symbol) => DENOMINATION[symbol] ?? null;
+
 export const TOKEN_SYMBOLS = new Set(Object.values(CHAIN.tokens).map((t) => t.symbol));
 export const TOKEN_LIST = [...TOKEN_SYMBOLS].join(', ');
 export const ADDR_RE = /^0x[0-9a-f]{40}$/;

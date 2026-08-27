@@ -675,7 +675,8 @@ function build() {
           type: 'object',
           properties: {
             supply: num('Read with `totalSupply()`. Null — not zero — when the chain has never been reachable: zero is a measurement, null is the absence of one.'),
-            dominance: num('Share of total stablecoin supply, 0–1.'),
+            denomination: { type: ['string', 'null'], description: 'The currency this token is denominated in (ISO code), declared rather than inferred. Null when undeclared.' },
+            dominance: num('Share of the supply denominated in the same currency, 0–1 — not of a cross-currency sum.'),
             volShare: num('Share of real volume, 0–1.'),
             velocity: num('Real transfers per day ÷ supply.'),
             rvolume24h: { type: 'number' },
@@ -687,7 +688,22 @@ function build() {
           type: 'object',
           properties: {
             supply: { type: 'object', additionalProperties: schema('TokenSupply'), description: `Keyed by symbol: ${TOKENS.join(', ')}.` },
-            totalSupply: num('Sum across tokens.'),
+            totalSupply: num('Face values added across every tracked token, with NO currency conversion — dollars and euros summed as if they were one unit. Kept for consumers already reading it; it is not a quantity of anything. Use byDenomination.'),
+            byDenomination: {
+              type: 'object',
+              description: 'Supply grouped by the currency it is denominated in, and never summed across groups. Converting would need an exchange rate, and this API has no price feed and no oracle anywhere in it — the same rule that makes the fee figures directly measured.',
+              additionalProperties: {
+                type: 'object',
+                properties: {
+                  supply: { type: 'number', description: 'Total supply in this denomination, in its own currency units.' },
+                  tokens: { type: 'array', items: { type: 'string' }, description: 'The symbols that make it up.' },
+                },
+              },
+            },
+            undeclaredSupply: {
+              type: ['object', 'null'],
+              description: 'Tracked symbols whose denomination has not been declared, with their supply. Null in the ordinary case. Their supply is in no currency total — a denomination we have not declared is not evidence of zero dollars, so it is stated rather than dropped.',
+            },
             summary24h: schema('Summary24h'),
             coverage: {
               type: 'object',

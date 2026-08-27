@@ -1561,6 +1561,47 @@ test('a symbol with two contracts is measured across both, not by whichever came
 });
 
 // ---- whale-content drafting (reserved for mainnet — see whalewatch.js) ----
+// ---- denomination (constants.js) ----
+// The property: two currencies can never end up in the same total. This was not hypothetical —
+// "total stablecoin supply" was the arithmetic sum of face values across currencies, and on testnet
+// it came out 86% euros while being read as a dollar figure.
+
+test('denomination: dollars and euros are never in the same group', async () => {
+  const { denominationOf } = await import('../constants.js');
+  assert.equal(denominationOf('USDC'), 'USD');
+  assert.equal(denominationOf('USDT'), 'USD');
+  assert.equal(denominationOf('USYC'), 'USD');
+  assert.equal(denominationOf('EURC'), 'EUR');
+  assert.notEqual(denominationOf('USDC'), denominationOf('EURC'));
+});
+
+test('denomination: non-USD stablecoins on Arc are declared before they are tracked', async () => {
+  const { denominationOf } = await import('../constants.js');
+  // all three are deployed on testnet; declaring them in advance means adding one to ARC_TOKENS
+  // cannot accidentally add naira to a dollar figure
+  assert.equal(denominationOf('cNGN'), 'NGN');
+  assert.equal(denominationOf('QCAD'), 'CAD');
+  assert.equal(denominationOf('MXNB'), 'MXN');
+});
+
+test('denomination: an undeclared symbol yields null, never a guess', async () => {
+  const { denominationOf } = await import('../constants.js');
+  // a symbol that merely starts with US must not be assumed to be dollars
+  assert.equal(denominationOf('USELESS'), null);
+  assert.equal(denominationOf('EUROPA'), null);
+  assert.equal(denominationOf(''), null);
+  assert.equal(denominationOf(undefined), null);
+});
+
+test('denomination: every tracked symbol is declared', async () => {
+  const { denominationOf, TOKEN_SYMBOLS } = await import('../constants.js');
+  // a tracked asset with no declared denomination lands outside every currency total, which is
+  // safe but silent — this test is what makes adding a token to ARC_TOKENS surface the omission.
+  for (const sym of TOKEN_SYMBOLS) {
+    assert.ok(denominationOf(sym), `${sym} is tracked but has no declared denomination`);
+  }
+});
+
 // ---- discovery from the chain (db.js + verify-network.js) ----
 // Found by following a watcher notification: a second Wrapped USDC deployment held 1,190,036 USDC
 // and was absent from the published TVL. The cause was that discovery read only addr_stats, which

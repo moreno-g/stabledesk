@@ -275,6 +275,11 @@ export async function handleV1(req, res, u) {
     return json(res, {
       supply: s.supply,
       totalSupply: s.totalSupply,
+      // Supply grouped by the currency it is denominated in, and never summed across groups.
+      // totalSupply above is the arithmetic sum of face values with no conversion; it is kept for
+      // consumers already reading it, but byDenomination is the figure that means something.
+      byDenomination: s.byDenomination || {},
+      undeclaredSupply: s.undeclaredSupply ?? null,
       summary24h: s.summary24h,
       coverage: s.coverage,
       windowEnd: s.windowEnd,
