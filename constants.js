@@ -47,7 +47,7 @@ export const DENOMINATION = {
   EURC: 'EUR',
   // Deployed on Arc testnet and not tracked yet. Listed in advance so that adding one to ARC_TOKENS
   // is a one-line change that cannot accidentally contaminate the dollar total.
-  QCAD: 'CAD', MXNB: 'MXN', cNGN: 'NGN',
+  QCAD: 'CAD', MXNB: 'MXN', cNGN: 'NGN', ZARU: 'ZAR', tKRW1: 'KRW',
 };
 export const denominationOf = (symbol) => DENOMINATION[symbol] ?? null;
 

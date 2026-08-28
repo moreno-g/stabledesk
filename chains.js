@@ -94,6 +94,15 @@ const TESTNET = {
     '0x23d7cffd0876f3abb6b074287ba2aeefbc83825d': { symbol: 'QCAD', decimals: 6, kind: 'Canadian dollar' },
     '0x836f73fbc370a9329ba4957e47912dfdba6ba461': { symbol: 'MXNB', decimals: 6, kind: 'Mexican peso' },
     '0x9a9c18a371d98200fe910f62c45875f1abb68d20': { symbol: 'cNGN', decimals: 6, kind: 'Nigerian naira' },
+    // Flagged by the watcher on 28 Aug. Verified the same way as the three above: name, symbol,
+    // decimals and bytecode read one call at a time, and no tracked asset custodied — an
+    // independent issuer, not a wrapper.
+    //
+    // tKRW1 was flagged in the same batch and is deliberately NOT tracked. Its name() and symbol()
+    // both return "tKRW1": a real project names its token, a test fixture ships its ticker. The
+    // currency is declared in constants.js all the same, so tracking it later cannot put won into
+    // a dollar total by accident.
+    '0x47b025d6002234a5038bcd94767bd82b27c2b96f': { symbol: 'ZARU', decimals: 18, kind: 'South African rand' },
   },
   // Deliberately NOT tracked as issuance, though it is a stablecoin balance and looks like one:
   //   Wrapped USDC 0x911b4000d3422f482f4062a913885f7b035382df (18 decimals)
