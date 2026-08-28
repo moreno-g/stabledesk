@@ -57,7 +57,7 @@ test('ADDR_RE matches lowercase 40-hex only', () => {
 test('config surface is sane', () => {
   // Pinned so that adding a tracked asset is a deliberate act with a test to update, not a config
   // edit that quietly changes what every published figure covers.
-  assert.deepEqual([...TOKEN_SYMBOLS].sort(), ['EURC', 'MXNB', 'QCAD', 'USDC', 'USDT', 'USYC', 'cNGN']);
+  assert.deepEqual([...TOKEN_SYMBOLS].sort(), ['EURC', 'MXNB', 'QCAD', 'USDC', 'USDT', 'USYC', 'ZARU', 'cNGN']);
   assert.ok(TIERS.free.rpm < TIERS.pro.rpm);
   for (const [name, r] of Object.entries(RANGES)) {
     assert.ok(r.group > 0, `${name} groups into buckets`);
