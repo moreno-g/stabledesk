@@ -90,7 +90,7 @@ export function diffObservations(previous, current, now = Date.now()) {
     if (!active && subject.kind === 'token') {
       const misses = before.misses + 1;
       if (misses === MISSES_BEFORE_QUIET) {
-        events.push({ type: 'quiet', id, kind: subject.kind, facts: subject.facts, misses, since: before.lastSeen, firstSeen: before.firstSeen });
+        events.push({ type: 'quiet', id, kind: subject.kind, facts: subject.facts, misses, since: before.lastSeen, firstSeen: before.firstSeen, over: subject.quietConfirmedOver });
       }
       rows.push({ ...before, facts: subject.facts, lastCheck: now, misses });
       continue;
@@ -155,7 +155,11 @@ export function describe(event, now = Date.now()) {
     case 'quiet':
       // "Never" is a different statement from "not lately", and on a tracked asset it is the louder
       // one: it means we have never once observed this contract move since we started watching.
-      return `QUIET · ${who} is tracked but has produced no transfers in ${event.misses} checks · `
+      // The span the silence was confirmed over belongs in the sentence: "no transfers in 4 checks"
+      // says how often we looked, not how far back each look reached — and those are what separate a
+      // dead contract from a slow one.
+      return `QUIET · ${who} is tracked but has produced no transfers in ${event.misses} checks`
+        + (event.over ? ` (each confirmed over ${event.over.toLocaleString('en-US')} blocks)` : '') + ' · '
         + (event.since ? `last seen moving ${ago(event.since, now)}` : 'never once seen moving');
     case 'gone':
       return `GONE · ${who} has not appeared in ${event.misses} checks · `

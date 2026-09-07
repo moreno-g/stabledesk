@@ -63,6 +63,22 @@ const RPC_AUTH_STATUSES = new Set([401, 403, 407]);
 // Below this it is noise: a test deployment nobody uses is not a gap in our coverage.
 const DISCOVERY_MIN_EVENTS = 20;
 
+// How far back to look before believing a tracked asset has stopped.
+//
+// The quiet rule was calibrated on the dormant USYC proxy — one transfer in 16,000 blocks, a
+// contract that is genuinely dead. It is now applied to faucet-funded assets whose normal state is
+// a few transfers an hour, and the discovery sample is 1,500 blocks: measured on testnet, cNGN
+// moves 22 times per 24,000 blocks, so its expected count in one sample is 1.4 and it reads zero
+// about two samples in three. Four of those in a row trips QUIET, the asset moves, the counter
+// resets, and it trips again — a live asset reported dead on repeat.
+//
+// The threshold was not the problem. The measurement was too short to carry the conclusion, and
+// turning the dial would only have traded false alarms for missed ones. So a zero reading is now
+// treated as a question rather than an answer: it is confirmed over a window wide enough that
+// silence in it means something. Only assets that read zero are re-checked, so the busy ones cost
+// nothing, and a dormant contract returns a handful of logs at most.
+const QUIET_CONFIRM_BLOCKS = 12000;
+
 // Arc implements EIP-7708: a native value movement emits a Transfer log of its own, from this
 // system address, alongside any ERC-20 Transfer the token contract emits. Since gas on Arc is paid
 // in USDC, every transaction on the chain produces one — measured on testnet, this address emitted
@@ -410,13 +426,32 @@ async function checkUntracked(head) {
     .sort((x, y) => y[1] - x[1])
     .slice(0, 25);
 
-  // Whether each tracked contract was seen moving in this sample. A tracked asset that is deployed,
-  // answers every call, and produces no transfers is exactly the shape USYC had — and the shape no
-  // single check can report, because nothing about it is wrong.
+  // Whether each tracked contract was seen moving. A tracked asset that is deployed, answers every
+  // call, and produces no transfers is exactly the shape USYC had — and the shape no single check
+  // can report, because nothing about it is wrong.
+  //
+  // A zero in the sample is not that finding, only a reason to look harder: see QUIET_CONFIRM_BLOCKS.
+  // An asset that moved in the wider window was never silent, and reporting it as such would be the
+  // same error as reporting a refused RPC slot as a missing method.
   for (const addr of tracked) {
     const n = counts.get(addr) || 0;
     const prior = observed.get(`token:${addr}`);
-    if (prior) observed.set(`token:${addr}`, { ...prior, active: n > 0 });
+    if (!prior) continue;
+    let active = n > 0;
+    let confirmed = false;
+    if (!active) {
+      const wide = await recentlyMoved(addr, head);
+      if (wide == null) {
+        // The wider look could not be read at all. That is not evidence of silence, so the previous
+        // answer stands rather than being replaced by a guess.
+        active = prior.active !== false;
+      } else {
+        active = wide;
+        confirmed = !wide;
+      }
+      await sleep(200);
+    }
+    observed.set(`token:${addr}`, { ...prior, active, quietConfirmedOver: confirmed ? QUIET_CONFIRM_BLOCKS : undefined });
   }
 
   const trackedEvents = [...counts.entries()].filter(([a]) => tracked.has(a)).reduce((s, [, n]) => s + n, 0);
@@ -487,6 +522,24 @@ async function checkUntracked(head) {
 // window is not a fixed-size request: fine on a quiet stretch, refused on a busy one. Halving on
 // failure is what the indexer already does for the same reason — without it, a wide sample simply
 // reports "refused" and the discovery check silently stops looking.
+// Did this one contract emit any Transfer in the last QUIET_CONFIRM_BLOCKS blocks? Address-filtered
+// and asked in halves, so a busy contract cannot blow the endpoint's result cap and a dormant one
+// costs a single call. Returns null when the range could not be read — unreadable is not empty.
+async function recentlyMoved(address, head, span = QUIET_CONFIRM_BLOCKS) {
+  const from = Math.max(0, head - span);
+  const half = Math.floor((head - from) / 2);
+  for (const [a, b] of [[head - half, head], [from, head - half - 1]]) {
+    if (b < a) continue;
+    try {
+      const out = await rpc([{ method: 'eth_getLogs', params: [{ fromBlock: hex(a), toBlock: hex(b), address: [address], topics: [TRANSFER_TOPIC] }] }], 3);
+      if (Array.isArray(out[0]) && out[0].length) return true;   // one log is enough: it moved
+      if (!Array.isArray(out[0])) return null;
+    } catch { return null; }
+    await sleep(200);
+  }
+  return false;
+}
+
 async function getLogsSplit(start, end, depth = 0) {
   try {
     const out = await rpc([{ method: 'eth_getLogs', params: [{ fromBlock: hex(start), toBlock: hex(end), topics: [TRANSFER_TOPIC] }] }], 3);
