@@ -1882,3 +1882,34 @@ test('digest: the day reported is a closed one', () => {
   assert.match(out, /2026-08-22/);
   assert.ok(!out.includes('2026-08-23'));
 });
+
+// ---- silence must prove itself (verify-network.js + chainwatch.js) ----
+// The quiet rule was calibrated on a contract with one transfer in 16,000 blocks and then applied
+// to faucet assets that move a few times an hour. Measured on testnet: cNGN reads zero in two
+// discovery samples out of three, trips QUIET, moves, resets, and trips again — a live asset
+// reported dead on repeat. The fix is not a bigger threshold; it is a measurement long enough to
+// carry the conclusion.
+
+test('quiet: the confirmation span is stated, so the reader knows how far back we looked', async () => {
+  const { describe } = await import('../chainwatch.js');
+  const base = { type: 'quiet', id: 'token:0xabc', kind: 'token', facts: { symbol: 'cNGN' }, misses: 4, since: Date.now() - 3600e3 };
+
+  const confirmed = describe({ ...base, over: 12000 });
+  assert.match(confirmed, /12,000 blocks/, 'a confirmed silence says over what span');
+
+  // Unconfirmed (the wider look could not be read) must not claim a span it never measured.
+  const plain = describe(base);
+  assert.doesNotMatch(plain, /blocks\)/);
+  assert.match(plain, /no transfers in 4 checks/);
+});
+
+test('quiet: "4 checks" and "12,000 blocks" are different claims and both are said', async () => {
+  const { describe } = await import('../chainwatch.js');
+  const out = describe({ type: 'quiet', id: 'token:0xabc', kind: 'token', facts: { symbol: 'ZARU' }, misses: 4, since: null, over: 12000 });
+  // how often we looked
+  assert.match(out, /4 checks/);
+  // how far back each look reached
+  assert.match(out, /12,000 blocks/);
+  // and never seen moving is still distinguished from not lately
+  assert.match(out, /never once seen moving/);
+});
