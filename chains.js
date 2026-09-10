@@ -166,7 +166,15 @@ function mainnetProfile() {
     // is worth the RPC cost so the terminal isn't empty on day one.
     notableMin: Number(process.env.ARC_NOTABLE_MIN) || 100000,
     tweetWorthyMin: Number(process.env.ARC_WHALE_MIN) || 1000000,
-    maxBackfill: Number(process.env.ARC_MAX_BACKFILL) || 20000,
+    // Arc targets ~0.5s blocks, so 20,000 blocks is under three hours of history. That was fine as
+    // a testnet default and is the wrong number for a launch: a restart on the morning of the 16th
+    // would leave the first blocks of the chain unreachable, on a service whose whole claim is
+    // coverage from block zero. 200,000 blocks is a little over a day, which is enough to survive a
+    // deploy, a crash, and the hours it takes to notice one.
+    //
+    // The cost is bounded by the same batching the indexer already uses; the risk of the smaller
+    // number is not bounded at all, because history that scrolls past cannot be re-read later.
+    maxBackfill: Number(process.env.ARC_MAX_BACKFILL) || 200000,
     // A separate file: mixing faucet volume into mainnet history would poison every aggregate,
     // and the aggregates are additive, so it could never be unmixed afterwards.
     dbFile: 'arc-mainnet.db',
