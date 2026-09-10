@@ -85,12 +85,12 @@
     gas is paid in USDC and blocks are ~0.5s with no reorgs.</p>
     <p><strong>Two Transfer logs, one movement.</strong> Arc implements EIP-7708, so a native value movement emits its own
     Transfer log from the system address <code>0xff…fe</code>, in addition to any ERC-20 Transfer the token contract emits. Because
-    gas on Arc is paid in USDC, every transaction on the chain produces one — on testnet that address emits more Transfer logs than
+    gas on Arc is paid in USDC, every transaction on the chain produces one — on Arc testnet, measured in August 2026, that address emitted more Transfer logs than
     the USDC contract does. Counting both would report the same money twice. We read logs filtered by token contract address, so a
     native log is never seen and never counted; the discovery probe that looks for assets we do not track excludes this address by
     name and says so on every run.</p>
     <p><strong>Supply is reported per denomination, and never summed across them.</strong> Arc carries stablecoins in more than
-    one currency — USDC, USYC and USDT in dollars, EURC in euros, with cNGN, QCAD and MXNB already deployed on testnet. Adding
+    one currency — USDC, USYC and USDT in dollars, EURC in euros, with cNGN, QCAD, MXNB and ZARU first seen on Arc testnet in August 2026. Adding
     their face values together produces a figure that is a quantity of nothing: measured here, that sum was 86% euros, so the
     headline number of a dollar-denominated chain was mostly not dollars, and nothing said so. Converting between currencies
     would require an exchange rate, and there is no price feed and no oracle anywhere in this project — the same rule that makes
@@ -125,8 +125,8 @@
     <a href="https://visaonchainanalytics.com/" rel="noopener">Visa / Allium onchain analytics</a> methodology.</p>
     <p style="margin-bottom:0"><strong>Why "both ends", not "either end".</strong> Visa drops a transfer if <em>either</em> end is
     flagged. That is right for retail-shaped chains, where most transfers run user-to-user and a flagged counterparty is a strong
-    signal of noise. Arc is hub-and-spoke: almost every transfer touches a faucet, router or sequencer, so the "either end" rule
-    deletes genuine payments along with the churn — measured on the testnet, it removed <strong>99.9%</strong> of volume and stopped
+    signal of noise. Arc testnet is hub-and-spoke — almost every transfer touches a faucet, router or sequencer — so the "either end" rule
+    deletes genuine payments along with the churn — measured on Arc testnet in July 2026, it removed <strong>99.9%</strong> of volume and stopped
     describing anything. A bot paying a user, or a user funding an exchange, is real value delivered to a real party, so we keep it.
     Only bot-to-bot movement is discarded.</p>
   </div>
@@ -185,7 +185,7 @@
   <h2>What is counted as a stablecoin, and what isn't</h2>
   <div class="card">
     <p style="margin-top:0"><strong>Tracked assets are listed by contract, not by symbol</strong>, because a symbol can be
-    deployed more than once on the same chain. Arc testnet carries two independent <strong>USYC</strong> contracts — one an
+    deployed more than once on the same chain. Arc testnet carried, as of August 2026, two independent <strong>USYC</strong> contracts — one an
     EIP-1967 proxy holding 1.38M and essentially dormant, one a standalone contract holding 12.2M with all of the activity
     (722 transfers against 1, over the same six-day sample). Nothing on-chain says which is canonical, and we will not guess:
     <strong>both are measured, and the chain's USYC supply is reported as the sum.</strong> Both addresses appear in the API's
@@ -327,7 +327,7 @@
     <p><strong>Individual transfers — a 24-hour window, bounded by row count.</strong> This is what the size distribution, the per-token
     recent lists and an address's recent activity are read from, and the row cap means the span it covers is a function of how busy the
     chain is. So the span is measured and published rather than assumed. It was previously capped at 1,200 rows, which at the ~954k
-    transfers a day the testnet actually does is <strong>114 seconds</strong> — every one of those surfaces was describing the last two
+    transfers a day Arc testnet was doing in July 2026 is <strong>114 seconds</strong> — every one of those surfaces was describing the last two
     minutes while being labelled as something broader.</p>
     <p style="margin-bottom:0"><strong>Largest transfers — top 100 per day per token, kept 180 days.</strong> Recorded separately for the
     same reason: "the largest transfer" read out of a row-capped table only ever means "the largest of the last few minutes".
