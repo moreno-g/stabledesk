@@ -224,6 +224,9 @@ export async function handleV1(req, res, u) {
     return json(res, {
       currency: 'USDC',
       perTransaction: s.fees.perTx,
+      // The mean above is pulled up by a few heavy transactions; the median is what a typical
+      // transaction pays. Both are published so the shape is visible rather than one of them.
+      medianPerTransaction: s.fees.medianPerTx ?? null,
       perBlock: s.fees.perBlock,
       perDay: s.fees.perDay,
       perMillionMoved: s.fees.perMillionMoved,
@@ -231,8 +234,8 @@ export async function handleV1(req, res, u) {
       windowSec: s.fees.windowSec,
       avgGasPerTx: s.fees.avgGasPerTx,
       gasGwei: s.fees.gasGwei,
-      sample: { blocks: s.fees.sampledBlocks, transactions: s.fees.sampledTxs, coverage: s.fees.sampleCoverage },
-      note: 'Fees are exact for sampled blocks and extrapolated to the window; see /methodology.',
+      sample: { blocks: s.fees.sampledBlocks, transactions: s.fees.sampledTxs, coverage: s.fees.sampleCoverage, medianTransactions: s.fees.medianSampledTxs ?? 0 },
+      note: 'Fees are exact for sampled blocks and extrapolated to the window. perTransaction is the mean; medianPerTransaction is the median of the same sampled transactions, read from log-scale buckets. See /methodology.',
       updatedAt: s.updatedAt,
     }, 200, H);
   }

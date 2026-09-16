@@ -114,6 +114,13 @@ db.exec(`
     gas_used INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_fee_minute ON fee_samples(minute);
+  -- Per-transaction fees, counted into logarithmic buckets per minute, for the same sampled blocks
+  -- as fee_samples. Exists so a median can be published beside the mean — see feeBucket in
+  -- indexer.js. Pruned on the same cutoff, so both cover the same window.
+  CREATE TABLE IF NOT EXISTS fee_buckets (
+    minute INTEGER NOT NULL, bucket INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (minute, bucket)
+  );
 
   -- Derived on-chain attributes for high-volume addresses (experimental — see entities.js).
   -- Everything here is computed from public chain data, never scraped from another provider.
@@ -414,6 +421,10 @@ const stmt = {
   insFee: db.prepare('INSERT OR IGNORE INTO fee_samples(block, minute, fees, txs, gas_used) VALUES(?, ?, ?, ?, ?)'),
   feeStats: db.prepare('SELECT COUNT(*) AS blocks, SUM(fees) AS fees, SUM(txs) AS txs, SUM(gas_used) AS gas FROM fee_samples WHERE minute >= ?'),
   pruneFees: db.prepare('DELETE FROM fee_samples WHERE minute < ?'),
+  insBucket: db.prepare(`INSERT INTO fee_buckets(minute, bucket, count) VALUES(?, ?, ?)
+    ON CONFLICT(minute, bucket) DO UPDATE SET count = count + excluded.count`),
+  feeBuckets: db.prepare('SELECT bucket, SUM(count) AS count FROM fee_buckets WHERE minute >= ? GROUP BY bucket'),
+  pruneBuckets2: db.prepare('DELETE FROM fee_buckets WHERE minute < ?'),
 };
 
 export const getCheckpoint = () => {
@@ -577,7 +588,16 @@ export function insertFeeSamples(rows) {
   if (!rows.length) return;
   db.exec('BEGIN');
   try {
-    for (const r of rows) stmt.insFee.run(r.block, r.minute, r.fees, r.txs, r.gasUsed);
+    for (const r of rows) {
+      const { changes } = stmt.insFee.run(r.block, r.minute, r.fees, r.txs, r.gasUsed);
+      // The block row is INSERT OR IGNORE, so a block sampled twice is kept once. Its buckets must
+      // follow the same rule: added only when the block row was actually new, or a re-sampled block
+      // would be counted twice in the median while being counted once in the mean — two figures
+      // published side by side from two different samples.
+      if (changes === 1 && r.buckets) {
+        for (const [bucket, count] of r.buckets) stmt.insBucket.run(r.minute, bucket, count);
+      }
+    }
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');
@@ -601,6 +621,8 @@ export function setAdjusted(buckets, fromMinute, toMinute) {
   }
   return changed;
 }
+
+export const feeBucketCounts = (sinceMinute) => stmt.feeBuckets.all(sinceMinute);
 
 export function feeStats(sinceMinute) {
   const r = stmt.feeStats.get(sinceMinute);
@@ -1191,6 +1213,7 @@ export function prune(nowSec, latestBlock, blockMs) {
 
   stmt.pruneAddrs.run(latestBlock - weekBlocks);
   stmt.pruneFees.run(cutoff);
+  stmt.pruneBuckets2.run(cutoff);   // same cutoff: mean and median must cover the same window
   // The raw transfer window, by time. The row cap in applyBatch bounds it between prunes.
   stmt.trimRecentTs.run(nowSec - RECENT_WINDOW_SEC);
   stmt.trimTop.run(TOP_PER_DAY);
