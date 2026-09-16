@@ -574,25 +574,55 @@ async function indexRange(from, to, opts = {}, depth = 0) {
 // the snapshot from what has been indexed so far. The figures are still marked stale — they are — but
 // they exist and they move.
 async function progressRefresh(latest) {
+  // Re-read the head on every refresh. A long replay used to run entirely against the head read at
+  // boot: chain.head never moved and chain.state was never re-evaluated, so for the whole replay the
+  // terminal asserted "live" without measuring it. Observed at the Arc mainnet launch — the published
+  // head sat at the boot block for 35 minutes, 700 blocks stale after three, while the chain was
+  // producing a block every half second. The claim happened to be true; it was not being checked,
+  // which is not the same thing, and on a halt it would have gone on saying "live" regardless.
+  //
+  // The same stale head was feeding the fee sample: every sample during the replay was drawn from
+  // the few blocks around the boot head, so the published fee drifted between readings of the same
+  // handful of blocks rather than reflecting the chain as it moved.
+  //
+  // One eth_blockNumber per refresh, roughly every forty seconds, and only during a long replay —
+  // a normal tick finishes well inside PROGRESS_MS and never reaches this.
+  let head = latest;
+  try {
+    const { out } = await rpc([{ method: 'eth_blockNumber', params: [] }]);
+    const fresh = parseInt(out[0], 16);
+    if (Number.isFinite(fresh)) { head = fresh; noteHead(fresh); }
+  } catch (e) {
+    // Unreachable mid-replay is reported as such, not papered over with the boot-time verdict.
+    noteRpcFailure(e);
+  }
   if (Date.now() - suppliesAt > SUPPLY_TTL) {
     try { await refreshSupplies(); } catch (e) { console.error('[supply]', e.message || e); }
   }
-  if (latest != null) { try { await sampleFees(latest); } catch { /* a sample is never worth failing over */ } }
+  if (head != null) { try { await sampleFees(head); } catch { /* a sample is never worth failing over */ } }
   try { snapshotFromDb(); } catch (e) { console.error('[snapshot]', e.message || e); }
 }
 
-// How many chunks between those refreshes. At 500 blocks and ~1s a chunk this is roughly every
-// 40 seconds of replay — often enough that the page visibly moves, rare enough that it costs nothing
-// against the rate limit.
-const PROGRESS_EVERY = 40;
+// How often those refreshes run during a replay — by elapsed time, not by chunk count.
+//
+// This was 40 chunks, with a comment reasoning that at ~1s a chunk it came to roughly every 40
+// seconds. The assumption did not survive mainnet: measured at launch, 30,000 blocks took 275
+// seconds, about 4.6s a chunk, because mainnet logs are far heavier (the EIP-7708 native emitter
+// alone produces hundreds of thousands). Forty chunks became three minutes, and the published head
+// drifted 375 blocks between refreshes. A cadence that depends on how fast the chain happens to be
+// is not a cadence; the interval the comment promised is now the one that is enforced.
+const PROGRESS_MS = 40000;
 
 async function indexThrough(from, to, opts = {}) {
-  let chunks = 0;
+  let lastProgress = Date.now();
   for (let start = from; start <= to; start += CHUNK) {
     const end = Math.min(to, start + CHUNK - 1);
     if (!(await indexRange(start, end, opts))) return false;
     if (end < to) await sleep(CHUNK_DELAY);
-    if (++chunks % PROGRESS_EVERY === 0) await progressRefresh(opts.head ?? null);
+    if (Date.now() - lastProgress >= PROGRESS_MS) {
+      await progressRefresh(opts.head ?? null);
+      lastProgress = Date.now();
+    }
   }
   return true;
 }
