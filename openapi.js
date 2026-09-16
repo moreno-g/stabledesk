@@ -629,6 +629,7 @@ function build() {
           properties: {
             currency: { type: 'string', const: 'USDC' },
             perTransaction: num('Mean fee per transaction, in USDC.'),
+            medianPerTransaction: num('Median fee per transaction in USDC, over the same sampled transactions as the mean. The fee distribution on Arc is strongly skewed — a few heavy transactions pull the mean well above what a typical transaction pays — so this is the figure that describes a typical transaction. Read from log-scale buckets (40 per decade) with interpolation; null until a sample exists.'),
             perBlock: num('Mean fee per block.'),
             perDay: num('Extrapolated daily total.'),
             perMillionMoved: num('The headline metric: what it costs the network to move $1M of real volume.'),

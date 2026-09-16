@@ -1732,6 +1732,18 @@ test('sweep: paid out of the always budget, so a pass does not grow', async () =
   assert.equal(a.cursor, b.cursor);
 });
 
+test('fee median: a re-sampled block is not counted twice', async () => {
+  const db = await import('../db.js');
+  const minute = 1_900_000_020;
+  const block = 987_654_321;
+  const row = { block, minute, fees: 1, txs: 3, gasUsed: 3000, buckets: new Map([[300, 3]]) };
+  db.insertFeeSamples([row]);
+  db.insertFeeSamples([row]);   // same block again, as sampleFees can do
+  const counts = db.feeBucketCounts(minute).filter((r) => r.bucket === 300);
+  assert.equal(counts.reduce((n, r) => n + r.count, 0), 3,
+    'the block row is INSERT OR IGNORE, so its buckets must be too — otherwise median and mean come from different samples');
+});
+
 test('whalewatch: threshold filtering, drafting, and dedupe', async () => {
   const db = await import('../db.js');
   const { evaluate, draftText, TWEET_WORTHY_MIN } = await import('../whalewatch.js');
@@ -1882,6 +1894,39 @@ test('digest: the day reported is a closed one', () => {
   assert.match(out, /2026-08-22/);
   assert.ok(!out.includes('2026-08-23'));
 });
+
+// ---- fee median (indexer.js + db.js) ----
+// The fee was published as a mean only, over a distribution measured on mainnet launch day at
+// median 0.048 USDC, mean 0.082, max 8.35. The median is read from log-scale buckets rather than
+// stored per transaction; these tests pin that the approximation is honest and that the median
+// and the mean come from the same sample.
+
+test('fee median: buckets reproduce an exact median on a skewed distribution', async () => {
+  const { feeBucket, medianFromBuckets } = await import('../indexer.js');
+  let seed = 7; const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
+  const fees = [];
+  for (let i = 0; i < 20000; i++) {
+    const n = Math.sqrt(-2 * Math.log(rnd() || 1e-9)) * Math.cos(2 * Math.PI * rnd());
+    fees.push(Math.exp(Math.log(0.048) + 0.9 * n));
+  }
+  for (let i = 0; i < 40; i++) fees.push(1 + rnd() * 7.35);   // the heavy tail seen at launch
+  const exact = [...fees].sort((a, b) => a - b)[Math.floor(fees.length / 2)];
+  const counts = new Map();
+  for (const f of fees) { const b = feeBucket(f); counts.set(b, (counts.get(b) || 0) + 1); }
+  const est = medianFromBuckets([...counts].map(([bucket, count]) => ({ bucket, count })));
+  assert.ok(Math.abs(est - exact) / exact < 0.02, `median within 2% of exact (got ${est}, exact ${exact})`);
+  // and the point of publishing it: the mean is not a typical transaction
+  const mean = fees.reduce((a, b) => a + b, 0) / fees.length;
+  assert.ok(mean > est * 1.3, 'on a skewed distribution the mean sits well above the median');
+});
+
+test('fee median: nothing sampled is null, never zero', async () => {
+  const { medianFromBuckets } = await import('../indexer.js');
+  assert.equal(medianFromBuckets([]), null);
+  assert.equal(medianFromBuckets(null), null);
+  assert.equal(medianFromBuckets([{ bucket: 100, count: 0 }]), null);
+});
+
 
 // ---- silence must prove itself (verify-network.js + chainwatch.js) ----
 // The quiet rule was calibrated on a contract with one transfer in 16,000 blocks and then applied

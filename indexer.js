@@ -276,6 +276,49 @@ function refreshNoisy() {
   noisyAt = Date.now();
 }
 
+// Fee distribution — a median beside the mean.
+//
+// The per-transaction fee was published as a mean only, total fees over transaction count. On Arc
+// mainnet that number describes nobody. Measured on launch day over 2,002 transactions in recent
+// blocks: median 0.0476 USDC, mean 0.0822, minimum 0.003, maximum 8.35. A handful of heavy
+// transactions pull the mean to 1.7 times what a typical transaction pays, and because one of them
+// can land in any sampled block, the published mean moved at nearly every refresh. That is the same
+// defect the three volume measures exist to avoid — one figure that hides the shape — applied to
+// fees, where it had not been addressed.
+//
+// Storing every transaction's fee would be roughly two million rows a day. So each sampled
+// transaction is counted into a logarithmic bucket, per minute, and the median is read back from
+// the bucket counts over the same window and the same sampled blocks as the mean. Forty buckets per
+// decade makes each bucket about 6% wide, and interpolating inside the bucket brings the error well
+// under that; the test suite checks it against an exact median.
+export const FEE_BUCKETS_PER_DECADE = 40;
+const FEE_BUCKET_MIN_LOG = -8;                       // 1e-8 USDC — effectively zero
+export const FEE_BUCKET_COUNT = 12 * FEE_BUCKETS_PER_DECADE;   // up to 1e4 USDC
+
+export function feeBucket(fee) {
+  if (!(fee > 0)) return 0;
+  const i = Math.floor((Math.log10(fee) - FEE_BUCKET_MIN_LOG) * FEE_BUCKETS_PER_DECADE);
+  return Math.min(FEE_BUCKET_COUNT - 1, Math.max(0, i));
+}
+
+// Median of the bucketed distribution, interpolated log-linearly inside the bucket that contains
+// the midpoint. Null when nothing was sampled: no median is a different fact from a zero one.
+export function medianFromBuckets(rows) {
+  const sorted = [...(rows || [])].filter((r) => r && r.count > 0).sort((a, b) => a.bucket - b.bucket);
+  const total = sorted.reduce((n, r) => n + r.count, 0);
+  if (!total) return null;
+  const half = total / 2;
+  let cum = 0;
+  for (const r of sorted) {
+    if (cum + r.count >= half) {
+      const f = (half - cum) / r.count;
+      return 10 ** (FEE_BUCKET_MIN_LOG + (r.bucket + f) / FEE_BUCKETS_PER_DECADE);
+    }
+    cum += r.count;
+  }
+  return null;
+}
+
 // Pure: turns exact fees from sampled blocks into rates for the whole window. Every derived
 // figure carries the sample size, so an extrapolation is never mistaken for a measured total.
 //
@@ -283,13 +326,18 @@ function refreshNoisy() {
 // every transaction's fee, including those paid by high-frequency addresses. Dividing all fees
 // by only the non-bot volume would price the whole network's cost against a fraction of its
 // throughput and wildly overstate it.
-export function feeMetrics(sample, blocksInWindow, blocksPerDay, volumeMoved) {
+export function feeMetrics(sample, blocksInWindow, blocksPerDay, volumeMoved, buckets = null) {
   if (!sample?.blocks) return null;
+  const medianSampledTxs = (buckets || []).reduce((n, r) => n + (r.count || 0), 0);
   const perBlock = sample.fees / sample.blocks;
   const inWindow = perBlock * blocksInWindow;
   return {
     perBlock,
     perTx: sample.txs ? sample.fees / sample.txs : null,
+    // Median beside the mean. Its own sample count, because it can be smaller than the mean's for
+    // the first day after this was introduced: blocks sampled before then carry no buckets.
+    medianPerTx: medianFromBuckets(buckets),
+    medianSampledTxs,
     perDay: perBlock * blocksPerDay,
     inWindow,
     // The headline stablecoin metric: what it costs the network to move $1M of value.
@@ -487,14 +535,18 @@ async function sampleFees(latest) {
     const receipts = out[i];
     if (!Array.isArray(receipts)) return; // block not available / empty response
     let fees = 0n, gas = 0n;
+    const buckets = new Map();
     for (const r of receipts) {
       try {
         const g = BigInt(r.gasUsed);
+        const fee = g * BigInt(r.effectiveGasPrice ?? 0);
         gas += g;
-        fees += g * BigInt(r.effectiveGasPrice ?? 0);
+        fees += fee;
+        const b = feeBucket(Number(fee) / 1e18);
+        buckets.set(b, (buckets.get(b) || 0) + 1);
       } catch { /* malformed receipt — skip it rather than void the block */ }
     }
-    rows.push({ block: n, minute: Math.floor(approxTs(n) / 60) * 60, fees: Number(fees) / 1e18, txs: receipts.length, gasUsed: Number(gas) });
+    rows.push({ block: n, minute: Math.floor(approxTs(n) / 60) * 60, fees: Number(fees) / 1e18, txs: receipts.length, gasUsed: Number(gas), buckets });
   });
   db.insertFeeSamples(rows);
 }
@@ -792,6 +844,7 @@ function dbDerived({ frozen = false } = {}) {
     feeWindowSec / blockSec,
     86400 / blockSec,
     summary.rvolume,
+    db.feeBucketCounts(asOf - feeWindowSec),
   );
 
   return {

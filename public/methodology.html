@@ -212,7 +212,12 @@
     <p style="margin-top:0">Gas on Arc is paid <strong>in USDC</strong>. That makes fee metrics unusually direct: a fee figure is
     already a dollar figure, with no token price, no exchange rate and no oracle in the path. We read fees from
     <strong>transaction receipts</strong> — <code>gasUsed × effectiveGasPrice</code>, summed per block — which captures the priority
-    tip as well as the base fee.</p>
+    tip as well as the base fee. <strong>A median is published beside the mean.</strong> The per-transaction fee on Arc is strongly
+    skewed: measured on mainnet launch day over 2,002 transactions, the median was 0.048 USDC and the mean 0.082, with a
+    maximum of 8.35. A few heavy transactions pull the mean well above what a typical transaction pays, and because one of
+    them can fall in any sampled block, the mean moves with the sample. The median is read from the same sampled
+    transactions, counted into logarithmic buckets — forty per decade, interpolated — which costs a few rows per minute
+    instead of one per transaction.</p>
     <p><strong>Sampling.</strong> Receipts only exist per transaction, and at ~0.5s blocks fetching every one would mean ~172,000
     requests a day against a rate-limited public RPC. So we sample a few blocks per poll, at a randomised offset behind the head.
     Each sampled block is <strong>exact</strong>; the per-day and per-window figures derived from them are <strong>extrapolations</strong>.
