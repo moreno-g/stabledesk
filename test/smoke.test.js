@@ -645,6 +645,14 @@ test('CCTP events are paired, attributed per transaction, and kept apart from Ga
   assert.equal(routeOf('0xc', new Set(['0xg']), new Set(['0xc'])), 'cctp');
   assert.equal(routeOf('0xc', null, null), null);
 
+  // Pruned history ends the backfill; a rate limit does not. The pruning answer usually comes from the
+  // primary while the fallback's rate-limit message is the one thrown, so every endpoint's cause counts.
+  const { historyPruned } = await import('../indexer.js');
+  const both = Object.assign(new Error('eth_getLogs: rate limit exceeded'), { causes: ['eth_getLogs: pruned history unavailable', 'eth_getLogs: rate limit exceeded'] });
+  assert.equal(historyPruned(both), true);
+  assert.equal(historyPruned(Object.assign(new Error('eth_getLogs: rate limit exceeded'), { causes: ['HTTP 502', 'eth_getLogs: rate limit exceeded'] })), false);
+  assert.equal(historyPruned(new Error('eth_getLogs: pruned history unavailable')), true, 'a bare error is read too');
+
   // The backfill's classifier: only mints and burns in CCTP transactions, per minute and token.
   const ZERO = '0x' + '0'.repeat(40);
   const tr = (from, to, amt, tx) => ({ address: USDC, topics: ['0xddf2', pad(from), pad(to)], data: '0x' + w(units(amt)), transactionHash: tx, blockNumber: '0x64' });

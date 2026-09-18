@@ -920,7 +920,13 @@ const CCTP_META = {
 const INDEX_FROM = 'index_from';    // first block this database indexed (see backfill)
 const CCTP_BACKFILL_SPAN = 2000;    // blocks per read: mints and burns only, so a small payload
 const CCTP_BACKFILL_BUDGET_MS = 5000;
+const CCTP_MIN_SPAN = 50;
 let cctpSpan = CCTP_BACKFILL_SPAN;
+
+// Pure: whether a failed read means the blocks are gone from every endpoint rather than refused for
+// now. Arc mainnet's primary endpoint prunes logs to roughly 70 hours (measured 18 Sept 2026: blocks
+// before ~21,000,000 answer "pruned history unavailable"); a rate limit is transient, pruning is not.
+export const historyPruned = (err) => (err?.causes || [String(err?.message || err)]).some((m) => /pruned/i.test(m));
 
 // Called once at boot, before anything is indexed, so the boundary is exact.
 function initCctp() {
@@ -976,10 +982,19 @@ async function cctpBackfillStep(budgetMs = CCTP_BACKFILL_BUDGET_MS) {
     const lo = Math.max(from, hi - cctpSpan + 1);
     let r;
     try { r = await getBridgeLogsRange(lo, hi); } catch (e) {
-      // Halve and retry on the next tick: a provider that caps results rather than blocks can refuse
-      // a busy span that a quieter one of the same length would pass.
-      cctpSpan = Math.max(50, Math.floor(cctpSpan / 2));
-      console.error(`[cctp] backfill ${lo}-${hi}: ${e.message} — span now ${cctpSpan}`);
+      // Pruned history does not come back: stop here, and the measured span stays where the last
+      // chunk left it — published as measuredSince, so what is not attributed is stated, not hidden.
+      // Only at the smallest span, so one refusal of a large range is never mistaken for it.
+      if (cctpSpan <= CCTP_MIN_SPAN && historyPruned(e)) {
+        db.setMetaValue(CCTP_META.done, 1);
+        console.log(`[cctp] blocks up to ${hi} are no longer served by the RPC endpoints — attribution starts at `
+          + `${new Date(Number(db.getMetaValue(CCTP_META.since)) * 1000).toISOString()}`);
+        return;
+      }
+      // Otherwise halve and retry on the next tick: a provider that caps results rather than blocks
+      // can refuse a busy span that a quieter one of the same length would pass.
+      cctpSpan = Math.max(CCTP_MIN_SPAN, Math.floor(cctpSpan / 2));
+      console.error(`[cctp] backfill ${lo}-${hi}: ${(e.causes || [e.message]).join(' | ')} — span now ${cctpSpan}`);
       return;
     }
     const cctp = parseCctp(r.cctpLogs, CCTP, TOKENS, r.tsAt, true);
@@ -1009,9 +1024,10 @@ export function cctpView(summary, since, asOf) {
   const done = db.getMetaValue(CCTP_META.done) === '1';
   const sinceMeta = Number(db.getMetaValue(CCTP_META.since));
   const cov = db.getCoverage();
-  // Done means every retained minute is attributed; before that, the backfill's own marker says how
-  // far back it has reached.
-  const measuredSince = done ? (cov.a ?? null) : (Number.isFinite(sinceMeta) ? sinceMeta : null);
+  // The backfill's own marker says how far back attribution reaches. It is absent only on a database
+  // that was attributed from its first block, where that is the start of coverage. A backfill that
+  // stopped at pruned history keeps its marker, so the unattributed part stays visible.
+  const measuredSince = Number.isFinite(sinceMeta) && sinceMeta > 0 ? sinceMeta : (done ? (cov.a ?? null) : null);
   const byToken = {};
   const row = (sym) => byToken[sym] || (byToken[sym] = { mint: 0, burn: 0, net: 0, transfersIn: 0, transfersOut: 0, sources: [], destinations: [] });
   for (const [sym, t] of Object.entries(summary.byToken || {})) {
@@ -1028,9 +1044,9 @@ export function cctpView(summary, since, asOf) {
     measured: true,
     contracts: [CCTP.tokenMessenger, CCTP.messageTransmitter, CCTP.tokenMinter].filter(Boolean),
     measuredSince: measuredSince != null ? measuredSince * 1000 : null,
-    // Whether every indexed minute of the window is attributed. Once the backfill is done that is all
-    // of them, however young the index; before that, only if the backfill has reached the window start.
-    complete: done || (measuredSince != null && measuredSince <= since),
+    // Whether every indexed minute of the window is attributed: the attributed span reaches either the
+    // window's start or the start of what is indexed at all.
+    complete: measuredSince != null && (measuredSince <= since || (cov.a != null && measuredSince <= cov.a)),
     backfilling: !done,
     byToken,
   };
