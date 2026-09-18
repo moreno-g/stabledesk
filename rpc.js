@@ -65,6 +65,10 @@ async function tryEndpoints(calls, soft) {
   // Only when *every* endpoint answered and refused us is this a credentials problem. If even one
   // failed at the network level, the network is involved too and we can't blame the key alone.
   let allAuth = true;
+  // Every endpoint's answer, not just the last one: the last is only whichever was tried last. When
+  // the primary says "pruned history unavailable" and the fallback says "rate limit exceeded", the
+  // second message alone reads as a transient fault — and the first is the one that is permanent.
+  const causes = [];
   for (const ep of ordered) {
     try {
       const out = await rpcBatchOne(ep, calls, soft);
@@ -72,10 +76,11 @@ async function tryEndpoints(calls, soft) {
       return { out, ep };
     } catch (e) {
       lastErr = e;
+      causes.push(String(e?.message || e));
       if (!RPC_AUTH_STATUSES.has(e?.status)) allAuth = false;
     }
   }
-  if (lastErr) lastErr.allAuth = allAuth;
+  if (lastErr) { lastErr.allAuth = allAuth; lastErr.causes = causes; }
   throw lastErr;
 }
 

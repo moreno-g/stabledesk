@@ -209,7 +209,10 @@
     read, euros cannot land in a dollar total.</p>
     <p style="margin-bottom:0"><strong>History.</strong> Mints and burns indexed before this measurement existed carried no route.
     They are re-read once — only mints, burns and CCTP events, newest first — and <code>measuredSince</code> on
-    <a href="/docs">/v1/cctp</a> states how far back attribution reaches while that runs. {{CCTP_STATUS}}</p>
+    <a href="/docs">/v1/cctp</a> states how far back attribution reaches. On Arc mainnet it stops at 15&nbsp;September&nbsp;2026,
+    14:07&nbsp;UTC, the day before public launch: the primary RPC endpoint keeps about 70 hours of logs, and the five hours before
+    that were no longer served when the re-read reached them. Those hours stay counted as issuance, and <code>measuredSince</code>
+    says so. {{CCTP_STATUS}}</p>
   </div>
 
   <h2>What is counted as a stablecoin, and what isn't</h2>
