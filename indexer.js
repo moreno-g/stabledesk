@@ -1000,8 +1000,10 @@ async function cctpBackfillStep(budgetMs = CCTP_BACKFILL_BUDGET_MS) {
 }
 
 // Pure-ish view of CCTP over a window: per token, the in/out/net totals from the bucket pair and the
-// per-chain split from cctp_flows. Per token and never summed across tokens — EURC crosses by CCTP
-// too, and a chain-wide total would add euros to dollars. Exported for /v1/cctp's longer window.
+// per-chain split from cctp_flows. Per token and never summed across tokens: TokenMessengerV2 is the
+// USDC path, but CCTP also carries EURC and third-party assets through CrossChainTokenService — not
+// read yet, its Arc address being unpublished — and once it is, a chain-wide total would add euros to
+// dollars. Exported for /v1/cctp's longer window.
 export function cctpView(summary, since, asOf) {
   if (!HAS_CCTP) return { measured: false, contracts: [], measuredSince: null, complete: false, backfilling: false, byToken: null };
   const done = db.getMetaValue(CCTP_META.done) === '1';

@@ -202,8 +202,11 @@
     one transaction. Domains are named from <a href="https://developers.circle.com/cctp/concepts/supported-chains-and-domains"
     rel="noopener">Circle's published table</a>; a domain missing from it is published as its number, never guessed. The inbound
     amount is the event's <code>amount</code> plus its <code>feeCollected</code>, because the relayer fee is minted on Arc too.</p>
-    <p><strong>Per token, never summed.</strong> EURC crosses by CCTP as well, so every CCTP figure is published per token. A
-    destination list added across USDC and EURC would add euros to dollars.</p>
+    <p><strong>What is not covered yet.</strong> CCTP is not USDC-only, but other assets take a different entry contract:
+    Circle routes EURC and registered third-party tokens through <code>CrossChainTokenService</code>, not TokenMessengerV2. Its Arc
+    address is not in Circle's published contract list as of 18&nbsp;September&nbsp;2026, so those flows are not attributed here: a EURC
+    mint arriving that way is still counted as issuance. Every CCTP figure is already published per token, so when that contract is
+    read, euros cannot land in a dollar total.</p>
     <p style="margin-bottom:0"><strong>History.</strong> Mints and burns indexed before this measurement existed carried no route.
     They are re-read once — only mints, burns and CCTP events, newest first — and <code>measuredSince</code> on
     <a href="/docs">/v1/cctp</a> states how far back attribution reaches while that runs. {{CCTP_STATUS}}</p>
