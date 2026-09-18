@@ -45,12 +45,27 @@ const GATEWAY_TESTNET = {
   minter: '0x0022222abe238cc2c7bb1f21003f0a260052475b',
 };
 
+// Circle CCTP V2, from Arc's published contract list (docs.arc.io/arc/references/contract-addresses).
+// CCTP moves USDC between chains by burning it on one and minting it on the other, so a CCTP mint on
+// Arc is a dollar that already existed elsewhere and a CCTP burn is one leaving — not issuance and not
+// redemption. Same reasoning as Gateway above, and the same attribution: by transaction, because the
+// Transfer event of a CCTP mint names the recipient, never the minter.
+//
+// The token minter is not needed for attribution — TokenMessengerV2 emits both DepositForBurn and
+// MintAndWithdraw — but it is where the burned USDC sits for one hop, so the registry names it.
+const CCTP_TESTNET = {
+  tokenMessenger: '0x8fe6b999dc680ccfdd5bf7eb0974218be2542daa',
+  messageTransmitter: '0xe737e5cebeeba77efe34d4aa090756590b1ce275',
+  tokenMinter: '0xb43db544e2c27092c107639ad201b3defabcf192',
+};
+
 const TESTNET = {
   id: 'testnet',
   isTestnet: true,
   chainId: 5042002,
   label: 'Arc testnet',
   gateway: GATEWAY_TESTNET,
+  cctp: CCTP_TESTNET,
   endpoints: [
     'https://rpc.testnet.arc.io',
     'https://rpc.drpc.testnet.arc.io',
@@ -146,6 +161,18 @@ function mainnetProfile() {
     gateway = { wallet: gwWallet, minter: gwMinter };
   }
 
+  // CCTP follows the Gateway rule: optional, all three or none. Unset means "not measured", and the
+  // CCTP split is then null everywhere rather than a zero that would read as "no USDC crossed chains".
+  let cctp = null;
+  const cctpVars = ['ARC_CCTP_TOKEN_MESSENGER', 'ARC_CCTP_MESSAGE_TRANSMITTER', 'ARC_CCTP_TOKEN_MINTER'];
+  const cctpVals = cctpVars.map((k) => String(process.env[k] || '').toLowerCase());
+  if (cctpVals.some(Boolean)) {
+    if (!cctpVals.every((v) => ADDR.test(v))) {
+      throw new Error(`${cctpVars.join(', ')} must all be set to 0x-prefixed addresses, or all left unset.`);
+    }
+    cctp = { tokenMessenger: cctpVals[0], messageTransmitter: cctpVals[1], tokenMinter: cctpVals[2] };
+  }
+
   if (missing.length) {
     throw new Error(
       `ARC_NETWORK=mainnet but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not set. `
@@ -162,6 +189,7 @@ function mainnetProfile() {
     endpoints,
     tokens,
     gateway,
+    cctp,
     // Real money: what deserves attention is orders of magnitude higher, and a longer backfill
     // is worth the RPC cost so the terminal isn't empty on day one.
     notableMin: Number(process.env.ARC_NOTABLE_MIN) || 100000,

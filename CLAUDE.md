@@ -8,7 +8,7 @@ Public, MIT, `moreno-g/stabledesk` → [stabledesk.xyz](https://stabledesk.xyz)
 ## Commandes
 
 ```
-npm test     # node --test → test/smoke.test.js (40 tests, aucun réseau)
+npm test     # node --test → test/smoke.test.js (78 tests, aucun réseau)
 npm start    # node server.js, port 4317
 ```
 
@@ -40,7 +40,8 @@ Node **≥ 22.5.0** (obligatoire : `node:sqlite`). Zéro dépendance npm, ESM, `
 - Les frais se lisent dans les receipts (le gas sur Arc est en USDC) : **pas de price feed, pas
   d'oracle**. Ne pas en introduire.
 - Circle Gateway repositionne de la liquidité — ce n'est **pas** de l'émission. Voir le commentaire
-  dans `chains.js`.
+  dans `chains.js`. Même règle pour **CCTP** (burn sur une chaîne, mint sur l'autre) : attribué par
+  transaction, publié à part (`cmint`/`cburn`, `/v1/cctp`), retiré de l'émission organique.
 - Toute page affichant un nombre répète l'avertissement testnet. Ne pas le retirer d'une page.
 - `arc.db` à la racine est la base locale : ne pas la commiter ni la supprimer. Sur Railway,
   `DB_PATH` doit pointer dans le volume monté (`RAILWAY_VOLUME_MOUNT_PATH`).

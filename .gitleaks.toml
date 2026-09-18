@@ -17,6 +17,12 @@ description = "Faux positif sur un commentaire de code"
 # Ancré sur le texte plutôt que sur un numéro de ligne : un
 # .gitleaksignore par empreinte casserait au premier ajout de
 # ligne au-dessus.
+#
+# Même règle, deuxième amorce : les champs tokenMessenger / tokenMinter
+# des contrats CCTP dans chains.js. La valeur capturée est une adresse
+# EVM, publique par définition. Ancré sur la forme exacte (0x + 40 hex,
+# rien d'autre) : une clé privée fait 64 hex et ne passe pas.
 regexes = [
     '''supply/velocity''',
+    '''^0x[0-9a-fA-F]{40}$''',
 ]

@@ -19,6 +19,13 @@ export const GATEWAY = CHAIN.gateway || null;
 export const GATEWAY_ADDRS = GATEWAY ? [GATEWAY.wallet, GATEWAY.minter] : [];
 export const HAS_GATEWAY = GATEWAY_ADDRS.length > 0;
 
+// Circle CCTP V2, or null where it is not configured. Only the two contracts that emit the events
+// attribution reads: TokenMessengerV2 (DepositForBurn, MintAndWithdraw) and MessageTransmitterV2
+// (MessageReceived, which carries the source chain of an inbound mint).
+export const CCTP = CHAIN.cctp || null;
+export const CCTP_ADDRS = CCTP ? [CCTP.tokenMessenger, CCTP.messageTransmitter] : [];
+export const HAS_CCTP = CCTP_ADDRS.length > 0;
+
 // Shared, mutable network status (endpoint currently answering).
 export const net = { endpoint: ENDPOINTS[0] };
 

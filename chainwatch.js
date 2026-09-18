@@ -173,7 +173,7 @@ export function describe(event, now = Date.now()) {
 // a page-someone event; a memecoin appearing is a line in a log. Sent to Telegram only above the bar,
 // because a watcher that forwards everything trains its reader to forward it to the bin.
 export function severity(event) {
-  if (event.kind === 'token' || event.kind === 'gateway' || event.kind === 'registry') {
+  if (event.kind === 'token' || event.kind === 'gateway' || event.kind === 'cctp' || event.kind === 'registry') {
     if (event.type === 'changed' || event.type === 'gone') return 'high';
     if (event.type === 'quiet') return 'high';
   }

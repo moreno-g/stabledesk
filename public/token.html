@@ -58,7 +58,7 @@
   .switch{display:inline-flex; background:var(--inset); border:1px solid var(--line); border-radius:9px; padding:3px; gap:2px}
   .switch a{font-size:11px; font-weight:600; color:var(--ink-3); text-decoration:none; padding:4px 10px; border-radius:6px}
   .switch a.on{background:var(--panel); color:var(--ink); box-shadow:0 1px 2px rgba(0,0,0,.2)}
-  .kpis{display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:14px}
+  .kpis{display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; margin-bottom:14px}
   .kpi{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:13px 14px; box-shadow:var(--shadow)}
   .kpi .lab{font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:600; margin-bottom:7px; white-space:nowrap}
   .kpi .val{font-family:var(--mono); font-size:20px; font-weight:600; letter-spacing:-.01em; font-variant-numeric:tabular-nums}
@@ -255,12 +255,17 @@ function renderKpis(d){
   const net=d.netIssuance24h;
   const netCls=net==null?'':(net>0?'pos':(net<0?'neg':''));
   const netStr=net==null?'—':(net>0?'+':'')+compact(net);
+  const sgn=(n)=>n==null||isNaN(n)?'—':(n>0?'+':'')+compact(n);
+  const cls=(n)=>n>0?'pos':(n<0?'neg':'');
   const kpis=[
     ['Supply',compact(sup.supply),''],
     ['24h real vol',compact(sup.rvolume24h),''],
     ['Velocity',vel,''],
     ['Dominance',sup.dominance!=null?(sup.dominance*100).toFixed(1)+'%':'—',''],
     ['Net issuance · 24h',netStr,'',netCls],
+    // The route split behind it. Only shown where CCTP is measured: a dash would read as "none".
+    ...(d.cctp?[['of which CCTP · 24h',sgn(d.cctp.net),'',cls(d.cctp.net)],
+      ['Created on Arc · 24h',net==null?'—':sgn(net-(d.cctp.net||0)-(d.gatewayNet24h||0)),'',cls(net==null?0:net-(d.cctp.net||0)-(d.gatewayNet24h||0))]]:[]),
   ].map(([l,v,u,cls])=>`<div class="kpi"><div class="lab">${l}</div><div class="val ${cls||''}">${v}<span class="unit">${u}</span></div></div>`).join('');
   $('#kpis').innerHTML=kpis;
 }

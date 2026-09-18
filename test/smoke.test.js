@@ -597,6 +597,107 @@ test('gateway rebalancing is not counted as issuance', async () => {
   assert.equal(db.getHistory('USYC', minute - 60, 60).at(-1).bmint, 300, 'and it survives into the series');
 });
 
+// ---- Circle CCTP: cross-chain transfers separated from issuance ----
+test('CCTP events are paired, attributed per transaction, and kept apart from Gateway', async () => {
+  const { parseCctp, routeOf, cctpPairs, organicIssuance, CCTP_TOPICS } = await import('../indexer.js');
+  const T = CCTP_TOPICS;
+  const cctp = { tokenMessenger: '0x' + 'a'.repeat(40), messageTransmitter: '0x' + 'b'.repeat(40), tokenMinter: '0x' + 'c'.repeat(40) };
+  const USDC = '0x' + '1'.repeat(40), OTHER = '0x' + '9'.repeat(40);
+  const tokens = { [USDC]: { symbol: 'USDC', decimals: 6 } };
+  const pad = (a) => '0x' + a.slice(2).padStart(64, '0');
+  const w = (n) => BigInt(n).toString(16).padStart(64, '0');
+  const units = (x) => BigInt(Math.round(x * 1e6));
+  const log = (address, topics, words, tx, idx, block = 100) =>
+    ({ address, topics, data: '0x' + words.map(w).join(''), transactionHash: tx, logIndex: '0x' + idx.toString(16), blockNumber: '0x' + block.toString(16) });
+  const tsAt = (b) => 1789600000 + b;   // one block per second, block 100 → a fixed minute
+
+  // Outbound: DepositForBurn carries amount (word 0) and destination domain (word 2).
+  const out = log(cctp.tokenMessenger, [T.depositForBurn, pad(USDC), pad(OTHER), pad('0x0')], [units(250), 0, 7, 0, 0, 0], '0xtx1', 3);
+  // Inbound, relayer-batched: two mints from different chains in one transaction, each followed by
+  // its MessageReceived — plus a generic message that carried no mint, in a transaction of its own.
+  const in1 = log(cctp.tokenMessenger, [T.mintAndWithdraw, pad(OTHER), pad(USDC)], [units(99), units(1)], '0xtx2', 1);
+  const mr1 = log(cctp.messageTransmitter, [T.messageReceived, pad(OTHER), pad('0x1'), pad('0x0')], [0, 0], '0xtx2', 2);
+  const in2 = log(cctp.tokenMessenger, [T.mintAndWithdraw, pad(OTHER), pad(USDC)], [units(40), 0], '0xtx2', 5);
+  const mr2 = log(cctp.messageTransmitter, [T.messageReceived, pad(OTHER), pad('0x2'), pad('0x0')], [6, 0], '0xtx2', 6);
+  const generic = log(cctp.messageTransmitter, [T.messageReceived, pad(OTHER), pad('0x3'), pad('0x0')], [5, 0], '0xtx3', 1);
+  // A mint of an untracked asset still consumes its own MessageReceived, so the USDC mint after it
+  // is not paired with the wrong chain.
+  const foreign = log(cctp.tokenMessenger, [T.mintAndWithdraw, pad(OTHER), pad(OTHER)], [units(5), 0], '0xtx4', 1);
+  const mrF = log(cctp.messageTransmitter, [T.messageReceived, pad(OTHER), pad('0x4'), pad('0x0')], [3, 0], '0xtx4', 2);
+  const in3 = log(cctp.tokenMessenger, [T.mintAndWithdraw, pad(OTHER), pad(USDC)], [units(10), 0], '0xtx4', 3);
+  const mr3 = log(cctp.messageTransmitter, [T.messageReceived, pad(OTHER), pad('0x5'), pad('0x0')], [5, 0], '0xtx4', 4);
+
+  // Shuffled on purpose: pairing follows logIndex, not arrival order.
+  const r = parseCctp([mr2, in1, out, generic, mr1, in2, in3, mrF, foreign, mr3], cctp, tokens, tsAt);
+  assert.deepEqual([...r.txs].sort(), ['0xtx1', '0xtx2', '0xtx4'], 'a generic message never marks its transaction as CCTP');
+  const f = [...r.flows.values()];
+  const find = (dir, domain) => f.find((x) => x.dir === dir && x.domain === domain);
+  assert.equal(find('out', 7).amount, 250, 'outbound: DepositForBurn amount, to Polygon PoS');
+  assert.equal(find('in', 0).amount, 100, 'inbound: amount + relayer fee, both minted here — from Ethereum');
+  assert.equal(find('in', 6).amount, 40, 'second message in the batch keeps its own source chain');
+  assert.equal(find('in', 5).amount, 10, 'untracked mint consumed domain 3; the USDC mint pairs with 5');
+  assert.equal(find('in', 3), undefined, 'the untracked asset is not counted');
+  assert.equal(f.reduce((a, x) => a + x.cnt, 0), 4);
+  assert.deepEqual(parseCctp([out], null, tokens, tsAt), { txs: null, flows: new Map() }, 'not configured is null, not empty');
+
+  // Gateway wins when a transaction carries both, so a mint is never subtracted twice.
+  assert.equal(routeOf('0xg', new Set(['0xg']), new Set(['0xg'])), 'gateway');
+  assert.equal(routeOf('0xc', new Set(['0xg']), new Set(['0xc'])), 'cctp');
+  assert.equal(routeOf('0xc', null, null), null);
+
+  // The backfill's classifier: only mints and burns in CCTP transactions, per minute and token.
+  const ZERO = '0x' + '0'.repeat(40);
+  const tr = (from, to, amt, tx) => ({ address: USDC, topics: ['0xddf2', pad(from), pad(to)], data: '0x' + w(units(amt)), transactionHash: tx, blockNumber: '0x64' });
+  const pairs = [...cctpPairs([tr(ZERO, OTHER, 100, '0xtx2'), tr(cctp.tokenMinter, ZERO, 250, '0xtx1'), tr(ZERO, OTHER, 7, '0xnot'), tr(OTHER, OTHER, 9, '0xtx2')],
+    null, r.txs, tokens, tsAt).values()];
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].cmint, 100, 'the plain transfer in a CCTP transaction is not a mint');
+  assert.equal(pairs[0].cburn, 250);
+
+  // The headline: supply falls because USDC left by CCTP, while issuance on Arc grew.
+  // 17 Sept 2026 on Arc mainnet, as read from the chain: net −9,521,364, of which CCTP −12,288,987.
+  const day = { mint: 57268244, burn: 66789608, bmint: 0, bburn: 0, cmint: 5557076, cburn: 17846063 };
+  assert.equal(organicIssuance(day, true, true), 2767623);
+  assert.equal(organicIssuance(day, true, false), -9521364, 'without CCTP measured, nothing is subtracted for it');
+  assert.equal(organicIssuance(day, false, false), null);
+});
+
+test('CCTP pair and per-chain flows round-trip through the aggregates, backfill and rollup', async () => {
+  const db = await import('../db.js');
+  const minute = Math.floor(Date.now() / 1000 / 60) * 60 - 1200;
+  const flows = new Map([['k1', { minute, token: 'USYC', dir: 'out', domain: 7, amount: 30, cnt: 2 }]]);
+  db.applyBatch(new Map([[`${minute}|USYC`, {
+    minute, token: 'USYC', volume: 0, cnt: 0, mint: 50, burn: 30, rvolume: 0, rcnt: 0, avolume: 0, acnt: 0,
+    bmint: 0, bburn: 0, bvolume: 0, bcnt: 0, cmint: 20, cburn: 30,
+  }]]), new Map(), [], flows);
+  let sum = db.getSummary(minute - 60).byToken.USYC;
+  assert.equal(sum.cburn, 30);
+  assert.equal(sum.mint, 50 + 400, 'raw mint untouched, and additive with the earlier gateway test');
+
+  // The backfill adds only the CCTP pair and its progress marker, in one transaction.
+  db.applyCctpBackfill(new Map([['x', { minute, token: 'USYC', cmint: 5, cburn: 0 }]]),
+    new Map([['k2', { minute, token: 'USYC', dir: 'in', domain: 0, amount: 5, cnt: 1 }]]), { cctp_test_marker: 42 });
+  sum = db.getSummary(minute - 60).byToken.USYC;
+  assert.equal(sum.cmint, 25);
+  assert.equal(sum.mint, 450, 'backfill never touches the raw mint it is a share of');
+  assert.equal(db.getMetaValue('cctp_test_marker'), '42');
+  assert.equal(db.getHistory('USYC', minute - 60, 60).find((p) => p.t === minute).cmint, 25, 'and it survives into the series');
+
+  const fl = db.cctpFlows(minute - 60).filter((x) => x.token === 'USYC');
+  assert.deepEqual(fl.map((x) => [x.dir, x.domain, x.amount]), [['out', 7, 30], ['in', 0, 5]], 'largest first');
+
+  // Pruning rolls minutes into days — the CCTP pair and the flows both — rather than dropping them.
+  const old = Math.floor(Date.now() / 1000) - 9 * 86400;
+  const oldMin = Math.floor(old / 60) * 60;
+  db.applyBatch(new Map([[`${oldMin}|USYC`, { minute: oldMin, token: 'USYC', volume: 0, cnt: 0, mint: 8, burn: 0, cmint: 8, cburn: 0 }]]), new Map(), [],
+    new Map([['k3', { minute: oldMin, token: 'USYC', dir: 'in', domain: 6, amount: 8, cnt: 1 }]]));
+  db.prune(Math.floor(Date.now() / 1000), 1e9, 500);
+  const oldDay = Math.floor(oldMin / 86400) * 86400;
+  const daily = db.getDailyHistory('USYC', oldDay).find((p) => p.t === oldDay);
+  assert.equal(daily.cmint, 8, 'the CCTP pair is rolled up with its day');
+  assert.equal(db.cctpFlows(oldMin - 60).filter((x) => x.domain === 6).length, 0, 'the minute row is gone from the rolling table');
+});
+
 // ---- chain liveness ----
 test('a stopped chain is told apart from a stopped indexer', async () => {
   const { chainStateFrom } = await import('../indexer.js');
@@ -681,8 +782,16 @@ test('network profile: token parsing and mainnet fail-fast', async () => {
   assert.match(insecure || '', /not an https URL/);
 
   // Fully configured, it boots and reports the configured chain — on its own database file.
-  const ok = run({ ARC_NETWORK: 'mainnet', ARC_CHAIN_ID: '9999', ARC_RPC_URLS: 'https://rpc.example', ARC_TOKENS: 'USDC:0x' + '1'.repeat(40) + ':6' });
+  const base = { ARC_NETWORK: 'mainnet', ARC_CHAIN_ID: '9999', ARC_RPC_URLS: 'https://rpc.example', ARC_TOKENS: 'USDC:0x' + '1'.repeat(40) + ':6' };
+  const ok = run(base);
   assert.equal(ok, null, 'a complete mainnet config must start cleanly');
+
+  // CCTP is optional like Gateway, but all three contracts or none: a partial set would attribute
+  // outbound burns and silently miss inbound mints, or the reverse.
+  const partial = run({ ...base, ARC_CCTP_TOKEN_MESSENGER: '0x' + '2'.repeat(40) });
+  assert.match(partial || '', /ARC_CCTP_TOKEN_MESSENGER, ARC_CCTP_MESSAGE_TRANSMITTER, ARC_CCTP_TOKEN_MINTER/);
+  const full = run({ ...base, ARC_CCTP_TOKEN_MESSENGER: '0x' + '2'.repeat(40), ARC_CCTP_MESSAGE_TRANSMITTER: '0x' + '3'.repeat(40), ARC_CCTP_TOKEN_MINTER: '0x' + '4'.repeat(40) });
+  assert.equal(full, null, 'a complete CCTP config must start cleanly');
 });
 
 // ---- entity derivation (experimental — see entities.js) ----

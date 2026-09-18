@@ -243,6 +243,20 @@ function build() {
           responses: { 200: ok('Time series.', schema('History')), ...COMMON },
         },
       },
+      '/v1/cctp': {
+        get: {
+          tags: ['Stablecoins'], operationId: 'getCctp',
+          summary: 'Cross-chain flow by CCTP',
+          description: 'USDC and EURC arriving on Arc from, and leaving Arc for, other chains through Circle CCTP V2 — totals per token, '
+            + 'and the chain on the other side read from the domain the events carry. A CCTP mint is not issuance and a CCTP burn is not '
+            + 'a redemption: the same dollar is burned on one chain and minted on another.',
+          parameters: [{
+            name: 'range', in: 'query', required: false,
+            schema: { type: 'string', enum: ['24h', '7d'], default: '24h' },
+          }],
+          responses: { 200: ok('CCTP flows per token and counterparty chain.', schema('Cctp')), 400: response('BadRequest'), ...COMMON },
+        },
+      },
       '/v1/stablecoins/{token}': {
         get: {
           tags: ['Stablecoins'], operationId: 'getStablecoin',
@@ -659,6 +673,51 @@ function build() {
             rvolume: { type: 'number' }, rtransfers: { type: 'integer' },
             avolume: { type: 'number' }, atransfers: { type: 'integer' },
             mint: { type: 'number' }, burn: { type: 'number' },
+            bmint: { type: 'number', description: 'Circle Gateway share of `mint` (liquidity repositioned onto Arc). Included in `mint`, never instead of it.' },
+            bburn: { type: 'number', description: 'Circle Gateway share of `burn`.' },
+            cmint: { type: 'number', description: 'CCTP share of `mint`: arrived from another chain, where the same amount was burned. Included in `mint`.' },
+            cburn: { type: 'number', description: 'CCTP share of `burn`: left Arc for another chain. Included in `burn`.' },
+          },
+        },
+
+        CctpFlow: {
+          type: 'object',
+          properties: {
+            domain: { type: ['integer', 'null'], description: 'CCTP domain of the chain on the other side, as carried on-chain. Null when an inbound mint had no MessageReceived to pair with.' },
+            chain: { type: ['string', 'null'], description: "That domain's name in Circle's published table; null if the domain is not listed there." },
+            amount: { type: 'number' },
+            transfers: { type: 'integer' },
+          },
+        },
+
+        Cctp: {
+          type: 'object',
+          description: 'USDC and EURC crossing between Arc and other chains by CCTP. Attributed per transaction: a mint or burn in a transaction where TokenMessengerV2 emitted MintAndWithdraw or DepositForBurn. Per token, never summed across tokens.',
+          properties: {
+            range: { type: 'string', enum: ['24h', '7d'] },
+            windowEnd: num('ms'),
+            measured: { type: 'boolean', description: 'False where CCTP is not configured for this network; every figure is then absent rather than zero.' },
+            contracts: { type: 'array', items: { type: 'string' } },
+            measuredSince: num('ms. Every mint and burn from this instant on carries its route. Earlier history was indexed before CCTP was measured and is being re-read.'),
+            complete: { type: 'boolean', description: 'True when the whole window is attributed. False only while the backfill has not reached its start.' },
+            backfilling: { type: 'boolean' },
+            byToken: {
+              type: ['object', 'null'],
+              additionalProperties: {
+                type: 'object',
+                properties: {
+                  mint: { type: 'number', description: 'Arrived on Arc: MintAndWithdraw amount plus the relayer fee, both minted here.' },
+                  burn: { type: 'number', description: 'Left Arc: DepositForBurn amount.' },
+                  net: { type: 'number' },
+                  transfersIn: { type: 'integer' },
+                  transfersOut: { type: 'integer' },
+                  sources: { type: 'array', items: schema('CctpFlow'), description: 'Where inbound USDC came from, largest first.' },
+                  destinations: { type: 'array', items: schema('CctpFlow'), description: 'Where outbound USDC went, largest first.' },
+                },
+              },
+            },
+            note: { type: 'string' },
+            updatedAt: num('ms'),
           },
         },
 
@@ -759,6 +818,12 @@ function build() {
             supply: schema('TokenSupply'),
             summary24h: { anyOf: [schema('TokenSummary'), { type: 'null' }] },
             netIssuance24h: num('mint − burn over the rolling 24h.'),
+            bridgeMint24h: num('Circle Gateway share of mint. Null where Gateway is not deployed.'),
+            bridgeBurn24h: num('Circle Gateway share of burn. Null where Gateway is not deployed.'),
+            cctpMint24h: num('CCTP share of mint — USDC that arrived from another chain. Null where CCTP is not measured.'),
+            cctpBurn24h: num('CCTP share of burn — USDC that left for another chain. Null where CCTP is not measured.'),
+            cctpComplete: { type: ['boolean', 'null'], description: 'Whether the CCTP pair covers the whole window; false while history is being re-read.' },
+            organicNetIssuance24h: num('Net issuance with cross-chain movement taken out: mint − burn, minus the Gateway net and the CCTP net wherever each is measured. What was created or destroyed on Arc, as opposed to moved between chains. Null when neither route is measured.'),
             distribution: {
               type: 'object',
               description: 'Transfer-size histogram over the retained transfer window, published with the window it covers.',

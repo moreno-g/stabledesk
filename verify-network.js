@@ -593,6 +593,22 @@ async function checkGateway(head) {
   });
 }
 
+// ---- 5b. CCTP ----------------------------------------------------------------------------------
+async function checkCctp() {
+  if (!CHAIN.cctp) {
+    ok('cctp', `no CCTP configured for ${CHAIN.label} — the CCTP split is reported as not measured`);
+    return;
+  }
+  const addrs = [CHAIN.cctp.tokenMessenger, CHAIN.cctp.messageTransmitter, CHAIN.cctp.tokenMinter];
+  const out = await rpc(addrs.map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] })));
+  addrs.forEach((a, i) => {
+    const size = (typeof out[i] === 'string' && out[i] !== '0x') ? (out[i].length - 2) / 2 : 0;
+    observe('cctp', a, { hasCode: size > 0 });
+    if (!size) fail('cctp', `${a} has no bytecode — CCTP attribution would silently measure nothing`);
+    else ok('cctp', `${a} · ${size} bytes`);
+  });
+}
+
 // ---- 6. registry -------------------------------------------------------------------------------
 // A registry entry pointing at an empty address attributes TVL to something that is not there.
 async function checkRegistry() {
@@ -742,6 +758,7 @@ async function pass({ quiet, watch }) {
     await checkBlockTime(head);
     await checkTokens();
     await checkGateway(head);
+    await checkCctp();
     await checkRegistry();
     await checkUntracked(head);
   }

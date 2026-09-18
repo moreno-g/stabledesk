@@ -51,6 +51,20 @@ export const DENOMINATION = {
 };
 export const denominationOf = (symbol) => DENOMINATION[symbol] ?? null;
 
+// CCTP domain → chain, from Circle's published table (developers.circle.com/cctp/concepts/
+// supported-chains-and-domains, read 18 Sept 2026). The domain is what DepositForBurn and
+// MessageReceived carry on-chain; the name is only a label. A domain missing here is published as
+// its number with a null name — never guessed, since a wrong chain name is a wrong claim about
+// where money went.
+export const CCTP_DOMAINS = {
+  0: 'Ethereum', 1: 'Avalanche', 2: 'OP Mainnet', 3: 'Arbitrum', 4: 'Noble', 5: 'Solana', 6: 'Base',
+  7: 'Polygon PoS', 8: 'Sui', 9: 'Aptos', 10: 'Unichain', 11: 'Linea', 12: 'Codex', 13: 'Sonic',
+  14: 'World Chain', 15: 'Monad', 16: 'Sei', 17: 'BNB Smart Chain', 18: 'XDC', 19: 'HyperEVM',
+  21: 'Ink', 22: 'Plume', 25: 'Starknet', 26: 'Arc', 27: 'Stellar', 28: 'EDGE', 29: 'Injective',
+  30: 'Morph', 31: 'Pharos', 32: 'Cronos', 33: 'Plasma', 37: 'X Layer',
+};
+export const cctpChainName = (domain) => (domain == null || domain < 0 ? null : CCTP_DOMAINS[domain] ?? null);
+
 export const TOKEN_SYMBOLS = new Set(Object.values(CHAIN.tokens).map((t) => t.symbol));
 export const TOKEN_LIST = [...TOKEN_SYMBOLS].join(', ');
 export const ADDR_RE = /^0x[0-9a-f]{40}$/;
