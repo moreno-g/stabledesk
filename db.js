@@ -65,6 +65,29 @@ db.exec(`
     PRIMARY KEY (day, token)
   );
 
+  -- CCTP flows by counterparty chain. Per minute so the rolling 24h window is exact, and per token
+  -- because a list of destinations summed across USDC and EURC would add euros to dollars. Rolled
+  -- into cctp_flows_daily by prune() exactly like buckets, so the per-chain history outlives the
+  -- seven-day minute window. domain -1 means an inbound mint whose MessageReceived was not found.
+  CREATE TABLE IF NOT EXISTS cctp_flows (
+    minute INTEGER NOT NULL,
+    token  TEXT    NOT NULL,
+    dir    TEXT    NOT NULL,          -- 'in' (minted on Arc) | 'out' (burned on Arc)
+    domain INTEGER NOT NULL,
+    amount REAL    NOT NULL DEFAULT 0,
+    cnt    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (minute, token, dir, domain)
+  );
+  CREATE TABLE IF NOT EXISTS cctp_flows_daily (
+    day    INTEGER NOT NULL,
+    token  TEXT    NOT NULL,
+    dir    TEXT    NOT NULL,
+    domain INTEGER NOT NULL,
+    amount REAL    NOT NULL DEFAULT 0,
+    cnt    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, token, dir, domain)
+  );
+
   CREATE TABLE IF NOT EXISTS addr_stats (
     address    TEXT    PRIMARY KEY,
     transfers  INTEGER NOT NULL DEFAULT 0,
@@ -270,14 +293,20 @@ db.exec(`
 //   avolume/acnt — "adjusted" volume (real, minus transfers touching a high-frequency address)
 //   bmint/bburn   — the Circle Gateway share of mint/burn (cross-chain rebalancing, not issuance)
 //   bvolume/bcnt  — the Gateway share of real volume
+//   cmint/cburn   — the CCTP share of mint/burn (USDC arriving from / leaving to another chain)
 // Buckets written before this migration count Gateway flow inside mint/burn/rvolume with no way
 // to separate it, so they read as zero here. That is why this lands before Arc mainnet: the
 // aggregates are additive and a mixed history can't be unmixed afterwards.
 for (const col of ['rvolume REAL NOT NULL DEFAULT 0', 'rcnt INTEGER NOT NULL DEFAULT 0',
                    'avolume REAL NOT NULL DEFAULT 0', 'acnt INTEGER NOT NULL DEFAULT 0',
                    'bmint REAL NOT NULL DEFAULT 0', 'bburn REAL NOT NULL DEFAULT 0',
-                   'bvolume REAL NOT NULL DEFAULT 0', 'bcnt INTEGER NOT NULL DEFAULT 0']) {
+                   'bvolume REAL NOT NULL DEFAULT 0', 'bcnt INTEGER NOT NULL DEFAULT 0',
+                   'cmint REAL NOT NULL DEFAULT 0', 'cburn REAL NOT NULL DEFAULT 0']) {
   try { db.exec(`ALTER TABLE buckets ADD COLUMN ${col}`); } catch { /* already present */ }
+}
+// The daily rollup carries the CCTP pair too; it predates it, so it is migrated rather than recreated.
+for (const col of ['cmint REAL NOT NULL DEFAULT 0', 'cburn REAL NOT NULL DEFAULT 0']) {
+  try { db.exec(`ALTER TABLE buckets_daily ADD COLUMN ${col}`); } catch { /* already present */ }
 }
 // Migration: Pro-tier expiry, so a lapsed subscription reverts to free automatically.
 try { db.exec('ALTER TABLE api_keys ADD COLUMN expires_at INTEGER'); } catch { /* already present */ }
@@ -347,15 +376,29 @@ export const NOISE_SET_MAX = Number(process.env.NOISE_SET_MAX) || 20000;
 const stmt = {
   getMeta: db.prepare('SELECT v FROM meta WHERE k = ?'),
   setMeta: db.prepare('INSERT INTO meta(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v'),
-  upBucket: db.prepare(`INSERT INTO buckets(minute, token, volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt)
-    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  upBucket: db.prepare(`INSERT INTO buckets(minute, token, volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt, cmint, cburn)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(minute, token) DO UPDATE SET
       volume = volume + excluded.volume, cnt = cnt + excluded.cnt,
       mint = mint + excluded.mint, burn = burn + excluded.burn,
       rvolume = rvolume + excluded.rvolume, rcnt = rcnt + excluded.rcnt,
       avolume = avolume + excluded.avolume, acnt = acnt + excluded.acnt,
       bmint = bmint + excluded.bmint, bburn = bburn + excluded.bburn,
-      bvolume = bvolume + excluded.bvolume, bcnt = bcnt + excluded.bcnt`),
+      bvolume = bvolume + excluded.bvolume, bcnt = bcnt + excluded.bcnt,
+      cmint = cmint + excluded.cmint, cburn = cburn + excluded.cburn`),
+  // The CCTP backfill only ever adds the CCTP pair to minutes the first pass already wrote, so it
+  // touches nothing else — the raw mint and burn it is a share of were counted when they happened.
+  upBucketCctp: db.prepare(`INSERT INTO buckets(minute, token, cmint, cburn) VALUES(?, ?, ?, ?)
+    ON CONFLICT(minute, token) DO UPDATE SET cmint = cmint + excluded.cmint, cburn = cburn + excluded.cburn`),
+  upFlow: db.prepare(`INSERT INTO cctp_flows(minute, token, dir, domain, amount, cnt) VALUES(?, ?, ?, ?, ?, ?)
+    ON CONFLICT(minute, token, dir, domain) DO UPDATE SET amount = amount + excluded.amount, cnt = cnt + excluded.cnt`),
+  flowsSince: db.prepare(`SELECT token, dir, domain, SUM(amount) AS amount, SUM(cnt) AS cnt
+    FROM cctp_flows WHERE minute >= ? GROUP BY token, dir, domain ORDER BY amount DESC`),
+  rollupFlows: db.prepare(`INSERT INTO cctp_flows_daily(day, token, dir, domain, amount, cnt)
+    SELECT (minute / 86400) * 86400 AS day, token, dir, domain, SUM(amount), SUM(cnt)
+      FROM cctp_flows WHERE minute < ? GROUP BY day, token, dir, domain
+    ON CONFLICT(day, token, dir, domain) DO UPDATE SET amount = amount + excluded.amount, cnt = cnt + excluded.cnt`),
+  pruneFlows: db.prepare('DELETE FROM cctp_flows WHERE minute < ?'),
   // first_from and first_block are written once and never overwritten — the first is who funded
   // the address, the second is when we started being able to measure a rate for it at all.
   upAddr: db.prepare(`INSERT INTO addr_stats(address, transfers, volume, last_block, first_from, first_block) VALUES(?, ?, ?, ?, ?, ?)
@@ -385,9 +428,10 @@ const stmt = {
   pruneAddrs: db.prepare('DELETE FROM addr_stats WHERE last_block < ?'),
   // Roll the minutes about to be deleted into their day, then delete them. Additive on conflict,
   // because a day straddling the cutoff is rolled up across two prunes and both halves must land.
-  rollupDaily: db.prepare(`INSERT INTO buckets_daily(day, token, volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt)
+  rollupDaily: db.prepare(`INSERT INTO buckets_daily(day, token, volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt, cmint, cburn)
     SELECT (minute / 86400) * 86400 AS day, token, SUM(volume), SUM(cnt), SUM(mint), SUM(burn),
-           SUM(rvolume), SUM(rcnt), SUM(avolume), SUM(acnt), SUM(bmint), SUM(bburn), SUM(bvolume), SUM(bcnt)
+           SUM(rvolume), SUM(rcnt), SUM(avolume), SUM(acnt), SUM(bmint), SUM(bburn), SUM(bvolume), SUM(bcnt),
+           SUM(cmint), SUM(cburn)
       FROM buckets WHERE minute < ? GROUP BY day, token
     ON CONFLICT(day, token) DO UPDATE SET
       volume = volume + excluded.volume, cnt = cnt + excluded.cnt,
@@ -395,7 +439,8 @@ const stmt = {
       rvolume = rvolume + excluded.rvolume, rcnt = rcnt + excluded.rcnt,
       avolume = avolume + excluded.avolume, acnt = acnt + excluded.acnt,
       bmint = bmint + excluded.bmint, bburn = bburn + excluded.bburn,
-      bvolume = bvolume + excluded.bvolume, bcnt = bcnt + excluded.bcnt`),
+      bvolume = bvolume + excluded.bvolume, bcnt = bcnt + excluded.bcnt,
+      cmint = cmint + excluded.cmint, cburn = cburn + excluded.cburn`),
   pruneBuckets: db.prepare('DELETE FROM buckets WHERE minute < ?'),
   // Addresses busy enough to be treated as infrastructure rather than economic actors.
   //
@@ -456,14 +501,17 @@ function topOf(recents, perKey = TOP_PER_BATCH) {
 }
 
 // Flush one processed batch (aggregated in JS) inside a single transaction.
-export function applyBatch(buckets, addrs, recents) {
+export function applyBatch(buckets, addrs, recents, flows = null) {
   db.exec('BEGIN');
   try {
     // Columns added by migration default to 0 for callers that predate them.
     for (const b of buckets.values()) {
       stmt.upBucket.run(b.minute, b.token, b.volume, b.cnt, b.mint, b.burn, b.rvolume || 0, b.rcnt || 0, b.avolume || 0, b.acnt || 0,
-        b.bmint || 0, b.bburn || 0, b.bvolume || 0, b.bcnt || 0);
+        b.bmint || 0, b.bburn || 0, b.bvolume || 0, b.bcnt || 0, b.cmint || 0, b.cburn || 0);
     }
+    // In the same transaction as the buckets: a crash between the two would leave the per-chain
+    // split disagreeing with the CCTP totals it is a breakdown of.
+    if (flows) for (const f of flows.values()) stmt.upFlow.run(f.minute, f.token, f.dir, f.domain, f.amount, f.cnt);
     for (const [addr, x] of addrs) stmt.upAddr.run(addr, x.transfers, x.volume, x.lastBlock, x.firstFrom || null, x.firstBlock ?? x.lastBlock ?? null);
     for (const r of recents) stmt.insRecent.run(r.block, r.ts, r.token, r.frm, r.too, r.amount);
     for (const t of topOf(recents)) stmt.insTop.run(t.day, t.token, t.amount, t.frm, t.too, t.block, t.ts);
@@ -491,13 +539,14 @@ export function getHistory(token, since, groupSec) {
     ps = db.prepare(`SELECT (minute / ${g}) * ${g} AS t,
         SUM(volume) AS volume, SUM(cnt) AS cnt, SUM(mint) AS mint, SUM(burn) AS burn,
         SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt, SUM(avolume) AS avolume, SUM(acnt) AS acnt,
-        SUM(bmint) AS bmint, SUM(bburn) AS bburn, SUM(bvolume) AS bvolume, SUM(bcnt) AS bcnt
+        SUM(bmint) AS bmint, SUM(bburn) AS bburn, SUM(bvolume) AS bvolume, SUM(bcnt) AS bcnt,
+        SUM(cmint) AS cmint, SUM(cburn) AS cburn
       FROM buckets WHERE minute >= ? ${filter ? 'AND token = ?' : ''}
       GROUP BY t ORDER BY t`);
     histStmts.set(ck, ps);
   }
   const rows = filter ? ps.all(since, token) : ps.all(since);
-  return rows.map((r) => ({ t: r.t, volume: r.volume, cnt: r.cnt, mint: r.mint, burn: r.burn, rvolume: r.rvolume, rcnt: r.rcnt, avolume: r.avolume, acnt: r.acnt, bmint: r.bmint, bburn: r.bburn, bvolume: r.bvolume, bcnt: r.bcnt }));
+  return rows.map((r) => ({ t: r.t, volume: r.volume, cnt: r.cnt, mint: r.mint, burn: r.burn, rvolume: r.rvolume, rcnt: r.rcnt, avolume: r.avolume, acnt: r.acnt, bmint: r.bmint, bburn: r.bburn, bvolume: r.bvolume, bcnt: r.bcnt, cmint: r.cmint, cburn: r.cburn }));
 }
 
 // Daily series, for ranges longer than the minute table retains. Reads the rollup *and* the minutes
@@ -510,7 +559,7 @@ export function getDailyHistory(token, sinceDay) {
   const ck = filter ? 'f' : 'a';
   let ps = dailyStmts.get(ck);
   if (!ps) {
-    const cols = 'volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt';
+    const cols = 'volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt, cmint, cburn';
     ps = db.prepare(`SELECT day AS t, ${cols.split(', ').map((c) => `SUM(${c}) AS ${c}`).join(', ')} FROM (
         SELECT day, token, ${cols} FROM buckets_daily WHERE day >= ? ${filter ? 'AND token = ?' : ''}
         UNION ALL
@@ -519,6 +568,31 @@ export function getDailyHistory(token, sinceDay) {
     dailyStmts.set(ck, ps);
   }
   return filter ? ps.all(sinceDay, token, sinceDay, token) : ps.all(sinceDay, sinceDay);
+}
+
+// Earliest block any address was first seen in — a lower bound on where indexing started, for
+// databases that predate the `index_from` marker. Mint and burn legs are not in addr_stats, so this
+// can sit after the true start, never before it.
+export const firstIndexedBlock = () => db.prepare('SELECT MIN(first_block) AS m FROM addr_stats').get()?.m ?? null;
+
+// CCTP flows since `since`, per token, direction and counterparty domain, largest first.
+export const cctpFlows = (since) => stmt.flowsSince.all(since);
+
+// One chunk of the CCTP backfill: the CCTP pair added to minutes already indexed, the per-chain
+// flows, and the backfill's own progress marker — in one transaction, so a crash can neither lose a
+// chunk nor let the next boot add the same chunk twice. Aggregates are additive; that is the whole
+// reason the marker cannot live anywhere else.
+export function applyCctpBackfill(pairs, flows, meta) {
+  db.exec('BEGIN');
+  try {
+    for (const b of pairs.values()) stmt.upBucketCctp.run(b.minute, b.token, b.cmint || 0, b.cburn || 0);
+    for (const f of flows.values()) stmt.upFlow.run(f.minute, f.token, f.dir, f.domain, f.amount, f.cnt);
+    for (const [k, v] of Object.entries(meta)) stmt.setMeta.run(k, String(v));
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
 }
 
 // How far back the daily rollup reaches. Published next to a long series so a 90-day range drawn
@@ -545,7 +619,8 @@ export const getSeries = (token, since, groupSec, daily) =>
 export function getSummary(since) {
   const rows = db.prepare(`SELECT token, SUM(volume) AS volume, SUM(cnt) AS cnt, SUM(mint) AS mint, SUM(burn) AS burn,
       SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt, SUM(avolume) AS avolume, SUM(acnt) AS acnt,
-      SUM(bmint) AS bmint, SUM(bburn) AS bburn, SUM(bvolume) AS bvolume, SUM(bcnt) AS bcnt
+      SUM(bmint) AS bmint, SUM(bburn) AS bburn, SUM(bvolume) AS bvolume, SUM(bcnt) AS bcnt,
+      SUM(cmint) AS cmint, SUM(cburn) AS cburn
     FROM buckets WHERE minute >= ? GROUP BY token`).all(since);
   const byToken = {};
   let volume = 0, transfers = 0, rvolume = 0, rtransfers = 0, avolume = 0, atransfers = 0;
@@ -555,12 +630,15 @@ export function getSummary(since) {
       volume: r.volume, transfers: r.cnt, mint: r.mint, burn: r.burn,
       rvolume: r.rvolume, rtransfers: r.rcnt, avolume: r.avolume, atransfers: r.acnt,
       bmint: r.bmint, bburn: r.bburn, bvolume: r.bvolume, btransfers: r.bcnt,
+      cmint: r.cmint, cburn: r.cburn,
     };
     volume += r.volume; transfers += r.cnt;
     rvolume += r.rvolume; rtransfers += r.rcnt;
     avolume += r.avolume; atransfers += r.acnt;
     bmint += r.bmint; bburn += r.bburn; bvolume += r.bvolume; btransfers += r.bcnt;
   }
+  // No chain-wide CCTP total: USDC and EURC both cross by CCTP, and adding them would add euros to
+  // dollars. The pair is per token only, in byToken.
   return { byToken, volume, transfers, rvolume, rtransfers, avolume, atransfers, bmint, bburn, bvolume, btransfers };
 }
 
@@ -1205,6 +1283,8 @@ export function prune(nowSec, latestBlock, blockMs) {
   try {
     stmt.rollupDaily.run(cutoff);
     stmt.pruneBuckets.run(cutoff);
+    stmt.rollupFlows.run(cutoff);
+    stmt.pruneFlows.run(cutoff);
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');

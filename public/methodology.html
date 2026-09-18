@@ -175,11 +175,38 @@
     recipient rather than the minter, so matching on addresses alone would miss it entirely.</p>
     <p><strong>Two figures, always both.</strong> <code>netIssuance24h</code> counts every mint minus every burn — unchanged, and what
     you get if you scan the chain yourself, so our numbers stay reconcilable against yours. <code>organicNetIssuance24h</code> takes
-    Gateway's net out. Where they diverge, the gap <em>is</em> the bridged liquidity. Gateway's share of real volume is published the
+    the cross-chain routes out — Gateway's net, and since 18&nbsp;September&nbsp;2026 CCTP's net as well (next section). Where the two
+    diverge, the gap <em>is</em> the USDC that moved between chains rather than being created or destroyed on Arc. Gateway's share of real volume is published the
     same way, because a deposit into Gateway is a genuine transfer — it just isn't anyone paying anyone.</p>
     <p style="margin-bottom:0"><strong>Where this applies.</strong> {{GATEWAY_STATUS}} Where Gateway is not deployed, every
     bridge-adjusted figure is returned as <code>null</code> rather than <code>0</code>: nothing was measured, so nothing is claimed — a zero
     here would read as "we checked and there was none".</p>
+  </div>
+
+  <h2>Cross-chain transfers (CCTP)</h2>
+  <div class="card">
+    <p style="margin-top:0"><strong>The problem.</strong> <a href="https://developers.circle.com/cctp" rel="noopener">Circle CCTP</a>
+    moves USDC between chains by burning it on the source chain and minting the same amount on the destination. On Arc, a dollar
+    arriving from Ethereum shows up as a <strong>mint</strong> and a dollar leaving for Polygon as a <strong>burn</strong>. Read as
+    issuance and redemption, that is wrong twice: nothing was created or destroyed, it changed chains. Measured on
+    17&nbsp;September&nbsp;2026, the first full day after mainnet launch, Arc's USDC supply fell 9.52M — and CCTP explained all of it:
+    17.85M left through CCTP and 5.56M arrived, while mints and burns outside CCTP added 2.77M. Until this date that day read here as
+    a contraction of issuance.</p>
+    <p><strong>What we do.</strong> Attribution is per <em>transaction</em>, as for Gateway: a mint or burn is CCTP when the same
+    transaction carries a <code>MintAndWithdraw</code> or <code>DepositForBurn</code> event from TokenMessengerV2. Matching the
+    <code>Transfer</code> event alone cannot work — an inbound mint names its recipient, never the minter. Both events are counted in
+    <code>mint</code>/<code>burn</code> <em>and</em> in their own pair (<code>cmint</code>/<code>cburn</code>), never instead of them.</p>
+    <p><strong>Which chain.</strong> <code>DepositForBurn</code> carries the destination domain. An inbound mint carries none; the
+    source domain is on the <code>MessageReceived</code> event that MessageTransmitterV2 emits right after it, so each mint is paired
+    with the next unpaired <code>MessageReceived</code> in its transaction — which holds when a relayer batches several messages into
+    one transaction. Domains are named from <a href="https://developers.circle.com/cctp/concepts/supported-chains-and-domains"
+    rel="noopener">Circle's published table</a>; a domain missing from it is published as its number, never guessed. The inbound
+    amount is the event's <code>amount</code> plus its <code>feeCollected</code>, because the relayer fee is minted on Arc too.</p>
+    <p><strong>Per token, never summed.</strong> EURC crosses by CCTP as well, so every CCTP figure is published per token. A
+    destination list added across USDC and EURC would add euros to dollars.</p>
+    <p style="margin-bottom:0"><strong>History.</strong> Mints and burns indexed before this measurement existed carried no route.
+    They are re-read once — only mints, burns and CCTP events, newest first — and <code>measuredSince</code> on
+    <a href="/docs">/v1/cctp</a> states how far back attribution reaches while that runs. {{CCTP_STATUS}}</p>
   </div>
 
   <h2>What is counted as a stablecoin, and what isn't</h2>

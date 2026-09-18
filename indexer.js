@@ -1,10 +1,10 @@
 // Historical indexer: walks Arc testnet blocks, stores stablecoin Transfer
 // aggregates in SQLite, and maintains the live snapshot served at /api/state.
 
-import { rpc, net, hex, topicAddr, toUnits, TOKENS, TOKEN_ADDRS, TRANSFER_TOPIC, ZERO, GATEWAY_ADDRS, HAS_GATEWAY } from './rpc.js';
+import { rpc, net, hex, topicAddr, toUnits, TOKENS, TOKEN_ADDRS, TRANSFER_TOPIC, ZERO, GATEWAY_ADDRS, HAS_GATEWAY, CCTP, CCTP_ADDRS, HAS_CCTP } from './rpc.js';
 import * as db from './db.js';
 import { getLabel } from './labels.js';
-import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES, denominationOf } from './constants.js';
+import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES, denominationOf, cctpChainName } from './constants.js';
 import { CHAIN } from './chains.js';
 import * as chainalert from './chainalert.js';
 import { SEEN_KEY, UNOBSERVED } from './chainuptime.js';
@@ -246,16 +246,139 @@ export function noiseWindowDays(firstBlock, lastBlock, blockMs) {
 // exchange, is real value delivered to a real party and is kept.
 export const isNoiseTransfer = (t, flagged = noisy) => flagged.has(t.frm) && flagged.has(t.too);
 
-// Pure: net issuance with Circle Gateway's cross-chain rebalancing taken out.
+// Pure: net issuance with cross-chain movement taken out — Circle Gateway's rebalancing and CCTP.
 //
-// Gateway mints are counted in `mint` *as well as* `bmint` — they are real mints, and a consumer
-// scanning the chain themselves must be able to reconcile against us. Subtracting the Gateway net
-// here is what separates "USDC was issued because someone wants to hold it on Arc" from "the same
-// unified balance moved onto Arc". `measured` is false on a network with no Gateway, where the
-// honest answer is null: nothing was measured, so nothing can be adjusted.
-export function organicIssuance(sm, measured) {
-  if (!measured || !sm) return null;
-  return (sm.mint - sm.burn) - ((sm.bmint || 0) - (sm.bburn || 0));
+// Both kinds of mint are counted in `mint` *as well as* in their own column — they are real mints,
+// and a consumer scanning the chain themselves must be able to reconcile against us. Subtracting
+// them here is what separates "USDC was created or destroyed on Arc" from "USDC that already
+// existed moved between Arc and another chain". A CCTP mint on Arc is matched by a burn on the
+// source chain; counting it as issuance reported a transfer as new money, and on 17 Sept 2026 it
+// turned a day of net issuance on Arc into an apparent contraction.
+//
+// Each route is subtracted only where it is measured. With neither measured the honest answer is
+// null: nothing was measured, so nothing can be adjusted.
+export function organicIssuance(sm, gatewayMeasured, cctpMeasured = false) {
+  if ((!gatewayMeasured && !cctpMeasured) || !sm) return null;
+  let v = sm.mint - sm.burn;
+  if (gatewayMeasured) v -= (sm.bmint || 0) - (sm.bburn || 0);
+  if (cctpMeasured) v -= (sm.cmint || 0) - (sm.cburn || 0);
+  return v;
+}
+
+// ---- Circle CCTP V2 ----
+// topic0 of the three events attribution reads, checked against Arc mainnet logs on 18 Sept 2026:
+//   DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor,
+//     bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger,
+//     bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)
+//   MintAndWithdraw(address indexed mintRecipient, uint256 amount, address indexed mintToken,
+//     uint256 feeCollected)
+//   MessageReceived(address indexed caller, uint32 sourceDomain, bytes32 indexed nonce,
+//     bytes32 sender, uint32 indexed finalityThresholdExecuted, bytes messageBody)
+// Hashes rather than signatures because hashing them needs Keccak-256, which Node does not ship.
+export const CCTP_TOPICS = {
+  depositForBurn: '0x0c8c1cbdc5190613ebd485511d4e2812cfa45eecb79d845893331fedad5130a5',
+  mintAndWithdraw: '0x50c55e915134d457debfa58eb6f4342956f8b0616d51a89a3659360178e1ab63',
+  messageReceived: '0xff48c13eda96b1cceacc6b9edeedc9e9db9d6226afbc30146b720c19d3addb1c',
+};
+const CCTP_TOPIC_LIST = Object.values(CCTP_TOPICS);
+const ZERO_TOPIC = '0x' + '0'.repeat(64);
+const word = (data, i) => '0x' + String(data || '').slice(2 + 64 * i, 2 + 64 * (i + 1));
+const minuteOf = (tsAt, block) => Math.floor(Math.floor(tsAt(block)) / 60) * 60;
+// A log's minute. Live, from the range's interpolated clock — the same clock its transfers are
+// bucketed with. In the backfill, from the block's own timestamp when the node returns it on the log
+// (Arc's does): the minutes being completed were bucketed long ago, by an interpolation this pass
+// cannot reproduce, and the exact time is the placement closest to wherever that put them.
+const logMinute = (l, tsAt, exact) => {
+  const t = exact && l.blockTimestamp != null ? parseInt(l.blockTimestamp, 16) : NaN;
+  return Number.isFinite(t) ? Math.floor(t / 60) * 60 : minuteOf(tsAt, parseInt(l.blockNumber, 16));
+};
+
+// Pure: the CCTP events of one range → the set of transactions CCTP touched, and the flows per
+// (minute, token, direction, counterparty domain).
+//
+// Outbound is DepositForBurn, which carries the amount and the destination domain. Inbound needs two
+// events: MintAndWithdraw has the amount (net of the relayer fee, which is minted separately, so the
+// USDC created is amount + fee) and MessageReceived has the source domain. Within a transaction the
+// messenger's event comes first and the transmitter's follows it, so each mint is paired with the
+// next unpaired MessageReceived after it. That holds when a relayer batches several messages into
+// one transaction, and it leaves a MessageReceived that carried no mint — a generic message — unused.
+//
+// The transaction set is built from the messenger's two events only, so a generic message never
+// marks a transaction as CCTP. `cctp` null means not configured: txs is null, not an empty set,
+// so downstream can tell "none crossed" from "never looked".
+export function parseCctp(logs, cctp, tokens, tsAt, exact = false) {
+  const flows = new Map();
+  if (!cctp) return { txs: null, flows };
+  const { depositForBurn: DFB, mintAndWithdraw: MAW, messageReceived: MR } = CCTP_TOPICS;
+  const txs = new Set();
+  const byTx = new Map();
+  for (const l of logs || []) {
+    const a = String(l.address || '').toLowerCase(), t0 = l.topics?.[0];
+    const messenger = a === cctp.tokenMessenger && (t0 === DFB || t0 === MAW);
+    if (!messenger && !(a === cctp.messageTransmitter && t0 === MR)) continue;
+    if (messenger) txs.add(l.transactionHash);
+    let list = byTx.get(l.transactionHash);
+    if (!list) { list = []; byTx.set(l.transactionHash, list); }
+    list.push(l);
+  }
+  const add = (l, symbol, dir, domain, amount) => {
+    const minute = logMinute(l, tsAt, exact);
+    const key = `${minute}|${symbol}|${dir}|${domain}`;
+    let f = flows.get(key);
+    if (!f) { f = { minute, token: symbol, dir, domain, amount: 0, cnt: 0 }; flows.set(key, f); }
+    f.amount += amount; f.cnt += 1;
+  };
+  for (const list of byTx.values()) {
+    list.sort((x, y) => parseInt(x.logIndex, 16) - parseInt(y.logIndex, 16));
+    const paired = new Set();
+    for (let i = 0; i < list.length; i++) {
+      const l = list[i], t0 = l.topics[0];
+      if (t0 === MR) continue;
+      try {
+        if (t0 === DFB) {
+          const meta = tokens[topicAddr(l.topics[1])];
+          if (meta) add(l, meta.symbol, 'out', Number(BigInt(word(l.data, 2))), toUnits(word(l.data, 0), meta.decimals));
+          continue;
+        }
+        // Paired before the token check, so a mint of an untracked asset still consumes its own
+        // MessageReceived instead of leaving it for the next mint in the transaction.
+        let domain = -1;
+        for (let j = i + 1; j < list.length; j++) {
+          if (list[j].topics[0] === MR && !paired.has(j)) { paired.add(j); domain = Number(BigInt(word(list[j].data, 0))); break; }
+        }
+        const meta = tokens[topicAddr(l.topics[2])];
+        if (meta) add(l, meta.symbol, 'in', domain, toUnits(word(l.data, 0), meta.decimals) + toUnits(word(l.data, 1), meta.decimals));
+      } catch { /* malformed event — skip it rather than void the range */ }
+    }
+  }
+  return { txs, flows };
+}
+
+// Pure: which cross-chain route a transaction took. Gateway first, so a transaction carrying both
+// is subtracted once — double-subtracting a mint would invent a burn that never happened.
+export const routeOf = (tx, gatewayTxs, cctpTxs) =>
+  (gatewayTxs && gatewayTxs.has(tx) ? 'gateway' : cctpTxs && cctpTxs.has(tx) ? 'cctp' : null);
+
+// Pure: the CCTP share of mint and burn per (minute, token), from Transfer logs. What the backfill
+// adds to minutes indexed before CCTP was measured — classified by exactly the rule processLogs
+// applies live, which is the point of it being one function.
+export function cctpPairs(logs, gatewayTxs, cctpTxs, tokens, tsAt, exact = false) {
+  const out = new Map();
+  if (!cctpTxs) return out;
+  for (const log of logs || []) {
+    const meta = tokens[String(log.address || '').toLowerCase()];
+    if (!meta || routeOf(log.transactionHash, gatewayTxs, cctpTxs) !== 'cctp') continue;
+    const from = topicAddr(log.topics[1]), to = topicAddr(log.topics[2]);
+    if (from !== ZERO && to !== ZERO) continue;
+    let amount;
+    try { amount = toUnits(log.data, meta.decimals); } catch { continue; }
+    const minute = logMinute(log, tsAt, exact);
+    const key = minute + '|' + meta.symbol;
+    let b = out.get(key);
+    if (!b) { b = { minute, token: meta.symbol, cmint: 0, cburn: 0 }; out.set(key, b); }
+    if (from === ZERO) b.cmint += amount; else b.cburn += amount;
+  }
+  return out;
 }
 
 let noisyQualifying = 0;
@@ -416,15 +539,16 @@ function largestPerTxToken(logs, tsAt = approxTs) {
 // names the end recipient, not the minter, so an address test would miss it entirely; what is
 // always true is that the transaction also carries a log emitted by a Gateway contract. That set
 // of transaction hashes is fetched alongside the transfers and passed through here.
-function processLogs(logs, opts = {}, gatewayTxs = null, tsAt = approxTs) {
+function processLogs(logs, opts = {}, gatewayTxs = null, tsAt = approxTs, cctp = null) {
   const buckets = new Map(), addrs = new Map(), recents = [];
   const txMax = largestPerTxToken(logs, tsAt);
   const viaGateway = (tx) => !!gatewayTxs && gatewayTxs.has(tx);
+  const cctpTxs = cctp?.txs || null;
 
   const getBk = (minute, symbol) => {
     const key = minute + '|' + symbol;
     let bk = buckets.get(key);
-    if (!bk) { bk = { minute, token: symbol, volume: 0, cnt: 0, mint: 0, burn: 0, rvolume: 0, rcnt: 0, avolume: 0, acnt: 0, bmint: 0, bburn: 0, bvolume: 0, bcnt: 0 }; buckets.set(key, bk); }
+    if (!bk) { bk = { minute, token: symbol, volume: 0, cnt: 0, mint: 0, burn: 0, rvolume: 0, rcnt: 0, avolume: 0, acnt: 0, bmint: 0, bburn: 0, bvolume: 0, bcnt: 0, cmint: 0, cburn: 0 }; buckets.set(key, bk); }
     return bk;
   };
 
@@ -442,16 +566,21 @@ function processLogs(logs, opts = {}, gatewayTxs = null, tsAt = approxTs) {
     const bk = getBk(minute, meta.symbol);
     bk.cnt += 1; bk.volume += amount;
 
-    const bridged = viaGateway(log.transactionHash);
+    // `bridged` keeps its original meaning — Circle Gateway — for the consumers that read it; `route`
+    // is the full answer, and is what says a burn was USDC leaving by CCTP rather than a redemption.
+    const route = routeOf(log.transactionHash, gatewayTxs, cctpTxs);
+    const bridged = route === 'gateway';
 
     if (from === ZERO) {
       bk.mint += amount;
       if (bridged) bk.bmint += amount;
-      if (opts.live && amount >= NOTABLE_MIN) pushFeed({ ts, kind: 'mint', token: meta.symbol, amount, from, to, block, bridged });
+      else if (route === 'cctp') bk.cmint += amount;
+      if (opts.live && amount >= NOTABLE_MIN) pushFeed({ ts, kind: 'mint', token: meta.symbol, amount, from, to, block, bridged, route });
     } else if (to === ZERO) {
       bk.burn += amount;
       if (bridged) bk.bburn += amount;
-      if (opts.live && amount >= NOTABLE_MIN) pushFeed({ ts, kind: 'burn', token: meta.symbol, amount, from, to, block, bridged });
+      else if (route === 'cctp') bk.cburn += amount;
+      if (opts.live && amount >= NOTABLE_MIN) pushFeed({ ts, kind: 'burn', token: meta.symbol, amount, from, to, block, bridged, route });
     } else {
       bumpAddr(addrs, from, amount, block);
       bumpAddr(addrs, to, amount, block, from);
@@ -474,7 +603,7 @@ function processLogs(logs, opts = {}, gatewayTxs = null, tsAt = approxTs) {
     if (viaGateway(m.tx)) { bk.bvolume += m.amount; bk.bcnt += 1; }
   }
 
-  db.applyBatch(buckets, addrs, recents);
+  db.applyBatch(buckets, addrs, recents, cctp?.flows || null);
   return (logs || []).length;
 }
 
@@ -567,6 +696,15 @@ async function getLogsRange(from, to) {
       params: [{ fromBlock: hex(from), toBlock: hex(to), address: GATEWAY_ADDRS }],
     });
   }
+  // CCTP, filtered to the three events attribution reads: MessageTransmitterV2 also emits
+  // MessageSent for every outbound message, which would be fetched for nothing.
+  const cctpAt = calls.length;
+  if (HAS_CCTP) {
+    calls.push({
+      method: 'eth_getLogs',
+      params: [{ fromBlock: hex(from), toBlock: hex(to), address: CCTP_ADDRS, topics: [CCTP_TOPIC_LIST] }],
+    });
+  }
   // The range's own boundary headers, so every transfer in it is timestamped between two measured
   // points instead of extrapolated from the head. Same batch, so no extra HTTP round trip.
   const clockAt = calls.length;
@@ -584,7 +722,37 @@ async function getLogsRange(from, to) {
   // Falls back to the anchor if either header came back empty, rather than dropping the range: a
   // slightly-worse timestamp is a far smaller error than a hole in the volume series.
   const tsAt = chunkClock(from, to, fromTs, toTs) || approxTs;
-  return { logs: out[0], gatewayTxs, tsAt, measuredClock: tsAt !== approxTs };
+  const cctp = HAS_CCTP ? parseCctp(out[cctpAt] || [], CCTP, TOKENS, tsAt) : null;
+  return { logs: out[0], gatewayTxs, cctp, tsAt, measuredClock: tsAt !== approxTs };
+}
+
+// The CCTP backfill's read: only what it needs to attribute — mints and burns (Transfer to or from
+// the zero address, filtered on-chain, a small fraction of all transfers), Gateway's logs so the
+// route rule matches the live one, the CCTP events, and the two boundary headers for the clock.
+async function getBridgeLogsRange(from, to) {
+  const range = { fromBlock: hex(from), toBlock: hex(to) };
+  const calls = [
+    { method: 'eth_getLogs', params: [{ ...range, address: TOKEN_ADDRS, topics: [TRANSFER_TOPIC, ZERO_TOPIC] }] },
+    { method: 'eth_getLogs', params: [{ ...range, address: TOKEN_ADDRS, topics: [TRANSFER_TOPIC, null, ZERO_TOPIC] }] },
+    { method: 'eth_getLogs', params: [{ ...range, address: CCTP_ADDRS, topics: [CCTP_TOPIC_LIST] }] },
+    { method: 'eth_getBlockByNumber', params: [hex(from), false] },
+    { method: 'eth_getBlockByNumber', params: [hex(to), false] },
+  ];
+  if (HAS_GATEWAY) calls.push({ method: 'eth_getLogs', params: [{ ...range, address: GATEWAY_ADDRS }] });
+  const { out } = await rpc(calls);
+  for (const i of [0, 1, 2]) if (!Array.isArray(out[i])) throw new Error('eth_getLogs returned no array');
+  const ts = (h) => (h && h.timestamp != null ? parseInt(h.timestamp, 16) : NaN);
+  const tsAt = chunkClock(from, to, ts(out[3]), ts(out[4]));
+  if (!tsAt) throw new Error('boundary headers missing');
+  // A transfer from zero to zero matches both filters; keep one copy.
+  const seen = new Set();
+  const logs = [...out[0], ...out[1]].filter((l) => {
+    const k = l.transactionHash + ':' + l.logIndex;
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+  const gatewayTxs = HAS_GATEWAY ? new Set((out[5] || []).map((l) => l.transactionHash)) : null;
+  return { logs, cctpLogs: out[2], gatewayTxs, tsAt };
 }
 
 // Index a block range; advances checkpoint only on success.
@@ -598,8 +766,8 @@ async function getLogsRange(from, to) {
 async function indexRange(from, to, opts = {}, depth = 0) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const { logs, gatewayTxs, tsAt } = await getLogsRange(from, to);
-      processLogs(logs, opts, gatewayTxs, tsAt);
+      const { logs, gatewayTxs, tsAt, cctp } = await getLogsRange(from, to);
+      processLogs(logs, opts, gatewayTxs, tsAt, cctp);
       db.setCheckpoint(to);
       return true;
     } catch (e) {
@@ -721,6 +889,9 @@ async function backfill(latest) {
   const start = cp != null ? cp + 1 : Math.max(0, latest - MAX_BACKFILL);
   if (start > latest) return;
   const cold = cp == null;
+  // The first block this database ever indexed. Not derivable from the minute table: a bucket
+  // minute starts at a clock boundary, not at a block, so its first blocks may never have been read.
+  if (cold) db.setMetaValue(INDEX_FROM, start);
   console.log(`[backfill] blocks ${start} → ${latest} (${latest - start + 1})`);
   if (!(await indexThrough(start, latest, { head: latest }))) {
     console.error('[backfill] stopped — will resume from last successful checkpoint');
@@ -728,6 +899,139 @@ async function backfill(latest) {
   }
   console.log('[backfill] done');
   if (cold) await adjustBackfill(start, latest);
+}
+
+// ---- CCTP backfill ----
+// A database indexed before CCTP was measured holds mints and burns with no route on them. Those
+// minutes are re-read once — only their mints, burns and CCTP events — and the CCTP pair is added.
+// Every block at or after `cctp_live_from` is attributed as it is indexed, so the two never overlap.
+//
+// Newest first: the rolling 24h window is what the terminal leads with, so it is complete within
+// minutes of a deploy while the older days fill in behind it. Progress is a single marker, written in
+// the same transaction as each chunk's increments (see db.applyCctpBackfill), so a restart resumes
+// exactly where it stopped and never adds a chunk twice.
+const CCTP_META = {
+  liveFrom: 'cctp_live_from',       // first block attributed at index time
+  from: 'cctp_backfill_from',       // oldest block the backfill has to reach
+  hi: 'cctp_backfill_hi',           // highest block not yet backfilled; done once below `from`
+  since: 'cctp_measured_since',     // unix seconds from which every mint and burn is attributed
+  done: 'cctp_backfill_done',
+};
+const INDEX_FROM = 'index_from';    // first block this database indexed (see backfill)
+const CCTP_BACKFILL_SPAN = 2000;    // blocks per read: mints and burns only, so a small payload
+const CCTP_BACKFILL_BUDGET_MS = 5000;
+let cctpSpan = CCTP_BACKFILL_SPAN;
+
+// Called once at boot, before anything is indexed, so the boundary is exact.
+function initCctp() {
+  if (!HAS_CCTP || db.getMetaValue(CCTP_META.liveFrom) != null) return;
+  const cp = db.getCheckpoint();
+  if (cp == null) {
+    // A cold database: every block it will ever hold is attributed as it is indexed.
+    db.setMetaValue(CCTP_META.liveFrom, 0);
+    db.setMetaValue(CCTP_META.done, 1);
+    return;
+  }
+  db.setMetaValue(CCTP_META.liveFrom, cp + 1);
+  // The minute holding the checkpoint also holds blocks before it, which are not attributed until
+  // the backfill reaches them — so the measured span starts at the next whole minute.
+  const covB = db.getCoverage().b;
+  db.setMetaValue(CCTP_META.since, covB ? covB + 60 : Math.floor(Date.now() / 1000));
+}
+
+async function blockAtOrAfter(ts, hiBound) {
+  let lo = 0, hi = hiBound;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const { out } = await rpc([{ method: 'eth_getBlockByNumber', params: [hex(mid), false] }]);
+    if (parseInt(out[0].timestamp, 16) < ts) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+async function cctpBackfillStep(budgetMs = CCTP_BACKFILL_BUDGET_MS) {
+  if (!HAS_CCTP || db.getMetaValue(CCTP_META.done) === '1') return;
+  const liveFrom = Number(db.getMetaValue(CCTP_META.liveFrom));
+  if (!Number.isFinite(liveFrom)) return;
+  let from = db.getMetaValue(CCTP_META.from);
+  if (from == null) {
+    const cov = db.getCoverage();
+    if (!cov.a || liveFrom <= 0) { db.setMetaValue(CCTP_META.done, 1); return; }
+    // Never earlier than the first block actually indexed. The coverage's first minute starts at a
+    // clock boundary, and the blocks between it and the first indexed one were never read: attributing
+    // their CCTP events would add a route share to mints and burns that were never counted — measured
+    // locally, a minute showing 97.79 of CCTP burns against a raw burn of zero. Databases older than
+    // the INDEX_FROM marker fall back to the earliest block any address was first seen in, which can
+    // only err later — an undercount, never an attribution without its mint.
+    const indexFrom = Number(db.getMetaValue(INDEX_FROM)) || db.firstIndexedBlock() || 0;
+    from = Math.max(await blockAtOrAfter(cov.a, liveFrom), indexFrom);
+    db.setMetaValue(CCTP_META.from, from);
+    db.setMetaValue(CCTP_META.hi, liveFrom - 1);
+    console.log(`[cctp] backfill planned: blocks ${from} → ${liveFrom - 1}, newest first`);
+  }
+  from = Number(from);
+  let hi = Number(db.getMetaValue(CCTP_META.hi));
+  const t0 = Date.now();
+  while (hi >= from && Date.now() - t0 < budgetMs) {
+    const lo = Math.max(from, hi - cctpSpan + 1);
+    let r;
+    try { r = await getBridgeLogsRange(lo, hi); } catch (e) {
+      // Halve and retry on the next tick: a provider that caps results rather than blocks can refuse
+      // a busy span that a quieter one of the same length would pass.
+      cctpSpan = Math.max(50, Math.floor(cctpSpan / 2));
+      console.error(`[cctp] backfill ${lo}-${hi}: ${e.message} — span now ${cctpSpan}`);
+      return;
+    }
+    const cctp = parseCctp(r.cctpLogs, CCTP, TOKENS, r.tsAt, true);
+    const pairs = cctpPairs(r.logs, r.gatewayTxs, cctp.txs, TOKENS, r.tsAt, true);
+    // Everything from block `lo` on is now attributed; the minute holding `lo` may still hold older
+    // blocks, so the measured span starts at the next whole minute — until the last chunk, whose
+    // `lo` is the first block of the coverage and leaves nothing older in its minute.
+    const since = lo === from ? minuteOf(r.tsAt, lo) : minuteOf(r.tsAt, lo) + 60;
+    db.applyCctpBackfill(pairs, cctp.flows, { [CCTP_META.hi]: lo - 1, [CCTP_META.since]: since });
+    hi = lo - 1;
+    cctpSpan = Math.min(CCTP_BACKFILL_SPAN, cctpSpan * 2);
+    if (hi >= from) await sleep(CHUNK_DELAY);
+  }
+  if (hi < from) {
+    db.setMetaValue(CCTP_META.done, 1);
+    console.log('[cctp] backfill done');
+  }
+}
+
+// Pure-ish view of CCTP over a window: per token, the in/out/net totals from the bucket pair and the
+// per-chain split from cctp_flows. Per token and never summed across tokens — EURC crosses by CCTP
+// too, and a chain-wide total would add euros to dollars. Exported for /v1/cctp's longer window.
+export function cctpView(summary, since, asOf) {
+  if (!HAS_CCTP) return { measured: false, contracts: [], measuredSince: null, complete: false, backfilling: false, byToken: null };
+  const done = db.getMetaValue(CCTP_META.done) === '1';
+  const sinceMeta = Number(db.getMetaValue(CCTP_META.since));
+  const cov = db.getCoverage();
+  // Done means every retained minute is attributed; before that, the backfill's own marker says how
+  // far back it has reached.
+  const measuredSince = done ? (cov.a ?? null) : (Number.isFinite(sinceMeta) ? sinceMeta : null);
+  const byToken = {};
+  const row = (sym) => byToken[sym] || (byToken[sym] = { mint: 0, burn: 0, net: 0, transfersIn: 0, transfersOut: 0, sources: [], destinations: [] });
+  for (const [sym, t] of Object.entries(summary.byToken || {})) {
+    if (!(t.cmint || t.cburn)) continue;
+    const g = row(sym);
+    g.mint = t.cmint || 0; g.burn = t.cburn || 0; g.net = g.mint - g.burn;
+  }
+  for (const f of db.cctpFlows(since)) {
+    const g = row(f.token);
+    const entry = { domain: f.domain < 0 ? null : f.domain, chain: cctpChainName(f.domain), amount: f.amount, transfers: f.cnt };
+    if (f.dir === 'out') { g.destinations.push(entry); g.transfersOut += f.cnt; } else { g.sources.push(entry); g.transfersIn += f.cnt; }
+  }
+  return {
+    measured: true,
+    contracts: [CCTP.tokenMessenger, CCTP.messageTransmitter, CCTP.tokenMinter].filter(Boolean),
+    measuredSince: measuredSince != null ? measuredSince * 1000 : null,
+    // Whether every indexed minute of the window is attributed. Once the backfill is done that is all
+    // of them, however young the index; before that, only if the backfill has reached the window start.
+    complete: done || (measuredSince != null && measuredSince <= since),
+    backfilling: !done,
+    byToken,
+  };
 }
 
 // Every part of the snapshot that comes from SQLite alone — no RPC, no live headers. Shared by
@@ -894,6 +1198,9 @@ function dbDerived({ frozen = false } = {}) {
       // What share of measured real volume is Gateway moving its own liquidity around.
       volumeShare: HAS_GATEWAY && summary.rvolume ? summary.bvolume / summary.rvolume : null,
     },
+    // Circle CCTP: USDC (and EURC) burned on one chain and minted on another. A mint here is a
+    // dollar arriving, a burn is one leaving — per token, with the chain on the other side.
+    cctp: cctpView(summary, asOf - 86400, asOf),
     supply,
     totalSupply,
     byDenomination,
@@ -1091,7 +1398,7 @@ async function tickOnce() {
 
     // index everything new since the checkpoint (chunked — never skip blocks)
     let cp = db.getCheckpoint();
-    if (cp == null) cp = latest - 1;
+    if (cp == null) { cp = latest - 1; db.setMetaValue(INDEX_FROM, latest); }
     if (latest > cp && !(await indexThrough(cp + 1, latest, { live: true, head: latest }))) {
       throw new Error(`catch-up stalled at block ${db.getCheckpoint() ?? cp}`);
     }
@@ -1102,6 +1409,10 @@ async function tickOnce() {
     buildSnapshot(latest, gasWei, headers);
 
     if (++tickCount % PRUNE_EVERY === 0) db.prune(Math.floor(Date.now() / 1000), latest, avgBlockMs);
+
+    // Last, and time-boxed: history attribution must never delay the live pass above. Inside the
+    // tick so it is serialised with indexing rather than racing it for the RPC endpoint.
+    try { await cctpBackfillStep(); } catch (e) { console.error('[cctp]', e.message || e); }
   } catch (e) {
     // The chain answered, so this one is on us — keep serving indexed history and say so.
     degrade(String(e.message || e));
@@ -1125,6 +1436,7 @@ export async function start() {
   // Before any poll can record a state, so the gap since the last session is closed in the right
   // order and this session's first transition lands after it rather than on top of it.
   openObservationWindow();
+  initCctp();
 
   loadPersistedSupplies();
   refreshNoisy();

@@ -161,6 +161,7 @@ database file so faucet volume can never be mixed into mainnet aggregates.
 |---|---|---|
 | Chain ID | `5042` | `5042002` |
 | Config | `ARC_CHAIN_ID`, `ARC_RPC_URLS`, `ARC_TOKENS` (required) | built in |
+| Optional | `ARC_GATEWAY_WALLET` + `ARC_GATEWAY_MINTER`; `ARC_CCTP_TOKEN_MESSENGER` + `ARC_CCTP_MESSAGE_TRANSMITTER` + `ARC_CCTP_TOKEN_MINTER` (each set all-or-none; unset = not measured) | built in |
 | DB file | `arc-mainnet.db` | `arc.db` |
 
 Mainnet **refuses to start** with any of its three variables missing, rather than falling back to

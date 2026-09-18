@@ -67,6 +67,11 @@ function applyNetwork(html) {
     ? `${CHAIN.label} is a Gateway chain and is measured as described: Gateway's contracts are `
       + `<code>${CHAIN.gateway.wallet}</code> and <code>${CHAIN.gateway.minter}</code>.`
     : `Circle Gateway is not deployed on ${CHAIN.label}, so there is no bridge flow to attribute here.`;
+  const cctpStatus = CHAIN.cctp
+    ? `On ${CHAIN.label} the contracts read are TokenMessengerV2 <code>${CHAIN.cctp.tokenMessenger}</code> and `
+      + `MessageTransmitterV2 <code>${CHAIN.cctp.messageTransmitter}</code>; burned USDC passes through TokenMinterV2 `
+      + `<code>${CHAIN.cctp.tokenMinter}</code>.`
+    : `CCTP is not configured for ${CHAIN.label}, so the CCTP split is reported as not measured rather than as zero.`;
   // One line per tracked asset, with what it is and how many contracts carry it. Generated because
   // a hand-written list is a list that goes stale: it said "USDC, EURC and USYC" for a month after
   // USDT started trading on the chain, and said nothing about USYC having two deployments.
@@ -82,6 +87,7 @@ function applyNetwork(html) {
   const out = html
     .replaceAll('{{TOKENS_DETAIL}}', tokensDetail)
     .replaceAll('{{GATEWAY_STATUS}}', gatewayStatus)
+    .replaceAll('{{CCTP_STATUS}}', cctpStatus)
     .replaceAll('{{NET}}', CHAIN.label)
     .replaceAll('{{RPC_URL}}', CHAIN.endpoints[0] || '')
     .replaceAll('{{CHAIN_ID}}', String(CHAIN.chainId))
@@ -383,6 +389,9 @@ const server = http.createServer(async (req, res) => {
       supply: s.supply?.[token] || null,
       summary24h: sm,
       netIssuance24h: sm ? sm.mint - sm.burn : null,
+      // The route split behind the figure above, so the page can say how much of it only crossed chains.
+      cctp: s.cctp?.measured ? { ...(s.cctp.byToken?.[token] || { mint: 0, burn: 0, net: 0, sources: [], destinations: [] }), complete: s.cctp.complete } : null,
+      gatewayNet24h: s.bridge?.measured && sm ? (sm.bmint || 0) - (sm.bburn || 0) : null,
       distribution: db.sizeDistribution(token),
       // Over the last seven days, from the retained per-day set — stated in `largestWindowDays` so the
       // page can label it. Read from the rolling transfer table this was "the largest of the last few

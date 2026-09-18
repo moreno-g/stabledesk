@@ -253,6 +253,22 @@
   .econ .hero .val{font-size:27px; color:var(--accent); letter-spacing:-.02em}
   .econ .sub{font-size:10.5px; color:var(--ink-3); margin-top:4px; line-height:1.45}
   @media (max-width:560px){ .econ{grid-template-columns:1fr} }
+  /* cross-chain (CCTP) */
+  .xsum{display:grid; grid-template-columns:repeat(3,1fr); gap:11px; margin-top:10px}
+  .xsum .e{background:var(--inset); border:1px solid var(--line); border-radius:10px; padding:11px 13px}
+  .xsum .lab{font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:600; margin-bottom:5px}
+  .xsum .val{font-family:var(--mono); font-size:17px; font-weight:600; font-variant-numeric:tabular-nums}
+  .xsum .sub{font-size:10.5px; color:var(--ink-3); margin-top:3px}
+  .xcols{display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:14px}
+  .xcols h3{font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:600; margin:0 0 6px}
+  .xb{display:grid; grid-template-columns:minmax(0,96px) 1fr auto; gap:8px; align-items:center; font-size:11px; margin:6px 0}
+  .xb .nm{white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .xb .bar{height:6px; background:var(--inset); border-radius:3px; overflow:hidden}
+  .xb .bar span{display:block; height:100%; border-radius:3px}
+  .xb.out .bar span{background:var(--bad)} .xb.in .bar span{background:var(--good)}
+  .xb .amt{font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--ink-2)}
+  .pos{color:var(--good)} .neg{color:var(--bad)}
+  @media (max-width:560px){ .xsum{grid-template-columns:1fr} .xcols{grid-template-columns:1fr} }
 
   .foot{margin-top:6px; font-size:11px; color:var(--ink-3); line-height:1.6; font-family:var(--mono)}
   .foot code{color:var(--ink-2)}
@@ -388,6 +404,22 @@
       <table class="stbl"><thead><tr><th>Asset</th><th>Supply</th><th>24h vol</th><th>Share</th><th>Vel.</th></tr></thead>
         <tbody id="stbl"></tbody></table>
       <div class="cov" id="coverage"></div>
+    </div>
+  </div>
+
+  <div class="grid" id="crosschain">
+    <div class="card">
+      <h2>Cross-chain flow · CCTP · 24h</h2>
+      <p class="cap">USDC burned on one chain and minted on another. A CCTP mint here is a dollar arriving, a burn is one leaving — neither is issuance. <a href="/methodology" style="color:var(--accent)">Method →</a></p>
+      <div id="cctp"><div class="empty">Reading CCTP events…</div></div>
+      <div class="cov" id="cctpFoot"></div>
+    </div>
+    <div class="card">
+      <h2>Where net issuance came from · 24h</h2>
+      <p class="cap">Mint − burn, split by route. CCTP and Gateway move USDC that already exists between chains; what is left was created or destroyed on Arc itself.</p>
+      <table class="stbl"><thead><tr><th>Asset</th><th>Net</th><th>CCTP</th><th>Gateway</th><th>On Arc</th></tr></thead>
+        <tbody id="routeTbl"></tbody></table>
+      <div class="cov" id="routeFoot"></div>
     </div>
   </div>
 
@@ -650,6 +682,7 @@ function denomTile(label, by, base, pick, note){
 
   renderFees(d.fees);
   renderNoise(d.noise);
+  renderCrossChain(d);
 }
 
 // ---- network economics (fees, denominated in USDC because that's the gas token) ----
@@ -670,6 +703,56 @@ function renderFees(f){
     + (f.sampleCoverage!=null? ` (${(f.sampleCoverage*100).toFixed(1)}% of the window)`:'')
     + ` · ${nf.format(f.sampledTxs)} transactions`
     + (f.gasGwei!=null? ` · gas ${f.gasGwei.toFixed(1)} gwei`:'');
+}
+
+// ---- cross-chain flow (CCTP) and the route split of net issuance ----
+const signed=(n)=>n==null||isNaN(n)?'—':(n>0?'+':n<0?'−':'')+compact(Math.abs(n));
+const sgnCls=(n)=>n>0?'pos':n<0?'neg':'';
+function xbars(list, dir){
+  if(!list||!list.length) return '<div class="empty" style="padding:6px 0">None in the window.</div>';
+  const top=list.slice(0,6), max=Math.max(...top.map(x=>x.amount),1);
+  const rest=list.slice(6).reduce((a,x)=>a+x.amount,0);
+  return top.map(x=>`<div class="xb ${dir}" title="${nf.format(x.transfers)} transfer${x.transfers===1?'':'s'}">
+      <span class="nm">${esc(x.chain||(x.domain==null?'unpaired':'domain '+x.domain))}</span>
+      <span class="bar"><span style="width:${Math.max(2,x.amount/max*100).toFixed(1)}%"></span></span>
+      <span class="amt">${compact(x.amount)}</span></div>`).join('')
+    + (rest>0?`<div class="xb ${dir}"><span class="nm" style="color:var(--ink-3)">${list.length-6} more</span><span></span><span class="amt">${compact(rest)}</span></div>`:'');
+}
+function renderCrossChain(d){
+  const c=d.cctp, el=$('#cctp'), foot=$('#cctpFoot');
+  const base=Object.keys(d.summary24h?.byToken||{}).includes('USDC')?'USDC':Object.keys(c?.byToken||{})[0];
+  if(!c||!c.measured){
+    el.innerHTML='<div class="empty">CCTP is not configured for this network — nothing is attributed, and nothing is shown as zero.</div>';
+    foot.textContent='';
+  } else {
+    const t=(c.byToken||{})[base]||{mint:0,burn:0,net:0,transfersIn:0,transfersOut:0,sources:[],destinations:[]};
+    el.innerHTML=`<div class="xsum">
+        <div class="e"><div class="lab">Left Arc</div><div class="val neg">${compact(t.burn)}</div><div class="sub">${nf.format(t.transfersOut)} burns · ${base}</div></div>
+        <div class="e"><div class="lab">Arrived</div><div class="val pos">${compact(t.mint)}</div><div class="sub">${nf.format(t.transfersIn)} mints · ${base}</div></div>
+        <div class="e"><div class="lab">Net</div><div class="val ${sgnCls(t.net)}">${signed(t.net)}</div><div class="sub">${t.net<0?'more left than arrived':'more arrived than left'}</div></div>
+      </div>
+      <div class="xcols"><div><h3>Left to</h3>${xbars(t.destinations,'out')}</div><div><h3>Arrived from</h3>${xbars(t.sources,'in')}</div></div>`;
+    // Other tokens cross too; they are listed on their own line rather than added to the dollar figures.
+    const others=Object.entries(c.byToken||{}).filter(([k])=>k!==base)
+      .map(([k,v])=>`${k}: out ${compact(v.burn)} · in ${compact(v.mint)}`);
+    foot.textContent='Attributed per transaction from TokenMessengerV2 events; chains named from Circle\'s domain table.'
+      +(others.length?' '+others.join(' · ')+'.':'')
+      +(c.backfilling?` Re-reading older history — attributed since ${c.measuredSince?new Date(c.measuredSince).toISOString().slice(0,16).replace('T',' ')+' UTC':'—'}${c.complete?'':'; this window is not complete yet'}.`:'');
+  }
+
+  // Route split, per token. On Arc = net − CCTP net − Gateway net, only over the routes measured here.
+  const rows=Object.entries(d.summary24h?.byToken||{}).filter(([,t])=>(t.mint||t.burn));
+  const gw=!!d.bridge?.measured, cc=!!c?.measured;
+  $('#routeTbl').innerHTML=rows.length? rows.map(([k,t])=>{
+    const net=(t.mint||0)-(t.burn||0);
+    const cn=cc?(t.cmint||0)-(t.cburn||0):null, gn=gw?(t.bmint||0)-(t.bburn||0):null;
+    const own=(cc||gw)?net-(cn||0)-(gn||0):null;
+    return `<tr class="${k.toLowerCase()}"><td><span class="sy"><i></i>${esc(k)}</span></td>
+      <td class="${sgnCls(net)}">${signed(net)}</td><td>${cc?signed(cn):'—'}</td><td>${gw?signed(gn):'—'}</td>
+      <td class="${sgnCls(own)}"><strong>${own==null?'—':signed(own)}</strong></td></tr>`;
+  }).join('') : '<tr><td colspan="5" style="color:var(--ink-3);padding:14px 0">No mints or burns in the window.</td></tr>';
+  $('#routeFoot').textContent=(cc&&!c.complete?'CCTP history is still being re-read, so the CCTP column is a lower bound for now. ':'')
+    +'Each currency on its own row — never added across denominations.';
 }
 
 // ---- address-level noise filter ----
@@ -833,7 +916,7 @@ function renderAlerts(feed){
   const el=$('#alertfeed');
   if(!feed.length){ el.innerHTML='<div class="empty">Watching the chain for notable moves (≥ 1K)…</div>'; return; }
   el.innerHTML=feed.map(e=>`<div class="alertrow ${e.kind}">
-    <span class="akind">${e.kind}</span>
+    <span class="akind">${e.kind}</span>${e.route?`<span class="tag">${e.route==='cctp'?'CCTP':'Gateway'}</span>`:''}
     <span class="chip ${e.token.toLowerCase()}">${e.token}</span>
     <span class="aamt">${compact(e.amount)}</span>
     <span class="aad">${short(e.from)} → ${short(e.to)}</span>

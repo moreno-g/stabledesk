@@ -44,6 +44,7 @@ const STABLECOIN_SYMBOLS = Object.values(CHAIN.tokens).map((t) => t.symbol);
 // Same idea for Gateway: the addresses live in the network profile, so this entry appears only on
 // a network where Gateway is actually deployed and never has to be updated in two places.
 const GATEWAY_ADDRS = CHAIN.gateway ? [CHAIN.gateway.wallet, CHAIN.gateway.minter] : [];
+const CCTP_ADDRS = CHAIN.cctp ? [CHAIN.cctp.tokenMessenger, CHAIN.cctp.messageTransmitter, CHAIN.cctp.tokenMinter] : [];
 
 // `networks` omitted means "same address on every Arc network" — true for deterministic
 // deployments and for anything derived from CHAIN.tokens. An entry that only exists on one
@@ -75,6 +76,19 @@ const REGISTRY = [
     source: 'canonical',
     verified: true,
     added: '2026-08-03',
+  }] : []),
+  // Same rule as Gateway: present only where the network profile configures CCTP.
+  ...(CCTP_ADDRS.length ? [{
+    id: 'circle-cctp',
+    name: 'Circle CCTP',
+    vendor: 'Circle Internet Financial',
+    category: 'bridge',
+    desc: 'Cross-Chain Transfer Protocol: USDC is burned on one chain and minted on another, so what crosses is a transfer, not new money. The indexer reports CCTP mints and burns separately from issuance, with the chain on the other side.',
+    links: { site: 'https://www.circle.com/cross-chain-transfer-protocol', docs: 'https://developers.circle.com/cctp' },
+    contracts: CCTP_ADDRS,
+    source: 'canonical',
+    verified: true,
+    added: '2026-09-18',
   }] : []),
   {
     id: 'permit2',

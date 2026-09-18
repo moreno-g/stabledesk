@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { sendTelegram, configured as tgConfigured } from './telegram.js';
 import { keyPrefix } from './usage.js';
 import * as db from './db.js';
-import { live, chainStatus, organicIssuance, indexProgress } from './indexer.js';
+import { live, chainStatus, organicIssuance, indexProgress, cctpView } from './indexer.js';
 import * as tvl from './tvl.js';
 import * as rankings from './rankings.js';
 import * as chainuptime from './chainuptime.js';
@@ -290,6 +290,23 @@ export async function handleV1(req, res, u) {
     }, 200, H);
   }
 
+  // CCTP flows: USDC and EURC crossing between Arc and other chains, per token and per chain on the
+  // other side. 24h from the live snapshot; 7d read from the minute tables, which retain seven days.
+  if (path === '/v1/cctp') {
+    const range = u.searchParams.get('range') || '24h';
+    if (range !== '24h' && range !== '7d') return json(res, { error: 'bad_range', hint: 'range must be 24h or 7d.' }, 400, H);
+    const endSec = Math.floor((s.windowEnd || Date.now()) / 1000);
+    const since = endSec - (range === '7d' ? 7 : 1) * 86400;
+    const view = range === '24h' ? s.cctp : cctpView(db.getSummary(since), since, endSec);
+    if (!view) return json(res, { error: 'warming_up', hint: 'The index is still starting, retry shortly.' }, 503, H);
+    return json(res, {
+      range, windowEnd: endSec * 1000, ...view,
+      note: 'Per token, never summed across tokens. mint = arrived on Arc (amount + relayer fee), burn = left Arc. '
+        + 'domain is the CCTP domain on the other side; chain is its name from Circle\'s table, null if unlisted. See /methodology.',
+      updatedAt: s.updatedAt,
+    }, 200, H);
+  }
+
   if (path === '/v1/stablecoins/history') {
     const token = (u.searchParams.get('token') || 'ALL').toUpperCase();
     const r = RANGES[u.searchParams.get('range')] || RANGES['24h'];
@@ -318,16 +335,21 @@ export async function handleV1(req, res, u) {
     const sm = s.summary24h?.byToken?.[token] || null;
     // Two issuance figures, deliberately both. `netIssuance24h` is every mint minus every burn —
     // unchanged, and what a consumer comparing us against a raw chain scan expects. `organic`
-    // removes Circle Gateway's cross-chain rebalancing, which is the same unified balance moving
-    // onto Arc rather than anyone deciding to hold more USDC here. Null, not zero, on a network
-    // with no Gateway: there is nothing to subtract and no measurement to report.
+    // removes cross-chain movement — Circle Gateway's rebalancing and CCTP transfers — which is
+    // USDC that already existed arriving or leaving, not USDC created or destroyed on Arc. Each
+    // route's own pair is null, not zero, on a network where it is not measured.
     const bridged = s.bridge?.measured && sm;
+    const cctpOn = !!s.cctp?.measured && sm;
     return json(res, {
       token, supply: s.supply?.[token] || null, summary24h: sm,
       netIssuance24h: sm ? sm.mint - sm.burn : null,
       bridgeMint24h: bridged ? sm.bmint : null,
       bridgeBurn24h: bridged ? sm.bburn : null,
-      organicNetIssuance24h: organicIssuance(sm, !!s.bridge?.measured),
+      cctpMint24h: cctpOn ? sm.cmint || 0 : null,
+      cctpBurn24h: cctpOn ? sm.cburn || 0 : null,
+      // False while a backfill is still attributing the older part of the window.
+      cctpComplete: s.cctp?.measured ? !!s.cctp.complete : null,
+      organicNetIssuance24h: organicIssuance(sm, !!s.bridge?.measured, !!s.cctp?.measured),
       distribution: db.sizeDistribution(token), updatedAt: s.updatedAt,
     }, 200, H);
   }
