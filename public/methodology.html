@@ -119,8 +119,8 @@
     assets in one transaction, and collapsing it to a single leg would erase the smaller asset's volume entirely.</p>
 
     <p><strong>3 · Adjusted volume</strong> — real volume, plus an <em>address-level</em> filter. Some addresses are infrastructure
-    rather than economic actors: market-making bots, faucets, sequencers, test harnesses. Any address whose activity rate exceeds
-    <strong>1,000 transfers</strong> or <strong>$10M of volume per month</strong> is flagged. A transfer is dropped when
+    rather than economic actors: market-making bots, faucets, sequencers, test harnesses. Any address that <em>sent</em> more than
+    <strong>1,000 transfers</strong> or <strong>$10M in 30 days</strong> is flagged. A transfer is dropped when
     <strong>both</strong> of its ends are flagged — infrastructure talking to infrastructure. The thresholds come from the
     <a href="https://visaonchainanalytics.com/" rel="noopener">Visa / Allium onchain analytics</a> methodology.</p>
     <p style="margin-bottom:0"><strong>Why "both ends", not "either end".</strong> Visa drops a transfer if <em>either</em> end is
@@ -131,26 +131,29 @@
     Only bot-to-bot movement is discarded.</p>
   </div>
   <div class="card">
-    <p style="margin-top:0"><strong>How flags are applied.</strong> The monthly thresholds are converted to a daily rate, and each
-    address is measured against <em>its own</em> observation window: the first block we saw it in, to the last, converted to days at the
-    measured block time. So an address that moves $2M in a day is flagged and an address that moves the same $2M across a month is not,
-    which is what makes the rule a rate rather than a total. Each window is floored at one full day — an address first seen inside a
-    single block has a near-zero span, and without the floor any activity at all would be an infinite rate. The flag set is recomputed
-    every minute, and the <a href="/">terminal</a> lists the currently flagged addresses with the window and the two limits each one was
-    judged against, so the arithmetic can be redone rather than trusted.</p>
-    <p><strong>What this replaced, and why it mattered.</strong> Until August 2026 the limits were pro-rated to our <em>retention</em>
-    window instead — a rolling ~7 days — while the per-address totals they were compared against accumulate from the first time an
-    address is seen. Those are different spans, and the second one keeps growing. An address active for two months was measured over two
-    months and judged against seven days, so the same behaviour was flagged or not depending on how long this deployment had been
-    running, and adjusted volume drifted downwards over a deployment's lifetime with nothing on the page saying so. The rule described
-    here is now the rule the code applies; every flagged row carries the window it was actually measured over.</p>
-    <p style="margin-bottom:0"><strong>One transitional caveat.</strong> Addresses first seen before this change have no recorded start
-    block, so they fall back to the one-day floor — which <em>over</em>-flags them, and makes adjusted volume a lower bound rather than an
-    overstatement. It corrects itself as each address is seen again and its span starts accumulating, so the effect fades within about a
-    week of the change. A database that starts fresh is never affected.</p>
+    <p style="margin-top:0"><strong>How flags are applied.</strong> What counts is what an address <em>sent</em>: transfers out of it,
+    at face value across the tracked tokens. Receiving is not activity in this sense — an exchange deposit address is sent money all day
+    and is not a bot for it. Each address's sent total is compared with the monthly limits over the sent history we hold: under 30 days
+    of history, with the limits whole; past 30 days, with its average monthly rate (the span, converted to days at the measured block
+    time). On a chain younger than a month that is exactly the published rule, and it is what Visa's 30-day window does on a young
+    chain too. The flag set is recomputed every minute, and the <a href="/">terminal</a> lists the flagged addresses with how much sent
+    history each was judged on, so the arithmetic can be redone rather than trusted.</p>
+    <p><strong>What this corrected, on 28&nbsp;September&nbsp;2026.</strong> The limits used to be divided into a daily rate and applied
+    over each address's observed span with a one-day floor, to what it moved in <em>both</em> directions. On history shorter than a month
+    — every address, twelve days after mainnet launch — that held each one to a thirtieth of the monthly limit: an address that moved
+    $400k once in a day was treated as infrastructure. Counting both directions doubled whatever passed through an address and flagged
+    receivers. Measured over the same 30 hours of Arc mainnet, the old reading flagged <strong>4,159</strong> addresses and left adjusted
+    volume at <strong>14%</strong> of real; the rule as stated flags <strong>62</strong> and leaves <strong>73%</strong>. The page said
+    one thing and the code did another, which is the one failure this page exists to prevent.</p>
+    <p style="margin-bottom:0"><strong>What that leaves transitional.</strong> Sent counts did not exist before the correction. They
+    were re-read from the chain for as far back as the RPC still serves logs — about a day and a half — and accumulate from there, so for
+    the next month monthly totals cover less than a month and adjusted volume sits <em>above</em> where it will settle; the API states
+    how far back sent history reaches (<code>sentHistorySince</code>). Minutes indexed before the correction were scored under the old
+    rule and are not restated — the logs they came from are no longer served — so the adjusted series changes rule at
+    <code>ruleSince</code>, and the 24-hour figure mixes the two for one day after it. Raw and real volume are unaffected.</p>
     <p>Flags are derived from the same history they filter, so on a <em>cold</em> start the initial backfill
     is indexed before any address has been flagged. Rather than ship a figure we know is wrong, the indexer re-reads that range once
-    the first pass has revealed the high-frequency addresses and rewrites the adjusted numbers.</p>
+    the first pass has revealed the flagged senders and rewrites the adjusted numbers.</p>
     <p style="margin-bottom:0"><strong>The flag set is capped at 20,000 addresses</strong>, ordered by volume, so a pathological
     window cannot load an unbounded set into memory. This is a threshold like any other and it belongs here: when more than 20,000
     addresses meet the rate limits above, <em>which</em> addresses get flagged stops being decided by those limits and starts being
@@ -319,7 +322,7 @@
     <tbody>
       <tr><td>Raw volume</td><td>Sum of every <code>Transfer</code> event value.</td></tr>
       <tr><td>Real volume</td><td>Sum of the largest transfer per transaction, per token (routing hops &amp; contract internals removed).</td></tr>
-      <tr><td>Adjusted volume</td><td>Real volume, minus transfers where both ends are flagged high-frequency addresses.</td></tr>
+      <tr><td>Adjusted volume</td><td>Real volume, minus transfers where both ends are flagged senders.</td></tr>
       <tr><td>Transfers</td><td>Count of transfer events in the period.</td></tr>
       <tr><td>Mint / Burn</td><td>Transfers from / to the zero address <code>0x000…000</code> — supply created / destroyed on-chain.</td></tr>
       <tr><td>Net issuance</td><td>Mint − Burn over the period: net new supply minted on-chain.</td></tr>
@@ -331,7 +334,7 @@
       <tr><td>Avg fee / tx</td><td>Total fees ÷ transaction count over sampled blocks, in USDC. Measured from receipts, not estimated from a gas assumption.</td></tr>
       <tr><td>Fees / day</td><td>Mean fee per sampled block × blocks per day — a run rate, not a cumulative total.</td></tr>
       <tr><td>Cost to move $1M</td><td>Total network fees ÷ real dollar-stablecoin volume, scaled to $1M. What the network charges to move a million dollars.</td></tr>
-      <tr><td>Flagged address</td><td>An address exceeding 1,000 transfers or $10M volume per month, as a rate over its own observed span (floored at one day).</td></tr>
+      <tr><td>Flagged address</td><td>An address that sent more than 1,000 transfers or $10M in 30 days — the monthly limits whole on history shorter than a month, its average monthly rate beyond.</td></tr>
       <tr><td>TVL</td><td>Sum of indexed stablecoin balances held by addresses with bytecode, read with <code>balanceOf</code>.</td></tr>
       <tr><td>Attributed TVL</td><td>The part of TVL held by contracts a registry entry claims. The remainder is reported as unattributed.</td></tr>
       <tr><td>Protocol "moved"</td><td>Transfer volume across a protocol's contracts over the retained window (~7 days) — not 24 hours.</td></tr>

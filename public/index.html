@@ -363,7 +363,7 @@
       <div class="cardhead">
         <h2 id="chartTitle">Transfer volume</h2>
         <div class="toggles">
-          <div class="seg" id="metricSeg" title="Adjusted = real volume, minus transfers where both ends are high-frequency addresses">
+          <div class="seg" id="metricSeg" title="Adjusted = real volume, minus transfers where both ends sent more than 1,000 transfers or 10M in 30 days">
             <button data-m="adj">Adjusted</button>
             <button data-m="real" class="on">Real</button>
             <button data-m="raw">Raw</button>
@@ -447,8 +447,8 @@
     </div>
     <div class="card">
       <h2>Filtered addresses</h2>
-      <p class="cap">Addresses busy enough to be infrastructure rather than economic activity. A transfer is dropped from <em>adjusted</em> volume only when both its ends are flagged. <a href="/methodology" style="color:var(--accent)">Method →</a> · <a href="/entities" style="color:var(--accent)">What these addresses are <span class="beta-dot">beta</span></a></p>
-      <table><thead><tr><th>Address</th><th class="r">Transfers</th><th class="r">Volume</th></tr></thead>
+      <p class="cap">Senders busy enough to be infrastructure rather than economic activity: more than 1,000 transfers or 10M sent in 30 days. A transfer is dropped from <em>adjusted</em> volume only when both its ends are flagged. <a href="/methodology" style="color:var(--accent)">Method →</a> · <a href="/entities" style="color:var(--accent)">What these addresses are <span class="beta-dot">beta</span></a></p>
+      <table><thead><tr><th>Address</th><th class="r">Sent</th><th class="r">Sent volume</th></tr></thead>
         <tbody id="noiseTbl"></tbody></table>
       <div class="cov" id="noiseFoot"></div>
     </div>
@@ -756,12 +756,11 @@ function renderCrossChain(d){
 }
 
 // ---- address-level noise filter ----
-// The limits are rates now, and each address is judged over its own observed span — so there is no
-// single "limits over Nd of history" line to print. The rate goes in the footer; the window each
-// address was actually measured over goes on its own row, which is what makes a flag auditable.
+// Senders judged on what they sent, against 1,000 transfers or 10M per 30 days. Each row shows how
+// much sent history it was judged on: under 30 days, the monthly limit applies whole.
 function renderNoise(n){
   const tb=$('#noiseTbl'), foot=$('#noiseFoot');
-  const rate = n ? `${compact(n.txPerDay)} transfers/day or ${compact(n.volumePerDay)} volume/day, per address` : '';
+  const rate = n ? `${nf.format(n.transfersPerMonth||1000)} transfers or ${nf.format((n.volumePerMonth||10e6)/1e6)}M sent per 30 days, per sending address` : '';
   if(!n || !n.top || !n.top.length){
     tb.innerHTML='<tr><td colspan="3" style="color:var(--ink-3);padding:14px 0">No address exceeds the thresholds yet.</td></tr>';
     foot.textContent = n ? `Thresholds: ${rate}.` : '';
@@ -769,11 +768,19 @@ function renderNoise(n){
   }
   tb.innerHTML=n.top.map(x=>`<tr>
     <td>${x.label?`<span class="lblchip">${esc(x.label)}</span>`:`<span class="addr">${short(x.address)}</span>`}<span class="tag">${esc(x.reason)}</span>
-      <span class="tag" title="Measured over this address's own observed span — the window its limits were derived from">${(x.windowDays||1).toFixed(1)}d</span></td>
-    <td class="r">${nf.format(x.transfers)}</td>
-    <td class="r amt">${compact(x.volume)}</td></tr>`).join('');
-  foot.textContent=`${nf.format(n.flagged)} address${n.flagged===1?'':'es'} flagged · thresholds ${rate} · removes `
+      <span class="tag" title="Sent history held for this address. Under 30 days it is judged against the monthly limit whole.">${(x.spanDays??0)<1?'<1':(x.spanDays).toFixed(1)}d sent</span></td>
+    <td class="r">${nf.format(x.sentTransfers??0)}</td>
+    <td class="r amt">${compact(x.sentVolume??0)}</td></tr>`).join('');
+  foot.textContent=`${nf.format(n.flagged)} address${n.flagged===1?'':'es'} flagged · ${rate} · removes `
     + `${compact(n.excludedVolume24h)} (${(n.excludedShare*100).toFixed(1)}%) of 24h real volume`;
+  // The rule changed on 28 Sept 2026 and the rolling window straddles it for a day; sent history is
+  // also shorter than a month for a while. Both are said here rather than left to the methodology.
+  const held = n.sentHistorySince ? (Date.now()-n.sentHistorySince)/86400000 : null;
+  const notes = [];
+  if (n.ruleSince && Date.now()-n.ruleSince < 86400000) notes.push('Rule corrected '+new Date(n.ruleSince).toISOString().slice(0,16).replace('T',' ')+' UTC; the 24h figure still mixes minutes scored under the previous, stricter rule.');
+  if (n.seeding) notes.push('Re-reading sent history from the chain.');
+  else if (held!=null && held<30) notes.push(`Sent history held: ${held<1?'under a day':held.toFixed(1)+' days'} — monthly totals over less than a month, so fewer addresses reach the limits than will once a month is held.`);
+  if (notes.length) foot.insertAdjacentHTML('beforeend', `<div style="margin-top:6px">${notes.map(esc).join(' ')} <a href="/methodology" style="color:var(--accent)">Method →</a></div>`);
   // Said on the page, not just in the API. Once the cap binds, which addresses are flagged is
   // decided by the cap rather than by the thresholds printed right above it — leaving that to a
   // JSON field nobody opens would make the line above quietly misleading.
@@ -937,7 +944,7 @@ async function renderWatch(){
 
 // toggles
 const CAPS={
-  adj:'Adjusted volume = real volume, minus transfers where <em>both</em> ends are high-frequency addresses — infrastructure talking to itself.',
+  adj:'Adjusted volume = real volume, minus transfers where <em>both</em> ends are flagged senders (over 1,000 transfers or 10M sent in 30 days) — infrastructure talking to itself.',
   real:'Real volume = one largest transfer per transaction, per token — routing hops &amp; contract internals filtered out.',
   raw:'Raw volume = every Transfer event, unfiltered. Inflated by routing hops and bot activity.',
 };

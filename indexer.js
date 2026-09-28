@@ -228,14 +228,16 @@ export function chunkClock(from, to, fromTs, toTs) {
 // day. The floor is why a freshly-seen address cannot be branded a bot off a handful of transfers in
 // a single block — with no floor its window is near zero and any activity is an infinite rate.
 export function noiseLimitsFor(days) {
-  const d = Math.max(1, Number(days) || 0);
+  const d = Math.max(NOISE_FILTER.windowDays, Number(days) || 0);
   return { days: d, maxTransfers: NOISE_FILTER.txPerDay * d, maxVolume: NOISE_FILTER.volumePerDay * d };
 }
 
-// Pure: how many days of observation an address's block span represents.
+// Pure: the window an address's sent history is judged over — its block span in days, never less than
+// the rule's 30. Shorter history is compared with the monthly limits whole: that is what "more than $10M
+// in 30 days" means when fewer than 30 days are held, and it is what Visa's rule does on a young chain.
 export function noiseWindowDays(firstBlock, lastBlock, blockMs) {
   const span = Math.max(0, (Number(lastBlock) || 0) - (Number(firstBlock ?? lastBlock) || 0));
-  return Math.max(1, (span * Math.max(1, blockMs)) / 86400000);
+  return Math.max(NOISE_FILTER.windowDays, (span * Math.max(1, blockMs)) / 86400000);
 }
 
 // A transfer counts as noise only when *both* ends are flagged infrastructure — bot talking to
@@ -390,11 +392,11 @@ function refreshNoisy() {
   // address active for two months was measured over two months and judged against seven days, and
   // the same behaviour was flagged or not depending on how long this process had been up — adjusted
   // volume drifting downwards over a deployment's lifetime, with nothing saying so.
-  noisyRows = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, avgBlockMs);
+  noisyRows = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, avgBlockMs, NOISE_FILTER.windowDays);
   // How many addresses the published thresholds select, before the cap is applied. When the two
   // numbers differ the flag set is no longer the set the method describes, and saying so is the
   // difference between a documented limitation and an undocumented one.
-  noisyQualifying = db.noisyAddressCount(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, avgBlockMs);
+  noisyQualifying = db.noisyAddressCount(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, avgBlockMs, NOISE_FILTER.windowDays);
   noisy = new Set(noisyRows.map((r) => r.address));
   noisyAt = Date.now();
 }
@@ -483,12 +485,17 @@ export function feeMetrics(sample, blocksInWindow, blocksPerDay, volumeMoved, bu
 // the cheapest edge of the funding graph, used to tie an operational wallet back to its funder.
 // `firstBlock` is kept for a different reason: it is the denominator of the noise filter's rate, and
 // without it a total over an unknown span was being compared against a per-day limit.
-function bumpAddr(map, a, amount, block, from) {
+function bumpAddr(map, a, amount, block, from, sent = false) {
   let x = map.get(a);
-  if (!x) { x = { transfers: 0, volume: 0, lastBlock: 0, firstBlock: block, firstFrom: null }; map.set(a, x); }
+  if (!x) { x = { transfers: 0, volume: 0, lastBlock: 0, firstBlock: block, firstFrom: null, sentTransfers: 0, sentVolume: 0, sentFirst: null, sentLast: null }; map.set(a, x); }
   x.transfers += 1; x.volume += amount; x.lastBlock = Math.max(x.lastBlock, block);
   x.firstBlock = Math.min(x.firstBlock ?? block, block);
   if (from && !x.firstFrom) x.firstFrom = from;
+  if (sent) {
+    x.sentTransfers += 1; x.sentVolume += amount;
+    x.sentFirst = Math.min(x.sentFirst ?? block, block);
+    x.sentLast = Math.max(x.sentLast ?? block, block);
+  }
 }
 
 function pushFeed(ev) {
@@ -589,7 +596,7 @@ function processLogs(logs, opts = {}, gatewayTxs = null, tsAt = approxTs, cctp =
       else if (route === 'cctp') bk.cburn += amount;
       if (opts.live && amount >= NOTABLE_MIN) pushFeed({ ts, kind: 'burn', token: meta.symbol, amount, from, to, block, bridged, route });
     } else {
-      bumpAddr(addrs, from, amount, block);
+      bumpAddr(addrs, from, amount, block, null, true);
       bumpAddr(addrs, to, amount, block, from);
       recents.push({ block, ts, token: meta.symbol, frm: from, too: to, amount });
       if (opts.live) {
@@ -1021,6 +1028,99 @@ async function cctpBackfillStep(budgetMs = CCTP_BACKFILL_BUDGET_MS) {
   }
 }
 
+// ---- sent-history seed ----
+// The noise filter judges what each address sent, and a database indexed before that was counted holds
+// no sent history. Waiting for it to accumulate would publish an adjusted volume close to real for the
+// first hours after a deploy and drifting down for a month. So the history the RPC still serves is
+// re-read once — Transfer events only, newest first, the same way as the CCTP backfill — and added to
+// the rows the live index already holds. Every block from `sent_live_from` on is counted as it is
+// indexed, so the two never overlap; progress is committed with each chunk.
+const SENT_META = {
+  liveFrom: 'sent_live_from',       // first block whose sends are counted at index time
+  hi: 'sent_seed_hi',               // highest block not yet re-read; the seed runs down from here
+  since: 'sent_history_since',      // unix seconds: the oldest instant sent history reaches
+  ruleSince: 'noise_rule_since',    // unix seconds: when the sent / monthly rule took effect
+  done: 'sent_seed_done',
+};
+const SENT_SEED_SPAN = 400;         // blocks per read: every transfer, ~11 per block on mainnet
+const SENT_SEED_BUDGET_MS = 5000;
+let sentSpan = SENT_SEED_SPAN;
+
+function initSent() {
+  if (db.getMetaValue(SENT_META.liveFrom) != null) return;
+  const cp = db.getCheckpoint();
+  if (cp == null) {
+    // A cold database counts every send it will ever hold as it indexes it, and has no minute scored
+    // under any other rule — so there is no change of rule to report.
+    db.setMetaValue(SENT_META.liveFrom, 0);
+    db.setMetaValue(SENT_META.done, 1);
+    return;
+  }
+  db.setMetaValue(SENT_META.ruleSince, Math.floor(Date.now() / 1000));
+  db.setMetaValue(SENT_META.liveFrom, cp + 1);
+  db.setMetaValue(SENT_META.hi, cp);
+  db.setMetaValue(SENT_META.since, db.getCoverage().b ?? Math.floor(Date.now() / 1000));
+}
+
+async function sentSeedStep(budgetMs = SENT_SEED_BUDGET_MS) {
+  if (db.getMetaValue(SENT_META.done) === '1') return;
+  let hi = Number(db.getMetaValue(SENT_META.hi));
+  // Nothing older than the first block this database indexed: its addresses have no rows before it.
+  const floor = Number(db.getMetaValue(INDEX_FROM)) || db.firstIndexedBlock() || 0;
+  const t0 = Date.now();
+  while (hi >= floor && Date.now() - t0 < budgetMs) {
+    const lo = Math.max(floor, hi - sentSpan + 1);
+    let out;
+    try {
+      ({ out } = await rpc([
+        { method: 'eth_getLogs', params: [{ fromBlock: hex(lo), toBlock: hex(hi), address: TOKEN_ADDRS, topics: [TRANSFER_TOPIC] }] },
+        { method: 'eth_getBlockByNumber', params: [hex(lo), false] },
+      ]));
+      if (!Array.isArray(out[0]) || out[1]?.timestamp == null) throw new Error('incomplete answer');
+    } catch (e) {
+      // Pruned history ends the seed, as it ends the CCTP backfill; the sent history then reaches back
+      // exactly as far as `sent_history_since` says.
+      if (sentSpan <= CCTP_MIN_SPAN && historyPruned(e)) {
+        db.setMetaValue(SENT_META.done, 1);
+        console.log(`[sent] blocks up to ${hi} are no longer served — sent history starts at `
+          + `${new Date(Number(db.getMetaValue(SENT_META.since)) * 1000).toISOString()}`);
+        return;
+      }
+      sentSpan = Math.max(CCTP_MIN_SPAN, Math.floor(sentSpan / 2));
+      console.error(`[sent] seed ${lo}-${hi}: ${(e.causes || [e.message]).join(' | ')} — span now ${sentSpan}`);
+      return;
+    }
+    const senders = sentBySender(out[0], TOKENS);
+    db.applySentSeed(senders, { [SENT_META.hi]: lo - 1, [SENT_META.since]: parseInt(out[1].timestamp, 16) });
+    hi = lo - 1;
+    sentSpan = Math.min(SENT_SEED_SPAN, sentSpan * 2);
+    if (hi >= floor) await sleep(CHUNK_DELAY);
+  }
+  if (hi < floor) {
+    db.setMetaValue(SENT_META.done, 1);
+    console.log('[sent] seed done');
+  }
+}
+
+// Pure: sends per address from Transfer logs — count, face value, first and last block. The same rule
+// as the live count: tracked tokens only, mints and burns excluded (they are not someone sending).
+export function sentBySender(logs, tokens) {
+  const out = new Map();
+  for (const l of logs || []) {
+    const meta = tokens[String(l.address || '').toLowerCase()];
+    if (!meta) continue;
+    const from = topicAddr(l.topics[1]), to = topicAddr(l.topics[2]);
+    if (from === ZERO || to === ZERO) continue;
+    let amount;
+    try { amount = toUnits(l.data, meta.decimals); } catch { continue; }
+    const b = parseInt(l.blockNumber, 16);
+    let x = out.get(from);
+    if (!x) { x = { n: 0, v: 0, first: b, last: b }; out.set(from, x); }
+    x.n += 1; x.v += amount; x.first = Math.min(x.first, b); x.last = Math.max(x.last, b);
+  }
+  return out;
+}
+
 // Pure-ish view of CCTP over a window: per token, the in/out/net totals from the bucket pair and the
 // per-chain split from cctp_flows. Per token and never summed across tokens: TokenMessengerV2 is the
 // USDC path, but CCTP also carries EURC and third-party assets through CrossChainTokenService — not
@@ -1188,21 +1288,33 @@ function dbDerived({ frozen = false } = {}) {
       qualifying: noisyQualifying,
       cap: db.NOISE_SET_MAX,
       atCap: noisyQualifying > noisyRows.length,
+      // The rule as published: what an address sent, against 1,000 transfers or $10M per 30 days.
+      basis: NOISE_FILTER.basis,
+      transfersPerMonth: NOISE_FILTER.transfersPerMonth,
+      volumePerMonth: NOISE_FILTER.volumePerMonth,
       txPerDay: NOISE_FILTER.txPerDay,
       volumePerDay: NOISE_FILTER.volumePerDay,
+      // How far back sent history reaches, and whether it is still being re-read. Shorter than 30 days
+      // means monthly totals over less than a month: fewer addresses reach the limits than will once a
+      // month is held, so adjusted volume sits above where it will settle.
+      sentHistorySince: Number(db.getMetaValue(SENT_META.since)) * 1000
+        || (db.getMetaValue(SENT_META.liveFrom) === '0' && cov.a ? cov.a * 1000 : null),
+      seeding: db.getMetaValue(SENT_META.done) !== '1',
+      // When this rule took effect. Minutes indexed before it were scored under the previous one.
+      ruleSince: Number(db.getMetaValue(SENT_META.ruleSince)) * 1000 || null,
       // The thresholds are rates, and each address is judged over its own observed span. There is
       // therefore no single window to publish — the limits an address was actually measured against
       // ride on its own row below. `blockMs` is how a block span becomes days, and it is the one
       // input to that conversion, so it is published too.
       blockMs: avgBlockMs,
-      minWindowDays: 1,
+      minWindowDays: NOISE_FILTER.windowDays,
       excludedVolume24h: Math.max(0, summary.rvolume - summary.avolume),
       excludedShare: summary.rvolume ? Math.max(0, 1 - summary.avolume / summary.rvolume) : 0,
       top: noisyRows.slice(0, 8).map((r) => ({
         ...r,
         label: lbl(r.address),
         // An address can breach both limits; name the one it breaches hardest, relatively.
-        reason: r.volume / r.maxVolume > r.transfers / r.maxTransfers ? 'volume' : 'frequency',
+        reason: r.sentVolume / r.maxVolume > r.sentTransfers / r.maxTransfers ? 'volume' : 'frequency',
       })),
     },
     // The span the raw transfer table covers, which is what the size distribution, the per-token
@@ -1439,6 +1551,7 @@ async function tickOnce() {
     // Last, and time-boxed: history attribution must never delay the live pass above. Inside the
     // tick so it is serialised with indexing rather than racing it for the RPC endpoint.
     try { await cctpBackfillStep(); } catch (e) { console.error('[cctp]', e.message || e); }
+    try { await sentSeedStep(); } catch (e) { console.error('[sent]', e.message || e); }
   } catch (e) {
     // The chain answered, so this one is on us — keep serving indexed history and say so.
     degrade(String(e.message || e));
@@ -1463,6 +1576,7 @@ export async function start() {
   // order and this session's first transition lands after it rather than on top of it.
   openObservationWindow();
   initCctp();
+  initSent();
 
   loadPersistedSupplies();
   refreshNoisy();

@@ -112,13 +112,22 @@ export const SIZE_BRACKETS = [
 ];
 
 // Address-level noise filter — the second of the two filters described on /methodology.
-// Visa / Allium exclude any address exceeding 1,000 transactions or $10M of volume in a
-// month; these are the same thresholds expressed as a *daily rate*, because our retention
-// window is a rolling ~7 days rather than a calendar month. The indexer multiplies them by
-// however many days of history it actually holds before comparing.
+// Visa / Allium: an address that *sent* more than 1,000 transactions or $10M in a 30-day period.
+// Applied to what each address sent, over the sent history we hold: an address held for less than
+// 30 days is compared with the monthly limits whole, one held longer with its average monthly rate.
+//
+// Until 28 Sept 2026 this was a daily rate (limit ÷ 30 × days) with a one-day floor, over what an
+// address moved in both directions. On history shorter than a month — every address, on a
+// twelve-day-old mainnet — that held each one to a thirtieth of the monthly limit, doubled whatever
+// passed through it, and flagged receivers. Measured over the same 30 hours of mainnet: 4,159
+// addresses flagged and adjusted volume at 14% of real, against 62 and 73% under the rule as stated.
 export const NOISE_FILTER = {
-  txPerDay: 1000 / 30,       // ≈ 33 transfers/day
-  volumePerDay: 10e6 / 30,   // ≈ $333k/day
+  transfersPerMonth: 1000,
+  volumePerMonth: 10e6,
+  windowDays: 30,
+  basis: 'sent',
+  txPerDay: 1000 / 30,       // the same limits per day, for the rate applied past 30 days
+  volumePerDay: 10e6 / 30,
 };
 
 // Chain liveness. A halted chain and a broken indexer produce the same symptom — no fresh
