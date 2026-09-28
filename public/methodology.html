@@ -255,9 +255,13 @@
     requests a day against a rate-limited public RPC. So we sample a few blocks per poll, at a randomised offset behind the head.
     Each sampled block is <strong>exact</strong>; the per-day and per-window figures derived from them are <strong>extrapolations</strong>.
     The terminal and the API always report how many blocks a fee number rests on — an estimate is never presented as a measured total.</p>
-    <p style="margin-bottom:0"><strong>Cost to move $1M</strong> divides total network fees by <em>real</em> volume, not adjusted
+    <p><strong>Cost to move $1M</strong> divides total network fees by <em>real</em> volume, not adjusted
     volume. The fee total in the numerator includes every transaction, high-frequency addresses included; dividing it by only the
     non-bot volume would price the whole network's cost against a fraction of its throughput and badly overstate it.</p>
+    <p style="margin-bottom:0"><strong>In one currency.</strong> Fees are paid in USDC, so the volume is the <em>dollar</em> stablecoins'
+    real volume only. It used to be every tracked token's volume added together, euros included: on 28&nbsp;September&nbsp;2026 that put
+    23.3M of EURC volume into a 97.0M denominator and the figure read about 24% too low. Corrected the same day; the API names the
+    currency in <code>perMillionMovedDenomination</code>.</p>
   </div>
 
   <h2>TVL &amp; the protocol registry</h2>
@@ -326,7 +330,7 @@
       <tr><td>Size distribution</td><td>Histogram of transfer amounts bucketed by magnitude, over the retained transfer window (published with the counts, since a row cap makes its span depend on throughput).</td></tr>
       <tr><td>Avg fee / tx</td><td>Total fees ÷ transaction count over sampled blocks, in USDC. Measured from receipts, not estimated from a gas assumption.</td></tr>
       <tr><td>Fees / day</td><td>Mean fee per sampled block × blocks per day — a run rate, not a cumulative total.</td></tr>
-      <tr><td>Cost to move $1M</td><td>Total network fees ÷ real volume, scaled to $1M. What the network charges to move a million dollars.</td></tr>
+      <tr><td>Cost to move $1M</td><td>Total network fees ÷ real dollar-stablecoin volume, scaled to $1M. What the network charges to move a million dollars.</td></tr>
       <tr><td>Flagged address</td><td>An address exceeding 1,000 transfers or $10M volume per month, as a rate over its own observed span (floored at one day).</td></tr>
       <tr><td>TVL</td><td>Sum of indexed stablecoin balances held by addresses with bytecode, read with <code>balanceOf</code>.</td></tr>
       <tr><td>Attributed TVL</td><td>The part of TVL held by contracts a registry entry claims. The remainder is reported as unattributed.</td></tr>
