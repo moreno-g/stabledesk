@@ -4,19 +4,13 @@
 import { rpc, net, hex, topicAddr, toUnits, TOKENS, TOKEN_ADDRS, TRANSFER_TOPIC, ZERO, GATEWAY_ADDRS, HAS_GATEWAY, CCTP, CCTP_ADDRS, HAS_CCTP } from './rpc.js';
 import * as db from './db.js';
 import { getLabel } from './labels.js';
-import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES, denominationOf, cctpChainName } from './constants.js';
+import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES, denominationOf, cctpChainName, BASE_DENOMINATION } from './constants.js';
 import { CHAIN } from './chains.js';
 import * as chainalert from './chainalert.js';
 import { SEEN_KEY, UNOBSERVED } from './chainuptime.js';
 
 const TOTAL_SUPPLY = '0x18160ddd'; // ERC-20 totalSupply() selector
 
-// The denomination the chain itself charges in, read from the token marked as native gas in the
-// network profile. Null if no token is so marked, in which case nothing downstream assumes one.
-const BASE_DENOMINATION = (() => {
-  const gas = Object.values(CHAIN.tokens).find((t) => /gas/i.test(t.kind || ''));
-  return gas ? denominationOf(gas.symbol) : null;
-})();
 const SUPPLY_TTL = 30000;          // refresh supplies at most this often
 
 let supplies = {};                 // symbol -> supply (number)

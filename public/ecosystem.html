@@ -251,14 +251,24 @@ function statusCell(p){
     + '<div class="pdesc">'+esc(nets)+'</div>';
 }
 
+
+// A value per currency: the base denomination first, any other currency beneath it, never added to it.
+function denomCell(by, base){
+  const main = (by||{})[base] || 0;
+  const rest = Object.entries(by||{}).filter(([d,v])=>d!==base && v>0)
+    .map(([d,v])=>'<div style="font-size:10.5px;color:var(--ink-3)">+ '+compact(v)+' '+esc(d)+'</div>').join('');
+  return compact(main)+(base?' <span style="font-size:10.5px;color:var(--ink-3)">'+esc(base)+'</span>':'')+rest;
+}
+
 function renderRows(){
   const d = state.data; if(!d) return;
-  const total = d.totals?.tvl || 0;
+  const base = d.totals?.baseDenomination;
+  const total = d.totals?.byDenomination?.[base]?.tvl || 0;
   let list = d.protocols || [];
   if(state.cat !== 'all') list = list.filter(p => p.category === state.cat);
 
   $('#rows').innerHTML = list.length ? list.map((p,i)=>{
-    const share = total ? p.tvl/total : 0;
+    const share = total ? ((p.tvlByDenomination||{})[base]||0)/total : 0;
     const badges = (p.verified ? '<span class="badge verified">verified</span>' : '')
       + (p.source==='observed' ? '<span class="badge observed">observed</span>' : '');
     const links = Object.entries(p.links||{}).map(([k,v]) =>
@@ -270,7 +280,7 @@ function renderRows(){
         + (p.desc ? '<div class="pdesc">'+esc(p.desc)+'</div>' : '') + '</td>'
       + '<td><span class="cat '+esc(p.category)+'">'+esc(p.categoryLabel||p.category)+'</span></td>'
       + '<td style="font-size:11px;color:var(--ink-2)">'+statusCell(p)+'</td>'
-      + '<td class="r amt">'+compact(p.tvl)+'</td>'
+      + '<td class="r amt">'+denomCell(p.tvlByDenomination, base)+'</td>'
       + '<td class="r"><span class="amt" style="font-size:11px">'+(share*100).toFixed(1)+'%</span>'
         + '<div class="bar"><i style="width:'+Math.min(100,share*100).toFixed(1)+'%"></i></div></td>'
       + '<td class="r amt">'+compact(p.windowVolume)+'</td>'
@@ -291,14 +301,19 @@ function render(d){
   // is actually a finding — a registry of six utility contracts holding a few thousand dollars
   // was burying the fact that almost all the value on the chain sits in contracts nobody has
   // named yet. That gap is the interesting thing here, and it is also the ask.
+  // Every figure in one currency — the chain's own, the one gas is paid in. Other currencies are
+  // counted beside it, never into it.
+  const base = t.baseDenomination, g = (t.byDenomination||{})[base] || {};
+  const other = Object.entries(t.byDenomination||{}).filter(([d])=>d!==base).map(([d,x])=>'+ '+compact(x.tvl)+' '+d).join(' · ');
+  const w = t.smartWallets||{}, wBase = (w.byDenomination||{})[base] || 0;
   $('#kpis').innerHTML = [
-    ['Total TVL', compact(t.tvl), 'stablecoins held by contracts'],
-    ['Held by unnamed contracts', compact(t.unattributed),
-      ((1-(t.attributedShare||0))*100).toFixed(1)+'% of TVL — help us name them'],
+    ['Total TVL'+(base?' · '+base:''), compact(g.tvl), [other, 'held by contracts'].filter(Boolean).join(' · ')],
+    ['Held by unnamed contracts', compact(g.unattributed),
+      ((1-(g.attributedShare||0))*100).toFixed(1)+'% of '+(base||'')+' TVL — help us name them'],
     ['Protocols listed', nf.format(reg.total||0), (reg.verified||0)+' verified · '+(reg.unverified||0)+' observed'],
     // Wallets with bytecode: named, but outside TVL — said on the page so the drop is not a mystery.
-    ...(t.smartWallets&&t.smartWallets.tvl>0
-      ? [['In smart-contract wallets', compact(t.smartWallets.tvl), nf.format(t.smartWallets.accounts)+' account'+(t.smartWallets.accounts===1?'':'s')+' · wallets, not TVL']]
+    ...(wBase>0
+      ? [['In smart-contract wallets'+(base?' · '+base:''), compact(wBase), nf.format(w.accounts)+' account'+(w.accounts===1?'':'s')+' · wallets, not TVL']]
       : [['Contracts holding', nf.format(t.holders||0), 'addresses with a balance']]),
   ].map(([l,v,s])=>'<div class="kpi"><div class="lab">'+l+'</div><div class="val">'+v+'</div><div class="sub2">'+s+'</div></div>').join('');
 
@@ -328,7 +343,7 @@ function render(d){
             + '</div>'
           : '')
       + '</td>'
-    + '<td class="r amt">'+compact(c.tvl)+'</td>'
+    + '<td class="r amt">'+denomCell(c.tvlByDenomination, state.data?.totals?.baseDenomination)+'</td>'
     + '<td style="font-size:11px;color:var(--ink-3);font-family:var(--mono)">'+esc(Object.keys(c.byToken||{}).join(' · ')||'—')+'</td>'
     + '<td class="r amt">'+compact(c.volume)+'</td>'
     + '<td class="r" style="color:var(--ink-3)">'+nf.format(c.transfers||0)+'</td></tr>').join('')

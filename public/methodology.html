@@ -275,6 +275,11 @@
     same method would be worthless; here it is the direct measurement.</p>
     <p><strong>Only contracts count.</strong> Contract-ness comes from <code>eth_getCode</code>, never from a heuristic. A balance sitting in
     a plain wallet is someone's money, not value locked in a protocol, and is excluded.</p>
+    <p><strong>Per currency, never summed across currencies.</strong> TVL follows the same rule as supply and volume: each
+    currency is totalled on its own, and every ranking and share is computed in the currency gas is paid in (USD on Arc). A euro held
+    by Aave is not a dollar held by Aave; adding them produced a figure that was a quantity of nothing — on 28&nbsp;September&nbsp;2026,
+    106.5M of USDC and 3.7M of EURC read as "110.2M". The daily TVL series is kept per currency from that date. Earlier days summed
+    the two and counted smart-contract wallets (below), so they are not joined onto the new series.</p>
     <p><strong>Smart-contract wallets are wallets.</strong> Account abstraction breaks the bytecode test: a smart account has code and is
     still somebody's wallet. Accounts identified as such — today, EIP-1967 proxies whose implementation is Circle's single-owner modular
     account — are named on the ecosystem page and kept <em>out</em> of TVL, on their own line. On 28&nbsp;September&nbsp;2026 two of them held

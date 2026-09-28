@@ -792,18 +792,36 @@ test('the Arc mainnet registry loads, with every address claimed once', async ()
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
   const dbFile = join(tmpdir(), `stabledesk-wallets-${process.pid}-${Date.now()}.db`);
-  const agg = JSON.parse(execFileSync(process.execPath, ['-e', `
+  const agg = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `
     const db = await import('./db.js'); const tvl = await import('./tvl.js'); const p = await import('./protocols.js');
     const acct = '0x' + 'a'.repeat(40), pool = '0x' + 'b'.repeat(40);
     p.setDerivedAttributions([{ address: acct, protocol: 'circle-msca-accounts', basis: 'implementation:x' }]);
-    db.upsertBalances([{ address: acct, token: 'USDC', balance: 100 }, { address: '0x17288dfc86205301064577b98b02b81017e6f79c', token: 'USDC', balance: 70 }, { address: pool, token: 'USDC', balance: 5 }]);
+    db.upsertBalances([{ address: acct, token: 'USDC', balance: 100 }, { address: '0x17288dfc86205301064577b98b02b81017e6f79c', token: 'USDC', balance: 70 }, { address: pool, token: 'USDC', balance: 5 },
+      { address: '0x17288dfc86205301064577b98b02b81017e6f79c', token: 'EURC', balance: 4 },
+      { address: '0x34cd04070dd72b14e241112f6d83812df5af7fcd', token: 'USDC', balance: 3 }, { address: '0x34cd04070dd72b14e241112f6d83812df5af7fcd', token: 'EURC', balance: 50 }]);
     const a = tvl.computeAggregate();
-    console.log(JSON.stringify({ tvl: a.totals.tvl, wallets: a.totals.smartWallets, total: tvl.total(), ids: a.protocols.map((x) => x.id), cand: a.candidates.map((c) => c.address) }));`],
+    const r = (await import('./rankings.js')).daily();
+    console.log(JSON.stringify({ tvl: a.totals.tvl, byDen: a.totals.byDenomination, base: a.totals.baseDenomination, wallets: a.totals.smartWallets,
+      total: tvl.total(), totalByDen: tvl.totalByDenomination(), ids: a.protocols.map((x) => x.id), aave: a.protocols.find((x) => x.id === 'aave-v4').tvlByDenomination,
+      cand: a.candidates.map((c) => c.address), rankTvl: r.chain.tvl, rank: r.byTvl.map((x) => [x.id, x.tvl, Math.round(x.share * 1000) / 1000]), key: tvl.historyKey('aave-v4') }));`],
     { env: { ...env, DB_PATH: dbFile }, cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' }).toString().trim().split('\n').pop());
-  assert.equal(agg.tvl, 75, 'the Aave hub and the unnamed pool are TVL; the wallet is not');
+  assert.equal(agg.tvl, 132, 'face values across tokens, wallet excluded: 70 + 5 + 3 USDC, 4 + 50 EURC');
+  assert.equal(agg.byDen.USD.tvl, 78, 'dollars on their own');
+  assert.equal(agg.byDen.EUR.tvl, 54, 'euros on their own, never added to the dollars');
+  assert.equal(agg.byDen.USD.attributed, 73);
+  assert.equal(agg.base, 'USD');
   assert.equal(agg.wallets.tvl, 100);
   assert.equal(agg.wallets.accounts, 1);
-  assert.equal(agg.total, 75, 'the dashboard total subtracts the same wallets');
+  assert.equal(agg.wallets.byDenomination.USD, 100);
+  assert.equal(agg.total, 132, 'the legacy dashboard number subtracts the same wallets');
+  assert.deepEqual(agg.totalByDen, { USD: { tvl: 78 }, EUR: { tvl: 54 } }, 'and so does the per-currency one');
+  assert.deepEqual(agg.aave, { USD: 70, EUR: 4 });
+  // Morpho holds more in total (53) than in dollars (3); ranking is by dollars, so Aave leads and the
+  // share is a share of dollars, not of dollars plus euros.
+  assert.deepEqual(agg.rank[0], ['aave-v4', 70, 0.897]);
+  assert.equal(agg.rankTvl, 78);
+  assert.equal(agg.ids.indexOf('aave-v4') < agg.ids.indexOf('morpho'), true, 'protocols are ordered by the base denomination');
+  assert.equal(agg.key, 'aave-v4@USD', 'history is keyed by currency');
   assert.ok(!agg.ids.includes('circle-msca-accounts'), 'and the wallet entry is not ranked as a protocol');
   assert.ok(!agg.cand.includes('0x' + 'a'.repeat(40)), 'nor listed as an unnamed contract');
 });

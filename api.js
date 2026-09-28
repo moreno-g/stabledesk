@@ -12,7 +12,7 @@ import { search } from './search.js';
 import { CATEGORIES } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS, TVL_HISTORY_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
-import { RANGES, TIERS, clampLimit, alignToBucket, TOKEN_SYMBOLS, TOKEN_LIST, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
+import { BASE_DENOMINATION, RANGES, TIERS, clampLimit, alignToBucket, TOKEN_SYMBOLS, TOKEN_LIST, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
 import { validateWebhookHost } from './validate.js';
 import { CHAIN } from './chains.js';
 
@@ -404,7 +404,9 @@ export async function handleV1(req, res, u) {
     if (u.searchParams.get('format') === 'csv') {
       return csvResponse(res, `arc-tvl-${protocol === '*' ? 'total' : protocol}.csv`, series, TVL_HISTORY_COLUMNS, H);
     }
-    return json(res, { protocol, days, series }, 200, H);
+    // One currency per series: the base denomination. The series restarts on 28 Sept 2026, when TVL
+    // stopped adding euros to dollars and stopped counting smart-contract wallets.
+    return json(res, { protocol, days, denomination: BASE_DENOMINATION, series }, 200, H);
   }
 
   if (path === '/v1/tvl') {
@@ -418,7 +420,7 @@ export async function handleV1(req, res, u) {
       ...(snap.coverage?.atCap ? {
         warning: `Coverage is truncated: ${snap.coverage.knownContracts} contracts are known and the top ${snap.coverage.cap} by ${snap.coverage.order} were scanned. Chain TVL is therefore a lower bound.`,
       } : {}),
-      protocols: snap.protocols.filter((p) => p.tvl > 0).map((p) => ({ id: p.id, name: p.name, tvl: p.tvl })),
+      protocols: snap.protocols.filter((p) => p.tvl > 0).map((p) => ({ id: p.id, name: p.name, tvl: p.tvl, tvlByDenomination: p.tvlByDenomination })),
       updatedAt: snap.lastRun?.at ?? null,
     }, 200, H);
   }

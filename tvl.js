@@ -20,7 +20,15 @@ import { rpcSoft, TOKENS, toUnits } from './rpc.js';
 import * as db from './db.js';
 import { PROTOCOLS, protocolForAddress, publicShape, registryStats, isRegistered, attributionRules, setDerivedAttributions, derivedAddresses, attributionBasis, walletAddresses } from './protocols.js';
 import { getLabel } from './labels.js';
-import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_STALEST_SWEEP, TVL_ROTATE_SLICE, TVL_FAST_SLICE, TVL_SLOW_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS } from './constants.js';
+import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_STALEST_SWEEP, TVL_ROTATE_SLICE, TVL_FAST_SLICE, TVL_SLOW_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS, BASE_DENOMINATION, sumByDenomination } from './constants.js';
+
+// A balance in the base denomination — the headline currency — from a per-token breakdown.
+const inBase = (byToken) => (BASE_DENOMINATION ? sumByDenomination(byToken)[BASE_DENOMINATION] || 0 : 0);
+
+// The key a TVL history row is stored under. Per denomination since 28 Sept 2026: the rows before
+// that date, under the bare protocol id, summed euros into dollars and counted smart-contract wallets,
+// and are left as they were rather than rewritten into something they did not measure.
+export const historyKey = (protocol, denom = BASE_DENOMINATION) => `${protocol}@${denom}`;
 
 // Where the rotation left off, in the same meta table the indexer keeps its checkpoint in.
 const CURSOR_KEY = 'tvl_scan_cursor';            // fast lane
@@ -319,8 +327,9 @@ export async function refresh() {
     // Persist today's level so tomorrow has something to diff against.
     const agg = aggregate();
     db.recordTvlSnapshot(today(), [
-      { protocol: '*', tvl: agg.totals.tvl },
-      ...agg.protocols.filter((p) => p.tvl > 0).map((p) => ({ protocol: p.id, tvl: p.tvl })),
+      ...Object.entries(agg.totals.byDenomination).map(([d, g]) => ({ protocol: historyKey('*', d), tvl: g.tvl })),
+      ...agg.protocols.flatMap((p) => Object.entries(p.tvlByDenomination)
+        .filter(([, v]) => v > 0).map(([d, v]) => ({ protocol: historyKey(p.id, d), tvl: v }))),
     ]);
 
     lastRun = {
@@ -401,8 +410,11 @@ export function computeAggregate() {
     const flow = db.volumeForAddresses(all);
     return {
       ...publicShape(p),
+      // Face values summed across tokens, kept for existing consumers. `tvlByDenomination` is the
+      // figure that is a quantity of something; the base denomination orders and ranks.
       tvl,
       tvlByToken: tokens,
+      tvlByDenomination: sumByDenomination(tokens),
       contractsWithBalance: withBalance,
       // `observed` separates "listed but we have never seen it do anything" from "listed and live".
       // Without it, a brand-new registry entry is indistinguishable from a dead one.
@@ -410,17 +422,34 @@ export function computeAggregate() {
       windowVolume: flow.volume,
       windowTransfers: flow.transfers,
     };
-  }).sort((a, b) => b.tvl - a.tvl || a.name.localeCompare(b.name));
+  }).sort((a, b) => inBase(b.tvlByToken) - inBase(a.tvlByToken) || b.tvl - a.tvl || a.name.localeCompare(b.name));
 
   let attributed = 0;
-  for (const p of protocols) attributed += p.tvl;
+  const attributedByToken = {};
+  for (const p of protocols) {
+    attributed += p.tvl;
+    for (const [t, v] of Object.entries(p.tvlByToken)) attributedByToken[t] = (attributedByToken[t] || 0) + v;
+  }
+
+  // Every total per currency, never across them — the same rule as supply and volume. A euro held
+  // by Aave is not a dollar held by Aave, and adding them produced a TVL that was a quantity of
+  // nothing: on 28 Sept 2026, 106.5M of USDC and 3.7M of EURC read as "110.2M".
+  const byDenomination = {};
+  const inDen = sumByDenomination(byToken), attDen = sumByDenomination(attributedByToken);
+  for (const [d, v] of Object.entries(inDen)) {
+    const a = attDen[d] || 0;
+    byDenomination[d] = {
+      tvl: v, attributed: a, unattributed: v - a, attributedShare: v ? a / v : 0,
+      tokens: Object.keys(byToken).filter((t) => sumByDenomination({ [t]: 1 })[d]),
+    };
+  }
 
   // Contracts holding real balances that no registry entry claims. This is the work queue: the
   // page shows them so they can be identified and listed, which is how the registry grows from
   // evidence instead of assumption.
   const shortlist = [...byAddress.entries()]
     .filter(([addr, e]) => e.total >= TVL_CANDIDATE_MIN && !protocolForAddress(addr))
-    .sort((a, b) => b[1].total - a[1].total)
+    .sort((a, b) => inBase(b[1].byToken) - inBase(a[1].byToken) || b[1].total - a[1].total)
     .slice(0, 50);
   // What each one says it is, read from the contract itself. A column of bare hex is a work queue
   // nobody can act on; "Synthra Perpetual Liquidity Token" is one somebody can. Derived, never
@@ -433,6 +462,7 @@ export function computeAggregate() {
       address,
       tvl: e.total,
       byToken: e.byToken,
+      tvlByDenomination: sumByDenomination(e.byToken),
       label: getLabel(address)?.name || null,
       selfName: id?.token_name || null,
       selfSymbol: id?.token_symbol || null,
@@ -444,6 +474,8 @@ export function computeAggregate() {
 
   return {
     totals: {
+      // Kept for consumers already reading them, and documented as what they are: face values added
+      // across currencies with no conversion. `byDenomination` carries the figures that mean something.
       tvl: total,
       byToken,
       attributed,
@@ -451,9 +483,11 @@ export function computeAggregate() {
       // The honest headline for a young registry: how much of the chain's locked value we can
       // actually name. Reported next to the total, never instead of it.
       attributedShare: total ? attributed / total : 0,
+      byDenomination,
+      baseDenomination: BASE_DENOMINATION,
       holders: byAddress.size,
       // Held by smart-contract wallets (registry entries marked `wallets`), outside every figure above.
-      smartWallets: inWallets,
+      smartWallets: { ...inWallets, byDenomination: sumByDenomination(inWallets.byToken) },
     },
     protocols,
     candidates,
@@ -463,7 +497,18 @@ export function computeAggregate() {
 // Chain-wide total only. The dashboard polls every few seconds and needs one number, so this skips
 // the per-protocol attribution and flow lookups that aggregate() does — and now asks SQLite for the
 // sum rather than reading every row, sorted by balance, in order to add them up in JS.
-export const total = () => db.totalBalance() - db.balanceOfAddresses(walletAddresses());
+export const total = () => db.totalBalance() - Object.values(db.balanceOfAddressesByToken(walletAddresses())).reduce((a, b) => a + b, 0);
+
+// The dashboard's figure: per denomination, wallets out. Two grouped sums, no aggregate pass.
+export function totalByDenomination() {
+  const all = db.balanceByToken();
+  const w = db.balanceOfAddressesByToken(walletAddresses());
+  const net = {};
+  for (const [t, v] of Object.entries(all)) net[t] = v - (w[t] || 0);
+  const out = {};
+  for (const [d, v] of Object.entries(sumByDenomination(net))) out[d] = { tvl: v };
+  return out;
+}
 
 // TVL movers — today's level against `daysBack` ago, per protocol. Drives the daily rankings.
 export function movers(daysBack = 1) {
@@ -471,15 +516,15 @@ export function movers(daysBack = 1) {
   const then = now - daysBack * DAY;
   const out = [];
   for (const p of PROTOCOLS) {
-    const a = db.tvlOn(p.id, then);
-    const b = db.tvlOn(p.id, now);
+    const a = db.tvlOn(historyKey(p.id), then);
+    const b = db.tvlOn(historyKey(p.id), now);
     if (a == null || b == null) continue;         // no baseline yet — not a 0% change
     out.push({ id: p.id, name: p.name, from: a, to: b, delta: b - a, pct: a > 0 ? (b - a) / a : null });
   }
   return out.sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta));
 }
 
-export const history = (protocol = '*', days = 30) => db.tvlSeries(protocol, today() - days * DAY);
+export const history = (protocol = '*', days = 30) => db.tvlSeries(historyKey(protocol), today() - days * DAY);
 
 // One protocol, with its per-contract breakdown. Contracts are listed individually and each one
 // says whether it currently holds a balance — a protocol's headline TVL should always be traceable
@@ -498,24 +543,28 @@ export function detail(id, opts = {}) {
       basis: attributionBasis(address),
       tvl: balances.reduce((a, b) => a + b.balance, 0),
       byToken: Object.fromEntries(balances.map((b) => [b.token, b.balance])),
+      byDenomination: sumByDenomination(Object.fromEntries(balances.map((b) => [b.token, b.balance]))),
       windowVolume: stats?.volume || 0,
       windowTransfers: stats?.transfers || 0,
       lastBlock: stats?.last_block || null,
     };
-  }).sort((a, b) => b.tvl - a.tvl);
+  }).sort((a, b) => inBase(b.byToken) - inBase(a.byToken) || b.tvl - a.tvl);
 
   const recent = p.contracts
     .flatMap((c) => db.addressRecent(c, opts.recent || 8))
     .sort((a, b) => b.block - a.block)
     .slice(0, opts.recent || 8);
 
+  // Share and chain total in the base denomination: a share of a sum of two currencies is not a share.
+  const chainBase = agg.totals.byDenomination?.[BASE_DENOMINATION]?.tvl || 0;
   return {
     ...p,
-    share: agg.totals.tvl ? p.tvl / agg.totals.tvl : 0,
+    baseDenomination: BASE_DENOMINATION,
+    share: chainBase ? (p.tvlByDenomination?.[BASE_DENOMINATION] || 0) / chainBase : 0,
     contractDetail: contracts,
     recent,
     series: history(p.id, opts.days || 30),
-    chainTvl: agg.totals.tvl,
+    chainTvl: chainBase,
     lastRun,
   };
 }
@@ -538,6 +587,8 @@ export function addressDetail(address) {
     label: getLabel(a)?.name || null,
     tvl: balances.reduce((x, b) => x + b.balance, 0),
     byToken: Object.fromEntries(balances.map((b) => [b.token, b.balance])),
+    tvlByDenomination: sumByDenomination(Object.fromEntries(balances.map((b) => [b.token, b.balance]))),
+    baseDenomination: BASE_DENOMINATION,
     isContract: !!meta?.is_contract,
     kind: meta?.kind || null,
     codeSize: meta?.code_size || null,
@@ -546,7 +597,7 @@ export function addressDetail(address) {
     lastBlock: stats?.last_block || null,
     recent: db.addressRecent(a, 12),
     largest: db.addressLargest(a, 8),
-    chainTvl: agg.totals.tvl,
+    chainTvl: agg.totals.byDenomination?.[BASE_DENOMINATION]?.tvl || 0,
     lastRun,
   };
 }

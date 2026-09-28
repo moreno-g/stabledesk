@@ -212,8 +212,10 @@ function renderNamed(d){
     + '<br><a href="/ecosystem">← Ecosystem</a>';
 
   $('#kpis').innerHTML = [
-    ['Holds', compact(d.tvl), 'stablecoins in its contracts'],
-    ['Share of chain TVL', ((d.share||0)*100).toFixed(1)+'%', 'of '+compact(d.chainTvl)+' total'],
+    ['Holds'+(d.baseDenomination?' · '+d.baseDenomination:''), compact((d.tvlByDenomination||{})[d.baseDenomination]||0),
+      [Object.entries(d.tvlByDenomination||{}).filter(([k,v])=>k!==d.baseDenomination&&v>0).map(([k,v])=>'+ '+compact(v)+' '+k).join(' · '),
+       'stablecoins in its contracts'].filter(Boolean).join(' · ')],
+    ['Share of chain TVL', ((d.share||0)*100).toFixed(1)+'%', 'of '+compact(d.chainTvl)+(d.baseDenomination?' '+d.baseDenomination:'')+' total'],
     ['Moved', compact(d.windowVolume), 'retained window (~7d)'],
     ['Transfers', nf.format(d.windowTransfers||0), 'retained window (~7d)'],
   ].map(([l,v,s])=>'<div class="kpi"><div class="lab">'+l+'</div><div class="val">'+v+'</div><div class="sub2">'+s+'</div></div>').join('');
@@ -225,7 +227,8 @@ function renderNamed(d){
       +(c.basis&&c.basis!=='listed'?' <span class="badge" title="Attributed because the chain says so: '+esc(c.basis)+'">'
         +(c.basis.startsWith('factory:')?'via factory':'via implementation')+'</span>':'')+'</td>'
     + '<td style="font-size:11px;color:var(--ink-3);font-family:var(--mono)">'+esc(Object.keys(c.byToken||{}).join(' · ')||'—')+'</td>'
-    + '<td class="r amt">'+compact(c.tvl)+'</td>'
+    + '<td class="r amt">'+compact((c.byDenomination||{})[d.baseDenomination]||0)
+      +Object.entries(c.byDenomination||{}).filter(([k,v])=>k!==d.baseDenomination&&v>0).map(([k,v])=>'<div style="font-size:10.5px;color:var(--ink-3)">+ '+compact(v)+' '+esc(k)+'</div>').join('')+'</td>'
     + '<td class="r amt">'+compact(c.windowVolume)+'</td>'
     + '<td class="r" style="color:var(--ink-3)">'+nf.format(c.windowTransfers||0)+'</td></tr>').join('')
     : '<tr><td colspan="5" class="empty">No contracts recorded.</td></tr>';
@@ -242,7 +245,9 @@ function renderUnnamed(d){
     + 'If you know what this is, <a href="https://x.com/getStabledesk">tell us</a> and it gets named.</p></div>';
 
   $('#kpis').innerHTML = [
-    ['Holds', compact(d.tvl), 'stablecoins at this address'],
+    ['Holds'+(d.baseDenomination?' · '+d.baseDenomination:''), compact((d.tvlByDenomination||{})[d.baseDenomination]||0),
+      [Object.entries(d.tvlByDenomination||{}).filter(([k,v])=>k!==d.baseDenomination&&v>0).map(([k,v])=>'+ '+compact(v)+' '+k).join(' · '),
+       'stablecoins at this address'].filter(Boolean).join(' · ')],
     ['Type', esc(d.kind || (d.isContract ? 'contract' : 'wallet')), d.codeSize ? nf.format(d.codeSize)+' bytes' : 'derived from bytecode'],
     ['Moved', compact(d.windowVolume), 'retained window (~7d)'],
     ['Transfers', nf.format(d.windowTransfers||0), 'retained window (~7d)'],
