@@ -59,6 +59,21 @@ Don't have a GitHub account? Send the same fields to
   message from a deployer address.
 - `desc` describes the product in a sentence. It is not a place for a pitch.
 
+### Pools and proxies you don't have to list one by one
+
+Two optional fields attribute contracts created after the entry is written, and both are checked against
+the chain before anything is attributed:
+
+```js
+factories: [{ address: '0x…', type: 'uniswap-v3' }],  // or 'uniswap-v2'
+implementations: ['0x…'],                            // EIP-1967 implementation address
+```
+
+A pool is claimed when the listed factory, asked `getPool(token0, token1, fee)` (v3) or
+`getPair(token0, token1)` (v2), returns the pool's own address — a pool that merely reports that factory
+from `factory()` is not attributed. A proxy is claimed when its implementation slot points at a listed
+implementation. Other factory designs need their own question and are added as a new `type`.
+
 ### Which contracts to list
 
 List the addresses that **hold user funds** — vaults, pools, escrows, markets. Those are what TVL is

@@ -857,7 +857,11 @@ function build() {
             category: { type: 'string', enum: Object.keys(CATEGORIES) },
             tvl: { type: 'number', description: 'Stablecoin balances held by this protocol\'s contracts.' },
             tvlByToken: { type: 'object', additionalProperties: { type: 'number' } },
-            contracts: { type: 'array', items: { type: 'string' } },
+            contracts: { type: 'array', items: { type: 'string' }, description: 'Listed contracts. Contracts attributed by a rule are counted in `derivedContracts`.' },
+            factories: { type: 'array', items: { type: 'object', properties: { address: { type: 'string' }, type: { type: 'string', enum: ['uniswap-v2', 'uniswap-v3'] } } }, description: 'A pool is attributed when this factory returns its address for its own tokens and fee.' },
+            implementations: { type: 'array', items: { type: 'string' }, description: 'An EIP-1967 proxy is attributed when its implementation slot points here.' },
+            derivedContracts: { type: 'integer', description: 'Contracts attributed by `factories` or `implementations`, as verified on-chain.' },
+            wallets: { type: 'boolean', description: 'The entry names smart-contract wallets: named, never counted as TVL.' },
           },
           additionalProperties: true,
         },
@@ -895,8 +899,13 @@ function build() {
         TvlTotals: {
           type: 'object',
           properties: {
-            tvl: { type: 'number', description: 'Chain-wide total, attributed and unattributed together.' },
+            tvl: { type: 'number', description: 'Chain-wide total, attributed and unattributed together. Excludes smart-contract wallets (`smartWallets`) since 28 Sept 2026.' },
             byToken: { type: 'object', additionalProperties: { type: 'number' } },
+            smartWallets: {
+              type: 'object',
+              description: 'Held by smart-contract wallets: contracts by bytecode, wallets by function. Named in the registry, kept out of every TVL figure.',
+              properties: { tvl: { type: 'number' }, byToken: { type: 'object', additionalProperties: { type: 'number' } }, accounts: { type: 'integer' } },
+            },
             attributed: { type: 'number', description: 'Held by contracts a registry entry claims.' },
             unattributed: { type: 'number', description: 'Held by contracts nobody has named. Counted in `tvl` and reported separately — hiding it would understate the chain, and assigning it to a plausible protocol would invent data.' },
             attributedShare: { type: 'number', description: 'How much of the locked value the registry can actually name, 0–1. Reported next to the total, never instead of it.' },

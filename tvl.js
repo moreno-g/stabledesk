@@ -18,7 +18,7 @@
 
 import { rpcSoft, TOKENS, toUnits } from './rpc.js';
 import * as db from './db.js';
-import { PROTOCOLS, protocolForAddress, publicShape, registryStats } from './protocols.js';
+import { PROTOCOLS, protocolForAddress, publicShape, registryStats, isRegistered, attributionRules, setDerivedAttributions, derivedAddresses, attributionBasis, walletAddresses } from './protocols.js';
 import { getLabel } from './labels.js';
 import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_STALEST_SWEEP, TVL_ROTATE_SLICE, TVL_FAST_SLICE, TVL_SLOW_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS } from './constants.js';
 
@@ -151,6 +151,89 @@ async function probeIdentities() {
   return found;
 }
 
+// ---- attribution by rule ----
+// Pools and smart accounts are created without anyone editing the registry, so they cannot be listed
+// one by one. Each holder worth naming is asked two things instead, and attributed only on the chain's
+// own answer:
+//   - its EIP-1967 implementation slot, matched against the registry's `implementations`;
+//   - factory(), token0(), token1() (and fee() for v3) — and then the *factory* is asked whether that
+//     pool is its own (getPool / getPair). A contract's claim to be a Uniswap pool is not evidence;
+//     Uniswap's factory returning its address is.
+// Checked once, re-checked weekly: an implementation can be upgraded, a pool cannot change factory.
+const IMPL_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
+const SEL = { factory: '0xc45a0155', token0: '0x0dfe1681', token1: '0xd21220a7', fee: '0xddca3f43', getPool: '0x1698ee82', getPair: '0xe6a43905' };
+const ATTRIBUTION_RECHECK_MS = 7 * 86400000;
+const word = (a) => String(a).toLowerCase().replace(/^0x/, '').padStart(64, '0');
+const asAddr = (h) => (typeof h === 'string' && h.length >= 42 && !/^0x0*$/.test(h) ? '0x' + h.slice(-40).toLowerCase() : null);
+
+// Pure: what the answers attribute, given the rules. `verified` is the factory's own reply, keyed by
+// pool address. Exported for the tests.
+export function attributeFromChain(address, answers, rules, verified = new Map()) {
+  const impl = asAddr(answers.impl);
+  if (impl && rules.implementations.has(impl)) return { protocol: rules.implementations.get(impl), basis: `implementation:${impl}`, impl };
+  const factory = asAddr(answers.factory);
+  const rule = factory && rules.factories.get(factory);
+  if (rule && verified.get(address) === address) return { protocol: rule.protocol, basis: `factory:${factory}`, impl };
+  return { protocol: null, basis: null, impl };
+}
+
+// The call that asks a factory whether it created `answers`' pool, or null if no rule applies.
+function factoryQuestion(answers, rules) {
+  const factory = asAddr(answers.factory);
+  const rule = factory && rules.factories.get(factory);
+  const t0 = asAddr(answers.token0), t1 = asAddr(answers.token1);
+  if (!rule || !t0 || !t1) return null;
+  if (rule.type === 'uniswap-v2') return { to: factory, data: SEL.getPair + word(t0) + word(t1) };
+  if (rule.type === 'uniswap-v3' && typeof answers.fee === 'string' && answers.fee.length > 2) {
+    return { to: factory, data: SEL.getPool + word(t0) + word(t1) + word(BigInt(answers.fee).toString(16)) };
+  }
+  return null;
+}
+
+async function probeAttribution() {
+  const rules = attributionRules();
+  if (!rules.factories.size && !rules.implementations.size) return 0;
+  const holding = new Map();
+  for (const r of db.balanceRows()) holding.set(r.address, (holding.get(r.address) || 0) + r.balance);
+  const checked = db.attributionChecked([...holding.keys()]);
+  const now = Date.now();
+  const targets = [...holding.entries()]
+    .filter(([a, bal]) => bal >= TVL_CANDIDATE_MIN && !isRegistered(a) && !(now - (checked.get(a) || 0) < ATTRIBUTION_RECHECK_MS))
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, IDENTITY_PER_PASS)
+    .map(([a]) => a);
+  if (!targets.length) return 0;
+  let attributed = 0;
+  const PER = 5;
+  for (const part of chunk(targets, Math.max(1, Math.floor(TVL_CHUNK * 2 / PER)))) {
+    const { out } = await rpcSoft(part.flatMap((a) => [
+      { method: 'eth_getStorageAt', params: [a, IMPL_SLOT, 'latest'] },
+      { method: 'eth_call', params: [{ to: a, data: SEL.factory }, 'latest'] },
+      { method: 'eth_call', params: [{ to: a, data: SEL.token0 }, 'latest'] },
+      { method: 'eth_call', params: [{ to: a, data: SEL.token1 }, 'latest'] },
+      { method: 'eth_call', params: [{ to: a, data: SEL.fee }, 'latest'] },
+    ]));
+    const answers = part.map((a, i) => ({ address: a, impl: out[i * PER], factory: out[i * PER + 1], token0: out[i * PER + 2], token1: out[i * PER + 3], fee: out[i * PER + 4], answered: out.slice(i * PER, i * PER + PER).some((x) => typeof x === 'string') }));
+    const questions = answers.map((x) => ({ x, q: factoryQuestion(x, rules) })).filter((e) => e.q);
+    const verified = new Map();
+    if (questions.length) {
+      const { out: rep } = await rpcSoft(questions.map((e) => ({ method: 'eth_call', params: [e.q, 'latest'] })));
+      questions.forEach((e, i) => { const got = asAddr(rep[i]); if (got) verified.set(e.x.address, got); });
+    }
+    for (const x of answers) {
+      // Nothing came back at all: we did not get to ask, which is not an answer. Try again next pass.
+      if (!x.answered) continue;
+      const r = attributeFromChain(x.address, x, rules, verified);
+      db.setAttribution(x.address, r.impl, r.protocol, r.basis);
+      if (r.protocol) attributed += 1;
+    }
+    await sleep(TVL_DELAY);
+  }
+  setDerivedAttributions(db.derivedAttributions());
+  if (attributed) console.log(`[tvl] attributed ${attributed} contract(s) by factory or implementation`);
+  return attributed;
+}
+
 // Which contracts this pass reads, and which it defers.
 //
 // Registry contracts always, because a listed protocol with no measured balance is indistinguishable
@@ -230,6 +313,8 @@ export async function refresh() {
     // fact about the contract, and it is never treated as a claim about who operates it.
     const named = await probeIdentities();
     if (named) invalidateAggregate();
+    const byRule = await probeAttribution();
+    if (byRule) invalidateAggregate();
 
     // Persist today's level so tomorrow has something to diff against.
     const agg = aggregate();
@@ -275,10 +360,23 @@ export function aggregate() {
 export function computeAggregate() {
   const rows = db.balanceRows();
 
+  // Smart-contract wallets are wallets. They pass the bytecode test that separates a contract from a
+  // wallet, so they were counted as locked value: on 28 Sept 2026 two Circle modular accounts held
+  // $100.8M of the $211M reported as Arc TVL. Reported on their own line, never in the total.
+  const wallets = new Set(walletAddresses());
+  const inWallets = { tvl: 0, byToken: {}, accounts: 0 };
+  const walletSeen = new Set();
+
   const byAddress = new Map();      // address -> { total, byToken }
   const byToken = {};
   let total = 0;
   for (const r of rows) {
+    if (wallets.has(r.address)) {
+      inWallets.tvl += r.balance;
+      inWallets.byToken[r.token] = (inWallets.byToken[r.token] || 0) + r.balance;
+      if (!walletSeen.has(r.address)) { walletSeen.add(r.address); inWallets.accounts += 1; }
+      continue;
+    }
     let e = byAddress.get(r.address);
     if (!e) { e = { total: 0, byToken: {} }; byAddress.set(r.address, e); }
     e.total += r.balance;
@@ -287,18 +385,20 @@ export function computeAggregate() {
     total += r.balance;
   }
 
-  const protocols = PROTOCOLS.map((p) => {
+  const protocols = PROTOCOLS.filter((p) => !p.wallets).map((p) => {
     let tvl = 0;
     const tokens = {};
     let withBalance = 0;
-    for (const c of p.contracts) {
+    // Listed contracts, then the ones a rule attributed on the chain's own answer.
+    const all = [...p.contracts, ...derivedAddresses(p.id)];
+    for (const c of all) {
       const e = byAddress.get(c);
       if (!e) continue;
       withBalance += 1;
       tvl += e.total;
       for (const [t, v] of Object.entries(e.byToken)) tokens[t] = (tokens[t] || 0) + v;
     }
-    const flow = db.volumeForAddresses(p.contracts);
+    const flow = db.volumeForAddresses(all);
     return {
       ...publicShape(p),
       tvl,
@@ -352,6 +452,8 @@ export function computeAggregate() {
       // actually name. Reported next to the total, never instead of it.
       attributedShare: total ? attributed / total : 0,
       holders: byAddress.size,
+      // Held by smart-contract wallets (registry entries marked `wallets`), outside every figure above.
+      smartWallets: inWallets,
     },
     protocols,
     candidates,
@@ -361,7 +463,7 @@ export function computeAggregate() {
 // Chain-wide total only. The dashboard polls every few seconds and needs one number, so this skips
 // the per-protocol attribution and flow lookups that aggregate() does — and now asks SQLite for the
 // sum rather than reading every row, sorted by balance, in order to add them up in JS.
-export const total = () => db.totalBalance();
+export const total = () => db.totalBalance() - db.balanceOfAddresses(walletAddresses());
 
 // TVL movers — today's level against `daysBack` ago, per protocol. Drives the daily rankings.
 export function movers(daysBack = 1) {
@@ -386,12 +488,14 @@ export function detail(id, opts = {}) {
   const agg = aggregate();
   const p = agg.protocols.find((x) => x.id === id);
   if (!p) return null;
-  const contracts = p.contracts.map((address) => {
+  const contracts = [...p.contracts, ...derivedAddresses(p.id)].map((address) => {
     const balances = db.balancesForAddress(address);
     const stats = db.addressStats(address);
     return {
       address,
       label: getLabel(address)?.name || null,
+      // 'listed', or the rule and the address that decided it ('factory:0x…', 'implementation:0x…').
+      basis: attributionBasis(address),
       tvl: balances.reduce((a, b) => a + b.balance, 0),
       byToken: Object.fromEntries(balances.map((b) => [b.token, b.balance])),
       windowVolume: stats?.volume || 0,
@@ -507,6 +611,9 @@ export function snapshot() {
 // Same warm-up reasoning as entities.js: on a cold start there are no ranked addresses yet, so
 // poll quickly until there is something to scan, then settle into the slow cycle.
 export function start() {
+  // Attributions already verified are known before the first scan, so a restart never shows a pool
+  // as unnamed for the minutes it takes to re-ask.
+  try { setDerivedAttributions(db.derivedAttributions()); } catch (e) { console.error('[tvl] attributions:', e.message); }
   const tick = async () => {
     await refresh();
     const warm = db.getTop(1).length > 0;

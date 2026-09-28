@@ -275,14 +275,23 @@
     same method would be worthless; here it is the direct measurement.</p>
     <p><strong>Only contracts count.</strong> Contract-ness comes from <code>eth_getCode</code>, never from a heuristic. A balance sitting in
     a plain wallet is someone's money, not value locked in a protocol, and is excluded.</p>
+    <p><strong>Smart-contract wallets are wallets.</strong> Account abstraction breaks the bytecode test: a smart account has code and is
+    still somebody's wallet. Accounts identified as such — today, EIP-1967 proxies whose implementation is Circle's single-owner modular
+    account — are named on the ecosystem page and kept <em>out</em> of TVL, on their own line. On 28&nbsp;September&nbsp;2026 two of them held
+    $100.8M of the $211M then reported as Arc TVL; from that day the total excludes them, and earlier days are not restated.</p>
     <p><strong>Unattributed value is reported, never hidden.</strong> A contract holding a balance that no registry entry claims is counted
     in the chain total and listed separately as unattributed. We publish the share of TVL we can actually name, next to the total — an
     ecosystem page that quietly drops what it cannot label is understating the chain, and one that assigns it to a plausible protocol is
     inventing data.</p>
     <p><strong>Registry provenance.</strong> Each protocol entry records how we know its contracts: <code>canonical</code> (a deterministic
-    address identical on every EVM chain), <code>team</code> (the operator confirmed it), or <code>observed</code> (we found and classified it
-    ourselves — which is not a claim about who operates it). Only the first two are marked verified. Two entries may never claim the same
-    contract, because that would double-count its balance.</p>
+    address identical on every EVM chain), <code>team</code> (the operator confirmed or published it — its docs, its address book), or
+    <code>observed</code> (we found and classified it ourselves — which is not a claim about who operates it). Only the first two are marked
+    verified. Two entries may never claim the same contract, because that would double-count its balance.</p>
+    <p><strong>Contracts nobody lists one by one.</strong> Pools and smart accounts are created without a registry edit, so two rules
+    attribute them, each on the chain's own answer. A pool belongs to a protocol when that protocol's <em>factory</em>, asked for the pool's
+    tokens and fee (<code>getPool</code> / <code>getPair</code>), returns the pool's address — a contract that only claims the factory is not
+    attributed. A proxy belongs to an entry when its EIP-1967 implementation slot points at the implementation listed for it. Each
+    attributed contract carries the fact that decided it (<code>factory:0x…</code> or <code>implementation:0x…</code>).</p>
     <p><strong>How many contracts are measured, and which.</strong> One pass reads <code>balanceOf</code> for every tracked asset against
     every target, so the number of targets per pass is capped — at <strong>600</strong> — to keep a pass inside the public RPC's rate limit.
     That budget is split rather than spent on the same contracts every time. Registry addresses are always read, because a listed protocol

@@ -220,7 +220,10 @@ function renderNamed(d){
 
   const rows = d.contractDetail || [];
   $('#contractRows').innerHTML = rows.length ? rows.map(c=>
-    '<tr><td><span class="addr">'+esc(c.address)+'</span>'+(c.label?' <span class="badge">'+esc(c.label)+'</span>':'')+'</td>'
+    '<tr><td><span class="addr">'+esc(c.address)+'</span>'+(c.label?' <span class="badge">'+esc(c.label)+'</span>':'')
+      // How the contract came to be attributed: listed by address, or by a rule the chain confirmed.
+      +(c.basis&&c.basis!=='listed'?' <span class="badge" title="Attributed because the chain says so: '+esc(c.basis)+'">'
+        +(c.basis.startsWith('factory:')?'via factory':'via implementation')+'</span>':'')+'</td>'
     + '<td style="font-size:11px;color:var(--ink-3);font-family:var(--mono)">'+esc(Object.keys(c.byToken||{}).join(' · ')||'—')+'</td>'
     + '<td class="r amt">'+compact(c.tvl)+'</td>'
     + '<td class="r amt">'+compact(c.windowVolume)+'</td>'

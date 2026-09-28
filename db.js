@@ -348,6 +348,12 @@ try { db.exec('ALTER TABLE address_meta ADD COLUMN identity_checked INTEGER'); }
 // addresses were marked as nameless while the chain answered "Synthra Perpetual Liquidity Token" for
 // one of them on the very next call. Silence is only evidence after it repeats.
 try { db.exec('ALTER TABLE address_meta ADD COLUMN identity_attempts INTEGER NOT NULL DEFAULT 0'); } catch { /* already present */ }
+// Migration: attribution by rule (protocols.js `factories` / `implementations`), as verified on the
+// chain. `attributed_to` is null when the check ran and matched nothing — an answer, kept so the same
+// contract is not re-asked every pass. `attribution_basis` says which fact decided it.
+for (const col of ['attributed_to TEXT', 'attribution_basis TEXT', 'attribution_checked INTEGER']) {
+  try { db.exec(`ALTER TABLE address_meta ADD COLUMN ${col}`); } catch { /* already present */ }
+}
 
 // How much of the raw transfer stream is retained. This was 1,200 rows, which sounded like a
 // window and was not one: at the ~954k transfers/day the testnet actually does, 1,200 rows is
@@ -1134,6 +1140,16 @@ export function upsertBalances(rows) {
 
 export const balanceRows = () => tvstmt.nonZero.all();
 export const totalBalance = () => tvstmt.totalBalance.get()?.t || 0;
+// Summed balance of a set of addresses — what the dashboard total subtracts for smart-contract wallets.
+export function balanceOfAddresses(addrs) {
+  const list = [...new Set((addrs || []).map((a) => String(a).toLowerCase()))];
+  let t = 0;
+  for (let i = 0; i < list.length; i += 200) {
+    const part = list.slice(i, i + 200);
+    t += db.prepare(`SELECT SUM(balance) AS t FROM tvl WHERE balance > 0 AND address IN (${part.map(() => '?').join(',')})`).get(...part)?.t || 0;
+  }
+  return t;
+}
 export const balancesForAddress = (a) => tvstmt.forAddr.all(String(a).toLowerCase());
 export const knownContracts = (limit = 2000) => tvstmt.contracts.all(limit).map((r) => r.address);
 // How many contracts exist to scan, against how many the cap allows. Published for the same reason
@@ -1193,6 +1209,31 @@ export function addressIdentities(addrs) {
   return out;
 }
 export const markContract = (a, isContract, codeSize) => tvstmt.markCode.run(a, isContract ? 1 : 0, codeSize || 0, Date.now());
+
+// ---- attribution by rule ----
+const atstmt = {
+  set: db.prepare(`INSERT INTO address_meta(address, is_contract, impl, attributed_to, attribution_basis, attribution_checked)
+      VALUES(?, 1, ?, ?, ?, ?)
+    ON CONFLICT(address) DO UPDATE SET impl = COALESCE(excluded.impl, address_meta.impl),
+      attributed_to = excluded.attributed_to, attribution_basis = excluded.attribution_basis,
+      attribution_checked = excluded.attribution_checked`),
+  all: db.prepare(`SELECT address, attributed_to AS protocol, attribution_basis AS basis FROM address_meta
+    WHERE attributed_to IS NOT NULL`),
+};
+export const setAttribution = (address, impl, protocol, basis) =>
+  atstmt.set.run(String(address).toLowerCase(), impl || null, protocol || null, basis || null, Date.now());
+export const derivedAttributions = () => atstmt.all.all();
+// When each address was last checked against the rules, for a set of addresses.
+export function attributionChecked(addrs) {
+  const list = [...new Set((addrs || []).map((a) => String(a).toLowerCase()))];
+  const out = new Map();
+  for (let i = 0; i < list.length; i += 200) {
+    const part = list.slice(i, i + 200);
+    const ps = db.prepare(`SELECT address, attribution_checked FROM address_meta WHERE address IN (${part.map(() => '?').join(',')})`);
+    for (const r of ps.all(...part)) if (r.attribution_checked) out.set(r.address, r.attribution_checked);
+  }
+  return out;
+}
 
 // Queue contracts the watcher saw emitting a Transfer. Deliberately does NOT write address_meta:
 // code size is a fact read from the chain, and inventing a zero here would be indistinguishable
