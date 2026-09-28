@@ -1131,9 +1131,16 @@ function build() {
             warning: { type: 'string', description: 'Present only while atCap is true, spelling out the consequence in prose.' },
             thresholds: {
               type: 'object',
-              description: 'Per-day rates. Visa/Allium exclude an address exceeding 1,000 transactions or $10M of volume in a month; these are the same limits expressed daily, because the retained window is rolling rather than a calendar month.',
-              properties: { transfersPerDay: { type: 'number' }, volumePerDay: { type: 'number' } },
+              description: 'Visa/Allium: an address that sent more than 1,000 transactions or $10M in a 30-day period. Applied to what each address sent (`basis: sent`), over the sent history held: less than 30 days is compared with the monthly limits whole, more with its average monthly rate (the per-day pair).',
+              properties: {
+                basis: { type: 'string', enum: ['sent'] },
+                transfersPerMonth: { type: 'number' }, volumePerMonth: { type: 'number' },
+                transfersPerDay: { type: 'number' }, volumePerDay: { type: 'number' },
+              },
             },
+            sentHistorySince: num('ms. How far back sent history reaches. Under 30 days, fewer addresses reach the monthly limits than will once a month is held, so adjusted volume sits above where it settles.'),
+            seeding: { type: 'boolean', description: 'True while sent history the RPC still serves is being re-read after the rule change.' },
+            ruleSince: num('ms. When the sent / monthly rule took effect; minutes indexed before it were scored under the previous daily-rate rule and are not restated.'),
             window: {
               type: 'object',
               description: [
@@ -1144,7 +1151,7 @@ function build() {
               ].join(' '),
               properties: {
                 perAddress: { type: 'boolean', description: 'Always true. Present so a client written against the old chain-wide window fails loudly rather than reading undefined.' },
-                minDays: { type: 'number', description: 'Floor on an address\'s window. Without it, an address first seen inside one block has a near-zero span and any activity is an infinite rate.' },
+                minDays: { type: 'number', description: 'Floor on an address\'s window: 30 days, the rule\'s own period. Sent history shorter than that is judged against the monthly limits whole.' },
                 blockMs: { type: ['number', 'null'], description: 'Measured average block time, used to convert a block span into days.' },
               },
             },

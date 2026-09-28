@@ -478,15 +478,17 @@ test('fee sampling and the address noise filter', async () => {
   const { noiseLimitsFor, noiseWindowDays, feeMetrics, isNoiseTransfer } = await import('../indexer.js');
   const { NOISE_FILTER } = await import('../constants.js');
 
-  // Thresholds are rates applied to an address's own observation window, and that window never
-  // drops below a full day — otherwise an address first seen inside a single block has a near-zero
-  // span, any activity at all is an infinite rate, and every new address is a bot.
-  assert.equal(noiseWindowDays(900, 900, 500), 1, 'a single-block span uses the one-day floor');
-  assert.equal(noiseWindowDays(null, 900, 500), 1, 'an unknown first block uses the floor too');
-  assert.equal(noiseWindowDays(0, 172800, 500), 1, '172,800 blocks at 500ms is exactly one day');
-  assert.equal(noiseWindowDays(0, 7 * 172800, 500), 7);
-  assert.equal(noiseLimitsFor(7).maxTransfers, NOISE_FILTER.txPerDay * 7);
-  assert.equal(noiseLimitsFor(0).days, 1, 'the limit builder floors the window as well');
+  // The limits are Visa's monthly ones, and a window never drops below a month: sent history shorter
+  // than 30 days is held to the whole monthly limit. With a one-day floor, every address on a young
+  // chain was held to a thirtieth of it (28 Sept 2026: 4,159 flagged instead of 62).
+  const DAY = 172800; // blocks at 500ms
+  assert.equal(noiseWindowDays(900, 900, 500), 30, 'a single-block span is judged as a month');
+  assert.equal(noiseWindowDays(null, 900, 500), 30, 'an unknown first block too');
+  assert.equal(noiseWindowDays(0, 7 * DAY, 500), 30, 'a week of history is still a month');
+  assert.equal(noiseWindowDays(0, 60 * DAY, 500), 60, 'past a month, the span itself');
+  assert.equal(Math.round(noiseLimitsFor(7).maxTransfers), NOISE_FILTER.transfersPerMonth, 'short history: the monthly limit whole');
+  assert.equal(Math.round(noiseLimitsFor(60).maxVolume), 2 * NOISE_FILTER.volumePerMonth, 'two months: twice the monthly limit');
+  assert.equal(noiseLimitsFor(0).days, 30);
 
   // Fee metrics are exact per sampled block and extrapolated to the window; the sample size
   // rides along so a derived rate can't be mistaken for a measured total.
@@ -539,15 +541,25 @@ test('fee sampling and the address noise filter', async () => {
   assert.equal(sum.byToken.EURC.avolume, 200, 'adjusted volume is strictly below real volume here');
   assert.equal(db.getHistory('EURC', minute - 60, 60).at(-1).avolume, 200);
 
-  // A busy address trips the filter; a quiet one does not.
-  const bot = '0x' + 'b'.repeat(40), human = '0x' + 'c'.repeat(40);
+  // A busy sender trips the filter; a quiet one does not, and neither does a busy *receiver*.
+  const bot = '0x' + 'b'.repeat(40), human = '0x' + 'c'.repeat(40), sink = '0x' + 'f'.repeat(40);
   db.applyBatch(new Map(), new Map([
-    [bot, { transfers: 5000, volume: 10, lastBlock: 900, firstBlock: 900 }],  // flagged on frequency alone
-    [human, { transfers: 3, volume: 10, lastBlock: 900, firstBlock: 900 }],
+    [bot, { transfers: 5000, volume: 10, lastBlock: 900, firstBlock: 900, sentTransfers: 5000, sentVolume: 10, sentFirst: 900, sentLast: 900 }],
+    [human, { transfers: 3, volume: 10, lastBlock: 900, firstBlock: 900, sentTransfers: 3, sentVolume: 10, sentFirst: 900, sentLast: 900 }],
+    [sink, { transfers: 5000, volume: 50e6, lastBlock: 900, firstBlock: 900 }],   // only ever received
   ]), []);
   const flagged = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, 500).map((r) => r.address);
-  assert.ok(flagged.includes(bot), 'high-frequency address is flagged');
+  assert.ok(flagged.includes(bot), 'high-frequency sender is flagged');
   assert.ok(!flagged.includes(human), 'a low-activity address is left alone');
+  assert.ok(!flagged.includes(sink), 'receiving is not sending: a deposit address is not infrastructure for what it is sent');
+
+  // A batch in which an address only receives leaves its sent span alone — SQLite's MIN/MAX return
+  // NULL on a NULL argument, which would have erased it.
+  db.applyBatch(new Map(), new Map([[bot, { transfers: 1, volume: 1, lastBlock: 950, firstBlock: 950 }]]), []);
+  const botRow = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, 500).find((r) => r.address === bot);
+  assert.equal(botRow.sentFirstBlock, 900);
+  assert.equal(botRow.sentLastBlock, 900);
+  assert.equal(botRow.sentTransfers, 5000);
 
   // Fee samples are keyed by block, so re-sampling one can't inflate the totals.
   db.insertFeeSamples([{ block: 7001, minute, fees: 0.5, txs: 4, gasUsed: 100000 }]);
@@ -1311,43 +1323,57 @@ test('a range is timestamped between its own two block headers', async () => {
   assert.equal(chunkClock(600, 100, 1000, 1250), null, 'a reversed range is refused');
 });
 
-// ---- the noise filter measures a rate, over the window it says it measures ----
-test('an address is judged over its own observed span, not over the retained window', async () => {
+// ---- the noise filter applies the rule it publishes: what an address sent, per 30 days ----
+test('an address is judged on what it sent, against the monthly limits', async () => {
   const db = await import('../db.js');
   const { NOISE_FILTER } = await import('../constants.js');
-
-  // Two addresses with *identical* totals, seen over different spans. At 500ms blocks, 172,800
-  // blocks is one day.
-  const day = 172800;
-  const brief = '0x' + 'd'.repeat(40);   // 200 transfers inside one day  → 200/day
-  const patient = '0x' + 'e'.repeat(40); // 200 transfers across 30 days  → ~7/day
+  const day = 172800; // blocks at 500ms
+  const at = (base, days) => ({ sentFirst: base, sentLast: base + days * day, firstBlock: base, lastBlock: base + days * day });
+  const a = (c) => '0x' + c.repeat(40);
   db.applyBatch(new Map(), new Map([
-    [brief, { transfers: 200, volume: 1000, lastBlock: 1_000_000 + day, firstBlock: 1_000_000 }],
-    [patient, { transfers: 200, volume: 1000, lastBlock: 2_000_000 + 30 * day, firstBlock: 2_000_000 }],
+    // The 28 Sept regression: $1M sent over 200 transfers in one day is an ordinary busy address under
+    // "1,000 transactions or $10M in 30 days". The daily-rate reading flagged it (~6x a thirtieth).
+    [a('1'), { transfers: 200, volume: 1e6, sentTransfers: 200, sentVolume: 1e6, ...at(1_000_000, 1) }],
+    [a('2'), { transfers: 1500, volume: 1e4, sentTransfers: 1500, sentVolume: 1e4, ...at(1_100_000, 1) }],  // count
+    [a('3'), { transfers: 2, volume: 12e6, sentTransfers: 2, sentVolume: 12e6, ...at(1_200_000, 1) }],      // value
+    [a('4'), { transfers: 2400, volume: 1e5, sentTransfers: 2400, sentVolume: 1e5, ...at(2_000_000, 90) }], // 800 / month
+    [a('5'), { transfers: 6000, volume: 1e5, sentTransfers: 6000, sentVolume: 1e5, ...at(3_000_000, 90) }], // 2,000 / month
   ]), []);
 
-  const flagged = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, 500);
-  const byAddr = new Map(flagged.map((r) => [r.address, r]));
-  assert.ok(byAddr.has(brief), '200 transfers in a day is ~6x the rate limit');
-  assert.ok(!byAddr.has(patient), 'the same 200 transfers spread over a month is an ordinary address');
+  const rows = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, 500);
+  const byAddr = new Map(rows.map((r) => [r.address, r]));
+  assert.ok(!byAddr.has(a('1')), '200 sends in a day is under 1,000 in a month');
+  assert.ok(byAddr.has(a('2')), '1,500 sends in a day is over 1,000 in any month containing it');
+  assert.ok(byAddr.has(a('3')), '$12M sent in a day is over $10M in any month containing it');
+  assert.ok(!byAddr.has(a('4')), 'past a month, the average monthly rate: 800 is under the limit');
+  assert.ok(byAddr.has(a('5')), '2,000 a month on average is over it');
 
-  // This is the regression that matters. Before, both totals were compared against a limit
-  // pro-rated to the *bucket* coverage — which prune() caps at seven days — so the denominator was
-  // the same for both and the patient address was flagged too. Worse, the denominator stopped
-  // growing at seven days while the numerators kept accumulating, so an ordinary address became a
-  // bot purely by the deployment staying up, and adjusted volume drifted downwards with nothing
-  // saying so. /methodology claimed the rate was measured over the window we hold; now it is.
-  const row = byAddr.get(brief);
-  assert.equal(row.windowDays, 1, 'the flagged address carries the window it was judged over');
-  assert.equal(row.maxTransfers, NOISE_FILTER.txPerDay * 1, 'and the limit derived from it');
-  assert.ok(row.transfers > row.maxTransfers, 'which is the comparison that flagged it');
-
-  // The published rule is auditable per address: every flagged row states its own limits, so a
-  // reader can redo the arithmetic without knowing anything about our retention.
-  for (const r of flagged) {
-    assert.ok(r.windowDays >= 1, 'no window is ever below the one-day floor');
-    assert.ok(r.transfers > r.maxTransfers || r.volume > r.maxVolume, `${r.address} breaches a stated limit`);
+  // Every flagged row carries what it was judged on, so the arithmetic can be redone from the API.
+  const r2 = byAddr.get(a('2'));
+  assert.equal(r2.windowDays, 30);
+  assert.equal(Math.round(r2.maxTransfers), NOISE_FILTER.transfersPerMonth);
+  assert.ok(r2.spanDays >= 0.99 && r2.spanDays <= 1.01, 'and the history actually held, unfloored');
+  for (const r of rows) {
+    assert.ok(r.windowDays >= NOISE_FILTER.windowDays, 'no window is ever below a month');
+    assert.ok(r.sentTransfers > r.maxTransfers || r.sentVolume > r.maxVolume, `${r.address} breaches a stated limit`);
   }
+
+  // The seed adds sent history to rows the index holds, and only to those.
+  const { sentBySender } = await import('../indexer.js');
+  const TOK = '0x' + '7'.repeat(40);
+  const pad = (x) => '0x' + x.slice(2).padStart(64, '0');
+  const log = (from, to, units, block) => ({ address: TOK, topics: ['0xddf2', pad(from), pad(to)], data: '0x' + BigInt(units).toString(16), blockNumber: '0x' + block.toString(16) });
+  const ZERO = '0x' + '0'.repeat(40);
+  const s = sentBySender([log(a('1'), a('9'), 5e6, 10), log(a('1'), a('9'), 1e6, 30), log(ZERO, a('1'), 9e6, 20), log(a('6'), a('9'), 1e6, 12)],
+    { [TOK]: { symbol: 'USYC', decimals: 6 } });
+  assert.deepEqual(s.get(a('1')), { n: 2, v: 6, first: 10, last: 30 }, 'sends only; a mint to the address is not a send');
+  db.applySentSeed(s, { sent_test_marker: 7 });
+  const r1 = db.noisyAddresses(NOISE_FILTER.txPerDay, 0.0001, 500).find((r) => r.address === a('1'));
+  assert.equal(r1.sentTransfers, 202, 'added to the live count');
+  assert.equal(r1.sentFirstBlock, 10, 'and the sent span widened to the older block');
+  assert.equal(db.getMetaValue('sent_test_marker'), '7');
+  assert.equal(db.noisyAddresses(NOISE_FILTER.txPerDay, 0.0001, 500).some((r) => r.address === a('6')), false,
+    'an address with no row is not created by the seed');
 });
 
 // ---- history outlives the minute table ----

@@ -253,16 +253,25 @@ export async function handleV1(req, res, u) {
       qualifying: n.qualifying ?? null,
       cap: n.cap ?? null,
       atCap: !!n.atCap,
-      thresholds: { transfersPerDay: n.txPerDay, volumePerDay: n.volumePerDay },
+      // What an address sent, against 1,000 transfers or $10M per 30 days (Visa / Allium). The per-day
+      // pair is the same limits as a rate, applied to addresses held for longer than 30 days.
+      thresholds: {
+        basis: n.basis ?? 'sent',
+        transfersPerMonth: n.transfersPerMonth ?? null, volumePerMonth: n.volumePerMonth ?? null,
+        transfersPerDay: n.txPerDay, volumePerDay: n.volumePerDay,
+      },
+      sentHistorySince: n.sentHistorySince ?? null,
+      seeding: !!n.seeding,
+      ruleSince: n.ruleSince ?? null,
       // Each address is measured over its own observed span — first block seen to last — so there is
       // no single window to report here. `windowDays`, `maxTransfers` and `maxVolume` ride on each
       // address below: those are the limits it was actually judged against. `blockMs` is the only
       // input that turns a block span into days, so it is published rather than assumed.
-      window: { perAddress: true, minDays: n.minWindowDays ?? 1, blockMs: n.blockMs ?? null },
+      window: { perAddress: true, minDays: n.minWindowDays ?? 30, blockMs: n.blockMs ?? null },
       excludedVolume24h: n.excludedVolume24h ?? null,
       excludedShare: n.excludedShare ?? null,
       addresses: n.top || [],
-      note: 'Addresses whose activity rate over their own observed span exceeds the thresholds are treated as infrastructure. A transfer is excluded from adjusted volume only when both of its ends are flagged; see /methodology.',
+      note: 'An address that sent more than 1,000 transfers or $10M in 30 days is treated as infrastructure; history shorter than 30 days is held to the monthly limits whole. A transfer is excluded from adjusted volume only when both of its ends are flagged; see /methodology.',
       ...(n.atCap ? {
         warning: `The flag set is truncated: ${n.qualifying} addresses meet the thresholds but only the top ${n.cap} by volume are flagged. Adjusted volume is therefore a lower bound on what the published rule would exclude, and the cap — not the thresholds — is the binding constraint. Raw and real volume are unaffected.`,
       } : {}),

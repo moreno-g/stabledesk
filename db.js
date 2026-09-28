@@ -328,6 +328,15 @@ try { db.exec('ALTER TABLE addr_stats ADD COLUMN first_from TEXT'); } catch { /*
 // so an existing deployment understates adjusted volume for about a week after this lands, and a
 // fresh database (mainnet) is never affected. Stated on /methodology rather than left to be noticed.
 try { db.exec('ALTER TABLE addr_stats ADD COLUMN first_block INTEGER'); } catch { /* already present */ }
+// Migration: what an address *sent*, apart from what it moved in total. The noise filter judges senders
+// (Visa / Allium: an address that sent more than 1,000 transactions or $10M in 30 days); `transfers`
+// and `volume` count both directions, which flagged exchange deposit addresses for what they received
+// and counted every pass-through dollar twice. The sent span has its own first and last block because
+// sent history starts when this was deployed, not when the address was first seen.
+for (const col of ['sent_transfers INTEGER NOT NULL DEFAULT 0', 'sent_volume REAL NOT NULL DEFAULT 0',
+                   'sent_first_block INTEGER', 'sent_last_block INTEGER']) {
+  try { db.exec(`ALTER TABLE addr_stats ADD COLUMN ${col}`); } catch { /* already present */ }
+}
 // Migration: when this address was last asked what it calls itself. Distinct from `checked`, which the
 // contract-discovery path also writes — so `checked` cannot mean "identity has been probed", and using
 // it as though it did would re-ask every silent contract on every pass, burning the whole per-pass
@@ -401,12 +410,23 @@ const stmt = {
   pruneFlows: db.prepare('DELETE FROM cctp_flows WHERE minute < ?'),
   // first_from and first_block are written once and never overwritten — the first is who funded
   // the address, the second is when we started being able to measure a rate for it at all.
-  upAddr: db.prepare(`INSERT INTO addr_stats(address, transfers, volume, last_block, first_from, first_block) VALUES(?, ?, ?, ?, ?, ?)
+  // Multi-argument MIN/MAX return NULL if any argument is NULL, so every sent bound is COALESCEd both
+  // ways: a batch in which an address only received must leave its sent span exactly as it was.
+  upAddr: db.prepare(`INSERT INTO addr_stats(address, transfers, volume, last_block, first_from, first_block,
+      sent_transfers, sent_volume, sent_first_block, sent_last_block) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(address) DO UPDATE SET
       transfers = transfers + excluded.transfers, volume = volume + excluded.volume,
       last_block = MAX(last_block, excluded.last_block),
       first_from = COALESCE(addr_stats.first_from, excluded.first_from),
-      first_block = MIN(COALESCE(addr_stats.first_block, excluded.first_block), excluded.first_block)`),
+      first_block = MIN(COALESCE(addr_stats.first_block, excluded.first_block), excluded.first_block),
+      sent_transfers = sent_transfers + excluded.sent_transfers, sent_volume = sent_volume + excluded.sent_volume,
+      sent_first_block = MIN(COALESCE(addr_stats.sent_first_block, excluded.sent_first_block), COALESCE(excluded.sent_first_block, addr_stats.sent_first_block)),
+      sent_last_block = MAX(COALESCE(addr_stats.sent_last_block, excluded.sent_last_block), COALESCE(excluded.sent_last_block, addr_stats.sent_last_block))`),
+  // The sent-history seed only adds to rows the live index already holds: every address active inside
+  // the window it can re-read has one, and one that doesn't has nothing to be judged on.
+  seedSent: db.prepare(`UPDATE addr_stats SET sent_transfers = sent_transfers + ?, sent_volume = sent_volume + ?,
+      sent_first_block = MIN(COALESCE(sent_first_block, ?), ?), sent_last_block = MAX(COALESCE(sent_last_block, ?), ?)
+    WHERE address = ?`),
   insRecent: db.prepare('INSERT INTO recent(block, ts, token, frm, too, amount) VALUES(?, ?, ?, ?, ?, ?)'),
   trimRecent: db.prepare('DELETE FROM recent WHERE id <= (SELECT MAX(id) FROM recent) - ?'),
   trimRecentTs: db.prepare('DELETE FROM recent WHERE ts < ?'),
@@ -448,19 +468,25 @@ const stmt = {
   // to days at the measured block time and floored at one day — not over the retained bucket
   // window. Those two were silently different: an address seen for two months carried two months
   // of volume into a comparison against a seven-day limit.
-  noisy: db.prepare(`SELECT address, transfers, volume, first_block, last_block, days FROM (
-      SELECT address, transfers, volume, first_block, last_block,
-             MAX(1.0, (last_block - COALESCE(first_block, last_block)) * ? / 86400000.0) AS days
-        FROM addr_stats)
-    WHERE transfers > ? * days OR volume > ? * days
-    ORDER BY volume DESC LIMIT ${NOISE_SET_MAX}`),
+  // Senders only, judged on what they sent. `span` is the sent history actually held; `days` floors it
+  // at the rule's window, so an address observed for less than a month is held to the full monthly
+  // limit — which is what "more than $10M in 30 days" means on history shorter than 30 days.
+  noisy: db.prepare(`SELECT address, transfers, volume, sent_transfers, sent_volume, first_block, last_block,
+             sent_first_block, sent_last_block, span, days FROM (
+      SELECT address, transfers, volume, sent_transfers, sent_volume, first_block, last_block, sent_first_block, sent_last_block,
+             (sent_last_block - COALESCE(sent_first_block, sent_last_block)) * ? / 86400000.0 AS span,
+             MAX(?, (sent_last_block - COALESCE(sent_first_block, sent_last_block)) * ? / 86400000.0) AS days
+        FROM addr_stats WHERE sent_transfers > 0)
+    WHERE sent_transfers > ? * days OR sent_volume > ? * days
+    ORDER BY sent_volume DESC LIMIT ${NOISE_SET_MAX}`),
   // How many the thresholds actually select, uncapped. Kept as its own query so the difference
   // between "selected by the published rule" and "flagged after the cap" is a measured number
   // rather than an inference from the set landing suspiciously round.
   noisyCount: db.prepare(`SELECT COUNT(*) AS c FROM (
-      SELECT transfers, volume, MAX(1.0, (last_block - COALESCE(first_block, last_block)) * ? / 86400000.0) AS days
-        FROM addr_stats)
-    WHERE transfers > ? * days OR volume > ? * days`),
+      SELECT sent_transfers, sent_volume,
+             MAX(?, (sent_last_block - COALESCE(sent_first_block, sent_last_block)) * ? / 86400000.0) AS days
+        FROM addr_stats WHERE sent_transfers > 0)
+    WHERE sent_transfers > ? * days OR sent_volume > ? * days`),
   zeroAdj: db.prepare('UPDATE buckets SET avolume = 0, acnt = 0 WHERE minute BETWEEN ? AND ?'),
   setAdj: db.prepare('UPDATE buckets SET avolume = ?, acnt = ? WHERE minute = ? AND token = ?'),
   insFee: db.prepare('INSERT OR IGNORE INTO fee_samples(block, minute, fees, txs, gas_used) VALUES(?, ?, ?, ?, ?)'),
@@ -512,7 +538,10 @@ export function applyBatch(buckets, addrs, recents, flows = null) {
     // In the same transaction as the buckets: a crash between the two would leave the per-chain
     // split disagreeing with the CCTP totals it is a breakdown of.
     if (flows) for (const f of flows.values()) stmt.upFlow.run(f.minute, f.token, f.dir, f.domain, f.amount, f.cnt);
-    for (const [addr, x] of addrs) stmt.upAddr.run(addr, x.transfers, x.volume, x.lastBlock, x.firstFrom || null, x.firstBlock ?? x.lastBlock ?? null);
+    for (const [addr, x] of addrs) {
+      stmt.upAddr.run(addr, x.transfers, x.volume, x.lastBlock, x.firstFrom || null, x.firstBlock ?? x.lastBlock ?? null,
+        x.sentTransfers || 0, x.sentVolume || 0, x.sentFirst ?? null, x.sentLast ?? null);
+    }
     for (const r of recents) stmt.insRecent.run(r.block, r.ts, r.token, r.frm, r.too, r.amount);
     for (const t of topOf(recents)) stmt.insTop.run(t.day, t.token, t.amount, t.frm, t.too, t.block, t.ts);
     // The row cap bounds disk between prunes; prune() applies the time window. Both exist: the cap
@@ -645,21 +674,44 @@ export function getSummary(since) {
 // Addresses whose activity *rate* exceeds the published per-day thresholds. `blockMs` converts each
 // address's observed block span into days; the limits it was actually judged against come back on
 // the row, so a flagged address can be audited without re-deriving the arithmetic.
-export function noisyAddresses(txPerDay, volumePerDay, blockMs) {
-  return stmt.noisy.all(Math.max(1, blockMs), txPerDay, volumePerDay).map((r) => ({
+export function noisyAddresses(txPerDay, volumePerDay, blockMs, minDays = 30) {
+  const ms = Math.max(1, blockMs);
+  return stmt.noisy.all(ms, minDays, ms, txPerDay, volumePerDay).map((r) => ({
     address: r.address,
+    // Both directions, for context; the rule reads the sent pair below.
     transfers: r.transfers,
     volume: r.volume,
+    sentTransfers: r.sent_transfers,
+    sentVolume: r.sent_volume,
     firstBlock: r.first_block ?? null,
     lastBlock: r.last_block,
-    // The address's own observation window, and the two limits derived from it.
+    sentFirstBlock: r.sent_first_block ?? null,
+    sentLastBlock: r.sent_last_block ?? null,
+    // How much sent history is held, and the window it was judged over (never less than the rule's).
+    spanDays: r.span,
     windowDays: r.days,
     maxTransfers: txPerDay * r.days,
     maxVolume: volumePerDay * r.days,
   }));
 }
-export const noisyAddressCount = (txPerDay, volumePerDay, blockMs) =>
-  stmt.noisyCount.get(Math.max(1, blockMs), txPerDay, volumePerDay).c;
+export const noisyAddressCount = (txPerDay, volumePerDay, blockMs, minDays = 30) => {
+  const ms = Math.max(1, blockMs);
+  return stmt.noisyCount.get(minDays, ms, txPerDay, volumePerDay).c;
+};
+
+// One chunk of the sent-history seed, with its progress marker, in one transaction — the same
+// contract as applyCctpBackfill: a crash can neither lose a chunk nor let a restart add it twice.
+export function applySentSeed(senders, meta) {
+  db.exec('BEGIN');
+  try {
+    for (const [addr, x] of senders) stmt.seedSent.run(x.n, x.v, x.first, x.first, x.last, x.last, addr);
+    for (const [k, v] of Object.entries(meta)) stmt.setMeta.run(k, String(v));
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
 
 // ---- fee samples (exact per-block fees, sampled) ----
 export function insertFeeSamples(rows) {
