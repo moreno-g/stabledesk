@@ -449,6 +449,13 @@ export function medianFromBuckets(rows) {
 // every transaction's fee, including those paid by high-frequency addresses. Dividing all fees
 // by only the non-bot volume would price the whole network's cost against a fraction of its
 // throughput and wildly overstate it.
+// Pure: the volume the fee total is divided by. Fees are paid in the gas token, so the ratio is only
+// a price when the volume is in the same currency — real volume of the base denomination alone.
+// It used to be every token's real volume added together: on 28 Sept 2026 that put 23.3M of EURC
+// into a 97.0M denominator, and the headline "cost to move $1M" read 24% too low. No base
+// denomination means no ratio (0 → null downstream), never a mixed-currency one.
+export const feeVolume = (volByDenomination, base) => (base && volByDenomination?.[base]?.rvolume) || 0;
+
 export function feeMetrics(sample, blocksInWindow, blocksPerDay, volumeMoved, buckets = null) {
   if (!sample?.blocks) return null;
   const medianSampledTxs = (buckets || []).reduce((n, r) => n + (r.count || 0), 0);
@@ -1165,13 +1172,14 @@ function dbDerived({ frozen = false } = {}) {
     db.feeStats(asOf - feeWindowSec),
     feeWindowSec / blockSec,
     86400 / blockSec,
-    summary.rvolume,
+    feeVolume(volByDenomination, BASE_DENOMINATION),
     db.feeBucketCounts(asOf - feeWindowSec),
   );
 
   return {
     summary24h: { ...summary, byDenomination: volByDenomination },
-    fees: fees ? { ...fees, windowSec: feeWindowSec } : null,
+    // The currency perMillionMoved is priced in: the gas token's, and the only volume it divides by.
+    fees: fees ? { ...fees, windowSec: feeWindowSec, volumeDenomination: BASE_DENOMINATION } : null,
     noise: {
       flagged: noisyRows.length,
       // What the thresholds select vs what was actually used. Equal in the ordinary case; when

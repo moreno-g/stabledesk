@@ -693,7 +693,7 @@ function renderFees(f){
   el.innerHTML=`
     <div class="e hero"><div class="lab">Cost to move $1M</div>
       <div class="val">${usd(f.perMillionMoved,2)}</div>
-      <div class="sub">total network fees paid per $1M of real stablecoin volume moved</div></div>
+      <div class="sub">total network fees paid per $1M of real dollar-stablecoin volume moved</div></div>
     <div class="e"><div class="lab">Avg fee / tx</div><div class="val">${usd(f.perTx,5)}</div></div>
     <div class="e"><div class="lab">Fees / day</div><div class="val">${usd(f.perDay,2)}</div><div class="sub">run rate</div></div>
     <div class="e"><div class="lab">Avg gas / tx</div><div class="val">${f.avgGasPerTx!=null?compact(f.avgGasPerTx):'—'}</div></div>`;

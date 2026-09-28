@@ -501,6 +501,14 @@ test('fee sampling and the address noise filter', async () => {
   assert.equal(m.sampleCoverage, 0.1);
   assert.equal(feeMetrics({ blocks: 1, fees: 1, txs: 0, gasUsed: 0 }, 1, 1, 0).perMillionMoved, null, 'no volume → no ratio');
 
+  // The denominator is the gas token's currency only. 28 Sept 2026: USD 73.69M, EUR 23.35M — adding the
+  // euros priced a dollar fee against 97.04M and read ~24% low.
+  const { feeVolume } = await import('../indexer.js');
+  const byDen = { USD: { rvolume: 73.69e6 }, EUR: { rvolume: 23.35e6 } };
+  assert.equal(feeVolume(byDen, 'USD'), 73.69e6, 'dollar fees over dollar volume');
+  assert.equal(feeVolume(byDen, null), 0, 'no base denomination → no ratio, never a mixed one');
+  assert.equal(feeVolume({ EUR: { rvolume: 5 } }, 'USD'), 0, 'no volume in the base currency → no ratio');
+
   // The flag set is capped for memory safety, and the cap is a published threshold like any
   // other. It was found binding in production — exactly 5,000 flagged, which meant the adjusted
   // figure was governed by the cap rather than by the documented rate limits, with nothing on the

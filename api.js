@@ -230,6 +230,8 @@ export async function handleV1(req, res, u) {
       perBlock: s.fees.perBlock,
       perDay: s.fees.perDay,
       perMillionMoved: s.fees.perMillionMoved,
+      // Fees are in the gas token, so the ratio divides by that currency's real volume only.
+      perMillionMovedDenomination: s.fees.volumeDenomination ?? null,
       inWindow: s.fees.inWindow,
       windowSec: s.fees.windowSec,
       avgGasPerTx: s.fees.avgGasPerTx,
