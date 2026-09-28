@@ -1140,15 +1140,22 @@ export function upsertBalances(rows) {
 
 export const balanceRows = () => tvstmt.nonZero.all();
 export const totalBalance = () => tvstmt.totalBalance.get()?.t || 0;
-// Summed balance of a set of addresses — what the dashboard total subtracts for smart-contract wallets.
-export function balanceOfAddresses(addrs) {
+// Balances per token, chain-wide and for a set of addresses. Per token, because a total is only a
+// quantity of something within one currency; the caller groups tokens by denomination.
+export function balanceByToken() {
+  const out = {};
+  for (const r of db.prepare('SELECT token, SUM(balance) AS t FROM tvl WHERE balance > 0 GROUP BY token').all()) out[r.token] = r.t;
+  return out;
+}
+export function balanceOfAddressesByToken(addrs) {
   const list = [...new Set((addrs || []).map((a) => String(a).toLowerCase()))];
-  let t = 0;
+  const out = {};
   for (let i = 0; i < list.length; i += 200) {
     const part = list.slice(i, i + 200);
-    t += db.prepare(`SELECT SUM(balance) AS t FROM tvl WHERE balance > 0 AND address IN (${part.map(() => '?').join(',')})`).get(...part)?.t || 0;
+    const rows = db.prepare(`SELECT token, SUM(balance) AS t FROM tvl WHERE balance > 0 AND address IN (${part.map(() => '?').join(',')}) GROUP BY token`).all(...part);
+    for (const r of rows) out[r.token] = (out[r.token] || 0) + r.t;
   }
-  return t;
+  return out;
 }
 export const balancesForAddress = (a) => tvstmt.forAddr.all(String(a).toLowerCase());
 export const knownContracts = (limit = 2000) => tvstmt.contracts.all(limit).map((r) => r.address);

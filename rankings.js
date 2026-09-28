@@ -11,7 +11,7 @@
 import * as db from './db.js';
 import * as tvl from './tvl.js';
 import { CHAIN } from './chains.js';
-import { RANKING_TOP_N, RANKING_MIN_MOVE_PCT } from './constants.js';
+import { RANKING_TOP_N, RANKING_MIN_MOVE_PCT, BASE_DENOMINATION, sumByDenomination } from './constants.js';
 
 const DAY = 86400;
 const today = () => Math.floor(Date.now() / 1000 / DAY) * DAY;
@@ -36,10 +36,18 @@ export function daily() {
 
   const live = agg.protocols.filter((p) => p.tvl > 0 || p.windowVolume > 0);
 
+  // Ranked and shared in the base denomination only. A share of a total that adds euros to dollars
+  // is a share of nothing; each protocol's other currencies ride along, unranked.
+  const base = BASE_DENOMINATION;
+  const chainBase = agg.totals.byDenomination?.[base]?.tvl || 0;
   const byTvl = live
-    .filter((p) => p.tvl > 0)
+    .filter((p) => (p.tvlByDenomination?.[base] || 0) > 0)
     .slice(0, RANKING_TOP_N)
-    .map((p, i) => ({ rank: i + 1, id: p.id, name: p.name, category: p.category, tvl: p.tvl, share: agg.totals.tvl ? p.tvl / agg.totals.tvl : 0 }));
+    .map((p, i) => ({
+      rank: i + 1, id: p.id, name: p.name, category: p.category, denomination: base,
+      tvl: p.tvlByDenomination[base], share: chainBase ? p.tvlByDenomination[base] / chainBase : 0,
+      tvlByDenomination: p.tvlByDenomination,
+    }));
 
   const byVolume = [...live]
     .filter((p) => p.windowVolume > 0)
@@ -54,9 +62,11 @@ export function daily() {
     day: isoDay(today()),
     network: CHAIN.id,
     chain: {
-      tvl: agg.totals.tvl,
-      attributedShare: agg.totals.attributedShare,
-      volume24h: summary.volume,
+      denomination: base,
+      tvl: chainBase,
+      attributedShare: agg.totals.byDenomination?.[base]?.attributedShare ?? 0,
+      tvlByDenomination: agg.totals.byDenomination,
+      volume24h: sumByDenomination(Object.fromEntries(Object.entries(summary.byToken || {}).map(([t, x]) => [t, x.volume])))[base] || 0,
       transfers24h: summary.transfers,
       // Adjusted volume is the figure /methodology defends; both are reported so the digest can
       // never be accused of quoting whichever number looks bigger.
@@ -66,7 +76,7 @@ export function daily() {
     byTvl,
     byVolume,
     movers: moves.slice(0, RANKING_TOP_N).map((m) => ({ ...m, pctLabel: pct(m.pct) })),
-    unnamed: { count: agg.candidates.length, tvl: agg.totals.unattributed },
+    unnamed: { count: agg.candidates.length, tvl: agg.totals.byDenomination?.[base]?.unattributed ?? 0, denomination: base },
   };
 }
 
@@ -77,12 +87,15 @@ export function digest(r = daily()) {
   const net = CHAIN.isTestnet ? ' (testnet)' : '';
   L.push(`Arc ecosystem${net} — ${r.day}`);
   L.push('');
-  L.push(`TVL ${compact(r.chain.tvl)} across ${r.protocolsRanked} protocol${r.protocolsRanked === 1 ? '' : 's'} · 24h volume ${compact(r.chain.volume24h)}`);
+  // Every figure names its currency: the digest is copied into posts, where an unlabelled number
+  // gets read as dollars whatever it adds up.
+  const cur = r.chain.denomination ? ` ${r.chain.denomination}` : '';
+  L.push(`TVL ${compact(r.chain.tvl)}${cur} across ${r.protocolsRanked} protocol${r.protocolsRanked === 1 ? '' : 's'} · 24h volume ${compact(r.chain.volume24h)}${cur}`);
 
   if (r.byTvl.length) {
     L.push('');
     L.push('Top by TVL');
-    for (const p of r.byTvl) L.push(`${p.rank}. ${p.name} — ${compact(p.tvl)} (${(p.share * 100).toFixed(1)}%)`);
+    for (const p of r.byTvl) L.push(`${p.rank}. ${p.name} — ${compact(p.tvl)}${cur} (${(p.share * 100).toFixed(1)}%)`);
   }
 
   if (r.movers.length) {
@@ -102,7 +115,7 @@ export function digest(r = daily()) {
 
   if (r.unnamed.count) {
     L.push('');
-    L.push(`${compact(r.unnamed.tvl)} sits in ${r.unnamed.count} contract${r.unnamed.count === 1 ? '' : 's'} we haven't named yet. Know one? stabledesk.xyz/ecosystem`);
+    L.push(`${compact(r.unnamed.tvl)}${cur} sits in ${r.unnamed.count} contract${r.unnamed.count === 1 ? '' : 's'} we haven't named yet. Know one? stabledesk.xyz/ecosystem`);
   }
   return L.join('\n');
 }

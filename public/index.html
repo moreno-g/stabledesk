@@ -620,7 +620,8 @@ function denomTile(label, by, base, pick, note){
   // first thing anyone reads. Measured flow goes first; supply goes last, labelled.
   const kpis=[
     denomTile('24h volume', s.byDenomination, d.baseDenomination, (g)=>g.rvolume, win),
-    ['TVL',compact(d.tvl),'held by contracts'],
+    // Per currency, like supply and volume: the base denomination leads, other currencies are named, never added.
+    (d.tvlByDenomination ? denomTile('TVL', d.tvlByDenomination, d.baseDenomination, (g)=>g.tvl, 'held by contracts') : ['TVL','—','held by contracts']),
     ['Active addresses · 1h',compact(d.activeAddresses1h),d.degraded?'last indexed hour':''],
     denomTile('Stable supply', d.byDenomination, d.baseDenomination, (g)=>g.supply, IS_TESTNET?'faucet-inflated':''),
   ].map(([l,v,u])=>`<div class="kpi"><div class="lab">${l}</div><div class="val">${v}<span class="unit">${u}</span></div></div>`).join('');

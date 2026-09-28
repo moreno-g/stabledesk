@@ -320,6 +320,7 @@ function build() {
         get: {
           tags: ['Ecosystem'], operationId: 'getTvlHistory',
           summary: 'Daily TVL series',
+          description: 'One currency per series: the base denomination, stated in `denomination`. The series starts on 28 Sept 2026, when TVL stopped adding euros to dollars and stopped counting smart-contract wallets; earlier days measured something else and are not mixed in.',
           parameters: [
             { name: 'days', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 180, default: 30 } },
             {
@@ -857,6 +858,7 @@ function build() {
             category: { type: 'string', enum: Object.keys(CATEGORIES) },
             tvl: { type: 'number', description: 'Stablecoin balances held by this protocol\'s contracts.' },
             tvlByToken: { type: 'object', additionalProperties: { type: 'number' } },
+            tvlByDenomination: { type: 'object', additionalProperties: { type: 'number' }, description: 'The protocol\'s TVL per currency. Protocols are ranked by the base denomination; `tvl` adds currencies at face value and is kept for existing consumers.' },
             contracts: { type: 'array', items: { type: 'string' }, description: 'Listed contracts. Contracts attributed by a rule are counted in `derivedContracts`.' },
             factories: { type: 'array', items: { type: 'object', properties: { address: { type: 'string' }, type: { type: 'string', enum: ['uniswap-v2', 'uniswap-v3'] } } }, description: 'A pool is attributed when this factory returns its address for its own tokens and fee.' },
             implementations: { type: 'array', items: { type: 'string' }, description: 'An EIP-1967 proxy is attributed when its implementation slot points here.' },
@@ -899,7 +901,13 @@ function build() {
         TvlTotals: {
           type: 'object',
           properties: {
-            tvl: { type: 'number', description: 'Chain-wide total, attributed and unattributed together. Excludes smart-contract wallets (`smartWallets`) since 28 Sept 2026.' },
+            tvl: { type: 'number', description: 'Face values added across every tracked token WITH NO currency conversion — dollars and euros in one sum. Kept for existing consumers; `byDenomination` carries the figures that are a quantity of something. Excludes smart-contract wallets since 28 Sept 2026.' },
+            byDenomination: {
+              type: 'object',
+              description: 'TVL per currency (ISO code), never summed across currencies: tvl, attributed, unattributed, attributedShare and the tokens in the group.',
+              additionalProperties: { type: 'object', properties: { tvl: { type: 'number' }, attributed: { type: 'number' }, unattributed: { type: 'number' }, attributedShare: { type: 'number' }, tokens: { type: 'array', items: { type: 'string' } } } },
+            },
+            baseDenomination: { type: ['string', 'null'], description: 'The currency gas is paid in; every ranking and share is computed in it.' },
             byToken: { type: 'object', additionalProperties: { type: 'number' } },
             smartWallets: {
               type: 'object',

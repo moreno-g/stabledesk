@@ -51,6 +51,26 @@ export const DENOMINATION = {
 };
 export const denominationOf = (symbol) => DENOMINATION[symbol] ?? null;
 
+// The denomination the chain itself charges in, read from the token marked as native gas in the
+// network profile. Null if no token is so marked, in which case nothing downstream assumes one.
+// Every headline that has to pick one currency picks this one: supply, volume, fees and TVL.
+export const BASE_DENOMINATION = (() => {
+  const gas = Object.values(CHAIN.tokens).find((t) => /gas/i.test(t.kind || ''));
+  return gas ? denominationOf(gas.symbol) : null;
+})();
+
+// Pure: face values per token → per denomination. A token with no declared denomination lands in
+// no group, so it can never be added to a currency it is not in.
+export function sumByDenomination(byToken) {
+  const out = {};
+  for (const [sym, v] of Object.entries(byToken || {})) {
+    const d = denominationOf(sym);
+    if (!d || !v) continue;
+    out[d] = (out[d] || 0) + v;
+  }
+  return out;
+}
+
 // CCTP domain → chain, from Circle's published table (developers.circle.com/cctp/concepts/
 // supported-chains-and-domains, read 18 Sept 2026). The domain is what DepositForBurn and
 // MessageReceived carry on-chain; the name is only a label. A domain missing here is published as

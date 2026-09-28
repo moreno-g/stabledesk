@@ -349,7 +349,9 @@ const server = http.createServer(async (req, res) => {
   // accompany is only rebuilt when a tick completes. Without it the page cannot tell a halted chain
   // from a catch-up, and was captioning the latter 'no blocks being produced' — a false statement
   // about Arc, made by us, on a chain that was running fine.
-  if (path === '/api/state') return json(res, { ...live.snapshot, chain: chainStatus(), index: indexProgress(), tvl: TVL_ENABLED ? tvl.total() : null });
+  if (path === '/api/state') return json(res, { ...live.snapshot, chain: chainStatus(), index: indexProgress(), tvl: TVL_ENABLED ? tvl.total() : null,
+    // Per currency — what the TVL tile shows. `tvl` above adds euros to dollars and is kept for old clients.
+    tvlByDenomination: TVL_ENABLED ? tvl.totalByDenomination() : null });
   if (path === '/api/alerts') return json(res, { feed: alertFeed });
   if (path === '/api/history') {
     const token = (u.searchParams.get('token') || 'ALL').toUpperCase();

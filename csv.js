@@ -16,6 +16,13 @@ function cell(v) {
 
 // `columns` is an array of [header, accessor] pairs — an explicit projection, so adding a field to
 // an API response can never silently change the shape of somebody's saved CSV import.
+import { BASE_DENOMINATION } from './constants.js';
+
+// The base-denomination figure and the rest, per currency, in one cell — a spreadsheet column that adds
+// euros to dollars is the failure the per-denomination fields exist to prevent.
+const baseOf = (by) => by?.[BASE_DENOMINATION] ?? 0;
+const others = (by) => Object.entries(by || {}).filter(([d]) => d !== BASE_DENOMINATION).map(([d, v]) => `${d}:${v}`).join(' ');
+
 export function toCsv(rows, columns) {
   const head = columns.map(([h]) => cell(h)).join(',');
   const body = (rows || []).map((r) => columns.map(([, get]) => cell(typeof get === 'function' ? get(r) : r[get])).join(','));
@@ -41,7 +48,10 @@ export const PROTOCOL_COLUMNS = [
   ['name', 'name'],
   ['vendor', 'vendor'],
   ['category', 'category'],
-  ['tvl', 'tvl'],
+  ['tvl_base', (r) => baseOf(r.tvlByDenomination)],
+  ['base_denomination', () => BASE_DENOMINATION],
+  ['tvl_other_denominations', (r) => others(r.tvlByDenomination)],
+  ['tvl_face_value_all_tokens', 'tvl'],
   ['window_volume', 'windowVolume'],
   ['window_transfers', 'windowTransfers'],
   ['contracts', (r) => (r.contracts || []).join(' ')],
@@ -60,7 +70,10 @@ export const CANDIDATE_COLUMNS = [
   // actually work the identification queue in, and a spreadsheet of bare hex is not workable.
   ['self_name', 'selfName'],
   ['self_symbol', 'selfSymbol'],
-  ['tvl', 'tvl'],
+  ['tvl_base', (r) => baseOf(r.tvlByDenomination)],
+  ['base_denomination', () => BASE_DENOMINATION],
+  ['tvl_other_denominations', (r) => others(r.tvlByDenomination)],
+  ['tvl_face_value_all_tokens', 'tvl'],
   ['volume', 'volume'],
   ['transfers', 'transfers'],
 ];
@@ -68,4 +81,5 @@ export const CANDIDATE_COLUMNS = [
 export const TVL_HISTORY_COLUMNS = [
   ['day', (r) => new Date(r.day * 1000).toISOString().slice(0, 10)],
   ['tvl', 'tvl'],
+  ['denomination', () => BASE_DENOMINATION],
 ];
