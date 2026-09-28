@@ -726,6 +726,88 @@ test('CCTP pair and per-chain flows round-trip through the aggregates, backfill 
   assert.equal(db.cctpFlows(oldMin - 60).filter((x) => x.domain === 6).length, 0, 'the minute row is gone from the rolling table');
 });
 
+// ---- attribution by rule: factories and implementations, on the chain's own answer ----
+test('a pool is attributed only when its factory confirms it, a proxy only by its implementation slot', async () => {
+  const { attributeFromChain } = await import('../tvl.js');
+  const V3 = '0x' + 'f'.repeat(40), IMPL = '0x' + 'd'.repeat(40), POOL = '0x' + '1'.repeat(40), OTHER = '0x' + '2'.repeat(40);
+  const rules = { factories: new Map([[V3, { protocol: 'uniswap', type: 'uniswap-v3' }]]), implementations: new Map([[IMPL, 'circle-msca-accounts']]) };
+  const w = (a) => '0x' + a.slice(2).padStart(64, '0');
+
+  // The factory returned this pool's address when asked for (token0, token1, fee): attributed.
+  assert.deepEqual(attributeFromChain(POOL, { factory: w(V3) }, rules, new Map([[POOL, POOL]])),
+    { protocol: 'uniswap', basis: `factory:${V3}`, impl: null });
+  // A contract that *says* its factory is Uniswap's, but the factory returns another address: not attributed.
+  assert.equal(attributeFromChain(POOL, { factory: w(V3) }, rules, new Map([[POOL, OTHER]])).protocol, null,
+    'a self-declared factory is not evidence');
+  assert.equal(attributeFromChain(POOL, { factory: w(V3) }, rules).protocol, null, 'unverified is unattributed');
+  // An unknown factory is nobody's.
+  assert.equal(attributeFromChain(POOL, { factory: w(OTHER) }, rules, new Map([[POOL, POOL]])).protocol, null);
+  // An EIP-1967 proxy pointing at a listed implementation.
+  assert.equal(attributeFromChain(POOL, { impl: w(IMPL) }, rules).protocol, 'circle-msca-accounts');
+  assert.equal(attributeFromChain(POOL, { impl: w(OTHER) }, rules).protocol, null);
+  assert.equal(attributeFromChain(POOL, { impl: '0x' + '0'.repeat(64) }, rules).impl, null, 'an empty slot is no implementation');
+
+  // A derived attribution names the address everywhere, but a listed address always wins over it.
+  const { setDerivedAttributions, protocolForAddress, attributionBasis, derivedAddresses } = await import('../protocols.js');
+  const listed = '0xca11bde05977b3631167028862be2a173976ca11';   // Multicall3, listed on both networks
+  setDerivedAttributions([
+    { address: POOL, protocol: 'multicall3', basis: `factory:${V3}` },
+    { address: listed, protocol: 'permit2', basis: 'factory:x' },
+    { address: OTHER, protocol: 'no-such-protocol', basis: 'factory:x' },
+  ]);
+  assert.equal(protocolForAddress(POOL).id, 'multicall3');
+  assert.equal(attributionBasis(POOL), `factory:${V3}`);
+  assert.equal(protocolForAddress(listed).id, 'multicall3', 'the listed entry wins');
+  assert.equal(attributionBasis(listed), 'listed');
+  assert.equal(protocolForAddress(OTHER), null, 'an unknown protocol id attributes nothing');
+  assert.deepEqual(derivedAddresses('multicall3'), [POOL]);
+  setDerivedAttributions([]);
+  assert.equal(protocolForAddress(POOL), null, 'and the set is replaced, not appended to');
+});
+
+test('the Arc mainnet registry loads, with every address claimed once', async () => {
+  // Resolved in a subprocess: the registry is filtered by network at import time.
+  const { execFileSync } = await import('node:child_process');
+  const env = { ...process.env, ARC_NETWORK: 'mainnet', ARC_CHAIN_ID: '5042', ARC_RPC_URLS: 'https://rpc.example',
+    ARC_TOKENS: 'USDC:0x3600000000000000000000000000000000000000:6,EURC:0xbef5f6d51cb62b58e6a8f77868681825c6fe21c1:6',
+    ARC_CCTP_TOKEN_MESSENGER: '0x28b5a0e9c621a5badaa536219b3a228c8168cf5d', ARC_CCTP_MESSAGE_TRANSMITTER: '0x81d40f21f12a8f0e3252bccb954d722d4c464b64',
+    ARC_CCTP_TOKEN_MINTER: '0xfd78ee919681417d192449715b2594ab58f5d002',
+    ARC_GATEWAY_WALLET: '0x77777777dcc4d5a8b6e418fd04d8997ef11000ee', ARC_GATEWAY_MINTER: '0x2222222d7164433c4c09b0b0d809a9b52c04c205' };
+  const out = JSON.parse(execFileSync(process.execPath, ['-e',
+    "import('./protocols.js').then(m=>console.log(JSON.stringify({ids:m.PROTOCOLS.map(p=>p.id),f:[...m.attributionRules().factories.keys()],i:[...m.attributionRules().implementations.keys()],hub:m.protocolForAddress('0x17288dfc86205301064577b98b02b81017e6f79c')?.id,morpho:m.protocolForAddress('0x34cd04070dd72b14e241112f6d83812df5af7fcd')?.id,pm:m.protocolForAddress('0x8366a39cc670b4001a1121b8f6a443a643e40951')?.id})))"],
+    { env, cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' }).toString());
+  for (const id of ['uniswap', 'aave-v4', 'morpho', 'circle-stablefx', 'usyc-teller', 'circle-msca-accounts', 'arc-memo', 'multicall3from', 'circle-cctp', 'circle-gateway']) {
+    assert.ok(out.ids.includes(id), `${id} is on mainnet`);
+  }
+  assert.equal(out.hub, 'aave-v4');
+  assert.equal(out.morpho, 'morpho');
+  assert.equal(out.pm, 'uniswap');
+  assert.equal(out.f.length, 2, 'Uniswap v2 and v3 factories');
+  assert.equal(out.i.length, 1);
+  assert.ok(!out.ids.includes('wrapped-usdc'), 'a testnet-only entry stays off mainnet');
+
+  // Smart-contract wallets have bytecode but are wallets: their balances stay out of TVL, on their own
+  // line, and the dashboard total subtracts them too. Run on a throwaway database under the mainnet
+  // profile, where the wallet entry exists.
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dbFile = join(tmpdir(), `stabledesk-wallets-${process.pid}-${Date.now()}.db`);
+  const agg = JSON.parse(execFileSync(process.execPath, ['-e', `
+    const db = await import('./db.js'); const tvl = await import('./tvl.js'); const p = await import('./protocols.js');
+    const acct = '0x' + 'a'.repeat(40), pool = '0x' + 'b'.repeat(40);
+    p.setDerivedAttributions([{ address: acct, protocol: 'circle-msca-accounts', basis: 'implementation:x' }]);
+    db.upsertBalances([{ address: acct, token: 'USDC', balance: 100 }, { address: '0x17288dfc86205301064577b98b02b81017e6f79c', token: 'USDC', balance: 70 }, { address: pool, token: 'USDC', balance: 5 }]);
+    const a = tvl.computeAggregate();
+    console.log(JSON.stringify({ tvl: a.totals.tvl, wallets: a.totals.smartWallets, total: tvl.total(), ids: a.protocols.map((x) => x.id), cand: a.candidates.map((c) => c.address) }));`],
+    { env: { ...env, DB_PATH: dbFile }, cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' }).toString().trim().split('\n').pop());
+  assert.equal(agg.tvl, 75, 'the Aave hub and the unnamed pool are TVL; the wallet is not');
+  assert.equal(agg.wallets.tvl, 100);
+  assert.equal(agg.wallets.accounts, 1);
+  assert.equal(agg.total, 75, 'the dashboard total subtracts the same wallets');
+  assert.ok(!agg.ids.includes('circle-msca-accounts'), 'and the wallet entry is not ranked as a protocol');
+  assert.ok(!agg.cand.includes('0x' + 'a'.repeat(40)), 'nor listed as an unnamed contract');
+});
+
 // ---- chain liveness ----
 test('a stopped chain is told apart from a stopped indexer', async () => {
   const { chainStateFrom } = await import('../indexer.js');
