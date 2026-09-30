@@ -660,8 +660,10 @@ test('CCTP events are paired, attributed per transaction, and kept apart from Ga
   assert.equal(f.reduce((a, x) => a + x.cnt, 0), 4);
   assert.deepEqual(parseCctp([out], null, tokens, tsAt), { txs: null, flows: new Map() }, 'not configured is null, not empty');
 
-  // Gateway wins when a transaction carries both, so a mint is never subtracted twice.
-  assert.equal(routeOf('0xg', new Set(['0xg']), new Set(['0xg'])), 'gateway');
+  // One route per transaction, so a mint is never subtracted twice — and CCTP wins when both are
+  // present: its event says who minted, a Gateway log says where the USDC went next (30 Sept 2026).
+  assert.equal(routeOf('0xg', new Set(['0xg']), new Set(['0xg'])), 'cctp');
+  assert.equal(routeOf('0xg', new Set(['0xg']), new Set(['0xc'])), 'gateway', 'a Gateway-only transaction is still Gateway');
   assert.equal(routeOf('0xc', new Set(['0xg']), new Set(['0xc'])), 'cctp');
   assert.equal(routeOf('0xc', null, null), null);
 
@@ -713,6 +715,26 @@ test('CCTP pair and per-chain flows round-trip through the aggregates, backfill 
 
   const fl = db.cctpFlows(minute - 60).filter((x) => x.token === 'USYC');
   assert.deepEqual(fl.map((x) => [x.dir, x.domain, x.amount]), [['out', 7, 30], ['in', 0, 5]], 'largest first');
+
+  // The route correction moves a mint from the Gateway pair to the CCTP pair and touches nothing else.
+  const { rerouteMoves } = await import('../indexer.js');
+  const RT = '0x' + '7'.repeat(40), ZA = '0x' + '0'.repeat(40), WHO = '0x' + '5'.repeat(40);
+  const padT = (x) => '0x' + x.slice(2).padStart(64, '0');
+  const tl = (from, to, units, tx) => ({ address: RT, topics: ['0xddf2', padT(from), padT(to)], data: '0x' + BigInt(units).toString(16), transactionHash: tx, blockNumber: '0x64' });
+  const mv = [...rerouteMoves(
+    [tl(ZA, WHO, 9e6, '0xboth'), tl(WHO, ZA, 2e6, '0xboth'), tl(WHO, WHO, 5e6, '0xboth'), tl(ZA, WHO, 4e6, '0xgw'), tl(ZA, WHO, 3e6, '0xcctp')],
+    new Set(['0xboth', '0xgw']), new Set(['0xboth', '0xcctp']), { [RT]: { symbol: 'USYC', decimals: 6 } }, () => minute + 5).values()];
+  assert.equal(mv.length, 1);
+  assert.deepEqual([mv[0].mint, mv[0].burn], [9, 2], 'only mints and burns in a transaction carrying both routes');
+  assert.equal(rerouteMoves([tl(ZA, WHO, 9e6, '0xboth')], null, new Set(['0xboth']), { [RT]: { symbol: 'USYC', decimals: 6 } }, () => minute).size, 0,
+    'no Gateway on the network, nothing to move');
+  const m2 = minute + 60;
+  db.applyBatch(new Map([[`${m2}|USYC`, { minute: m2, token: 'USYC', volume: 0, cnt: 0, mint: 40, burn: 6, bmint: 30, bburn: 5, cmint: 10, cburn: 1 }]]), new Map(), []);
+  db.applyReroute(new Map([['k', { minute: m2, token: 'USYC', mint: 30, burn: 5 }]]), { reroute_test_marker: 9 });
+  const after = db.getHistory('USYC', m2, 60).find((p) => p.t === m2);
+  assert.deepEqual([after.mint, after.burn, after.bmint, after.bburn, after.cmint, after.cburn], [40, 6, 0, 0, 40, 6],
+    'raw mint and burn untouched; the Gateway share becomes CCTP share');
+  assert.equal(db.getMetaValue('reroute_test_marker'), '9');
 
   // Pruning rolls minutes into days — the CCTP pair and the flows both — rather than dropping them.
   const old = Math.floor(Date.now() / 1000) - 9 * 86400;

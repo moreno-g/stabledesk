@@ -738,6 +738,7 @@ function renderCrossChain(d){
       .map(([k,v])=>`${k}: out ${compact(v.burn)} · in ${compact(v.mint)}`);
     foot.textContent='Attributed per transaction from TokenMessengerV2 events; chains named from Circle\'s domain table.'
       +(others.length?' '+others.join(' · ')+'.':'')
+      +(c.rerouting?' Re-filing CCTP arrivals that were deposited into Gateway: until it completes, "Arrived" can sit below the per-chain list.':'')
       +(c.backfilling?` Re-reading older history — attributed since ${c.measuredSince?new Date(c.measuredSince).toISOString().slice(0,16).replace('T',' ')+' UTC':'—'}${c.complete?'':'; this window is not complete yet'}.`:'');
   }
 

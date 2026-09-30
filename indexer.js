@@ -350,10 +350,39 @@ export function parseCctp(logs, cctp, tokens, tsAt, exact = false) {
   return { txs, flows };
 }
 
-// Pure: which cross-chain route a transaction took. Gateway first, so a transaction carrying both
-// is subtracted once — double-subtracting a mint would invent a burn that never happened.
+// Pure: which cross-chain route a transaction took. One route per transaction, so a mint is
+// subtracted once — double-subtracting would invent a burn that never happened.
+//
+// CCTP first. A MintAndWithdraw or DepositForBurn from CCTP's messenger says *who minted or burned*;
+// a Gateway log in the same transaction says where the USDC went next. Gateway used to win, and
+// from 29 Sept 2026 that mislabelled the main way USDC reaches Arc: it arrives by CCTP and is
+// deposited straight into the Gateway wallet. Measured over 40,000 blocks on 30 Sept, 5.65M was
+// minted in transactions carrying both, and Gateway's own minter minted nothing — yet all of it was
+// published as "Gateway mint", while the per-chain CCTP list (read from CCTP's events) counted it
+// too, so the CCTP card showed 3.57M arrived above 28.5M of sources.
 export const routeOf = (tx, gatewayTxs, cctpTxs) =>
-  (gatewayTxs && gatewayTxs.has(tx) ? 'gateway' : cctpTxs && cctpTxs.has(tx) ? 'cctp' : null);
+  (cctpTxs && cctpTxs.has(tx) ? 'cctp' : gatewayTxs && gatewayTxs.has(tx) ? 'gateway' : null);
+
+// Pure: what the old precedence filed under Gateway and the new one files under CCTP — mints and
+// burns in transactions carrying both — per (minute, token). The re-route pass moves exactly these.
+export function rerouteMoves(logs, gatewayTxs, cctpTxs, tokens, tsAt, exact = false) {
+  const out = new Map();
+  if (!gatewayTxs || !cctpTxs) return out;
+  for (const log of logs || []) {
+    const meta = tokens[String(log.address || '').toLowerCase()];
+    if (!meta || !gatewayTxs.has(log.transactionHash) || !cctpTxs.has(log.transactionHash)) continue;
+    const from = topicAddr(log.topics[1]), to = topicAddr(log.topics[2]);
+    if (from !== ZERO && to !== ZERO) continue;
+    let amount;
+    try { amount = toUnits(log.data, meta.decimals); } catch { continue; }
+    const minute = logMinute(log, tsAt, exact);
+    const key = minute + '|' + meta.symbol;
+    let b = out.get(key);
+    if (!b) { b = { minute, token: meta.symbol, mint: 0, burn: 0 }; out.set(key, b); }
+    if (from === ZERO) b.mint += amount; else b.burn += amount;
+  }
+  return out;
+}
 
 // Pure: the CCTP share of mint and burn per (minute, token), from Transfer logs. What the backfill
 // adds to minutes indexed before CCTP was measured — classified by exactly the rule processLogs
@@ -1006,7 +1035,11 @@ async function cctpBackfillStep(budgetMs = CCTP_BACKFILL_BUDGET_MS) {
       return;
     }
     const cctp = parseCctp(r.cctpLogs, CCTP, TOKENS, r.tsAt, true);
-    const pairs = cctpPairs(r.logs, r.gatewayTxs, cctp.txs, TOKENS, r.tsAt, true);
+    // Transactions that also carry a Gateway log were filed under Gateway when these blocks were
+    // indexed; they are left to the re-route pass below, which moves them exactly once. Counting them
+    // here as well would put the same mint in both pairs.
+    const cctpOnly = new Set([...(cctp.txs || [])].filter((tx) => !r.gatewayTxs?.has(tx)));
+    const pairs = cctpPairs(r.logs, null, cctpOnly, TOKENS, r.tsAt, true);
     // Everything from block `lo` on is now attributed; the minute holding `lo` may still hold older
     // blocks, so the measured span starts at the next whole minute — until the last chunk, whose
     // `lo` is the first block of the coverage and leaves nothing older in its minute.
@@ -1019,6 +1052,62 @@ async function cctpBackfillStep(budgetMs = CCTP_BACKFILL_BUDGET_MS) {
   if (hi < from) {
     db.setMetaValue(CCTP_META.done, 1);
     console.log('[cctp] backfill done');
+  }
+}
+
+// ---- route correction ----
+// Blocks indexed before CCTP took precedence filed every mint and burn in a transaction touching both
+// routes under Gateway. They are re-read once — newest first, time-boxed, stopping at pruned logs, the
+// same pattern as the CCTP backfill — and moved to the CCTP pair. Every block from `reroute_live_from`
+// on is filed correctly as it is indexed, so nothing is moved twice.
+const REROUTE_META = {
+  liveFrom: 'reroute_live_from',
+  hi: 'reroute_hi',
+  since: 'reroute_since',      // unix seconds: the oldest instant the correction reaches
+  done: 'reroute_done',
+};
+let rerouteSpan = CCTP_BACKFILL_SPAN;
+
+function initReroute() {
+  if (!HAS_CCTP || !HAS_GATEWAY || db.getMetaValue(REROUTE_META.liveFrom) != null) return;
+  const cp = db.getCheckpoint();
+  if (cp == null) { db.setMetaValue(REROUTE_META.liveFrom, 0); db.setMetaValue(REROUTE_META.done, 1); return; }
+  db.setMetaValue(REROUTE_META.liveFrom, cp + 1);
+  db.setMetaValue(REROUTE_META.hi, cp);
+  db.setMetaValue(REROUTE_META.since, db.getCoverage().b ?? Math.floor(Date.now() / 1000));
+}
+
+async function rerouteStep(budgetMs = CCTP_BACKFILL_BUDGET_MS) {
+  if (!HAS_CCTP || !HAS_GATEWAY || db.getMetaValue(REROUTE_META.done) === '1') return;
+  if (db.getMetaValue(REROUTE_META.liveFrom) == null) return;
+  let hi = Number(db.getMetaValue(REROUTE_META.hi));
+  // Not below the first block CCTP was ever attributed from: earlier mints carry no route at all.
+  const floor = Math.max(Number(db.getMetaValue(CCTP_META.from)) || 0, Number(db.getMetaValue(INDEX_FROM)) || db.firstIndexedBlock() || 0);
+  const t0 = Date.now();
+  while (hi >= floor && Date.now() - t0 < budgetMs) {
+    const lo = Math.max(floor, hi - rerouteSpan + 1);
+    let r;
+    try { r = await getBridgeLogsRange(lo, hi); } catch (e) {
+      if (rerouteSpan <= CCTP_MIN_SPAN && historyPruned(e)) {
+        db.setMetaValue(REROUTE_META.done, 1);
+        console.log(`[reroute] blocks up to ${hi} are no longer served — routes corrected since `
+          + `${new Date(Number(db.getMetaValue(REROUTE_META.since)) * 1000).toISOString()}`);
+        return;
+      }
+      rerouteSpan = Math.max(CCTP_MIN_SPAN, Math.floor(rerouteSpan / 2));
+      console.error(`[reroute] ${lo}-${hi}: ${(e.causes || [e.message]).join(' | ')} — span now ${rerouteSpan}`);
+      return;
+    }
+    const cctp = parseCctp(r.cctpLogs, CCTP, TOKENS, r.tsAt, true);
+    const moves = rerouteMoves(r.logs, r.gatewayTxs, cctp.txs, TOKENS, r.tsAt, true);
+    db.applyReroute(moves, { [REROUTE_META.hi]: lo - 1, [REROUTE_META.since]: minuteOf(r.tsAt, lo) });
+    hi = lo - 1;
+    rerouteSpan = Math.min(CCTP_BACKFILL_SPAN, rerouteSpan * 2);
+    if (hi >= floor) await sleep(CHUNK_DELAY);
+  }
+  if (hi < floor) {
+    db.setMetaValue(REROUTE_META.done, 1);
+    console.log('[reroute] done');
   }
 }
 
@@ -1149,6 +1238,11 @@ export function cctpView(summary, since, asOf) {
     // window's start or the start of what is indexed at all.
     complete: measuredSince != null && (measuredSince <= since || (cov.a != null && measuredSince <= cov.a)),
     backfilling: !done,
+    // CCTP arrivals deposited into Gateway were filed under Gateway until 30 Sept 2026. `reroutedSince`
+    // is how far back that has been corrected; before it, a window's CCTP total can sit below the sum
+    // of its per-chain sources, which are read from CCTP's own events and were never affected.
+    rerouting: HAS_GATEWAY && db.getMetaValue(REROUTE_META.liveFrom) != null && db.getMetaValue(REROUTE_META.done) !== '1',
+    reroutedSince: (Number(db.getMetaValue(REROUTE_META.since)) || 0) * 1000 || null,
     byToken,
   };
 }
@@ -1546,6 +1640,7 @@ async function tickOnce() {
     // tick so it is serialised with indexing rather than racing it for the RPC endpoint.
     try { await cctpBackfillStep(); } catch (e) { console.error('[cctp]', e.message || e); }
     try { await sentSeedStep(); } catch (e) { console.error('[sent]', e.message || e); }
+    try { await rerouteStep(); } catch (e) { console.error('[reroute]', e.message || e); }
   } catch (e) {
     // The chain answered, so this one is on us — keep serving indexed history and say so.
     degrade(String(e.message || e));
@@ -1571,6 +1666,7 @@ export async function start() {
   openObservationWindow();
   initCctp();
   initSent();
+  initReroute();
 
   loadPersistedSupplies();
   refreshNoisy();
