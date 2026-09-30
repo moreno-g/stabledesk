@@ -703,6 +703,8 @@ function build() {
             measuredSince: num('ms. Every mint and burn from this instant on carries its route. Earlier history was indexed before CCTP was measured and is being re-read.'),
             complete: { type: 'boolean', description: 'True when the whole window is attributed. False only while the backfill has not reached its start.' },
             backfilling: { type: 'boolean' },
+            rerouting: { type: 'boolean', description: 'True while CCTP arrivals deposited into Gateway — filed under Gateway until 30 Sept 2026 — are being moved to CCTP. Until it clears, a token\'s `mint` can sit below the sum of its `sources`.' },
+            reroutedSince: num('ms. How far back that correction reaches.'),
             byToken: {
               type: ['object', 'null'],
               additionalProperties: {

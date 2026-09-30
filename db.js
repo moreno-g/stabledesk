@@ -405,6 +405,9 @@ const stmt = {
   // touches nothing else — the raw mint and burn it is a share of were counted when they happened.
   upBucketCctp: db.prepare(`INSERT INTO buckets(minute, token, cmint, cburn) VALUES(?, ?, ?, ?)
     ON CONFLICT(minute, token) DO UPDATE SET cmint = cmint + excluded.cmint, cburn = cburn + excluded.cburn`),
+  reroute: db.prepare(`INSERT INTO buckets(minute, token, bmint, bburn, cmint, cburn) VALUES(?, ?, ?, ?, ?, ?)
+    ON CONFLICT(minute, token) DO UPDATE SET bmint = bmint + excluded.bmint, bburn = bburn + excluded.bburn,
+      cmint = cmint + excluded.cmint, cburn = cburn + excluded.cburn`),
   upFlow: db.prepare(`INSERT INTO cctp_flows(minute, token, dir, domain, amount, cnt) VALUES(?, ?, ?, ?, ?, ?)
     ON CONFLICT(minute, token, dir, domain) DO UPDATE SET amount = amount + excluded.amount, cnt = cnt + excluded.cnt`),
   flowsSince: db.prepare(`SELECT token, dir, domain, SUM(amount) AS amount, SUM(cnt) AS cnt
@@ -622,6 +625,21 @@ export function applyCctpBackfill(pairs, flows, meta) {
   try {
     for (const b of pairs.values()) stmt.upBucketCctp.run(b.minute, b.token, b.cmint || 0, b.cburn || 0);
     for (const f of flows.values()) stmt.upFlow.run(f.minute, f.token, f.dir, f.domain, f.amount, f.cnt);
+    for (const [k, v] of Object.entries(meta)) stmt.setMeta.run(k, String(v));
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+// One chunk of the route correction: mints and burns moved from the Gateway pair to the CCTP pair in
+// the minutes they were counted, with the progress marker, in one transaction. The raw mint and burn
+// are untouched — only which route they are a share of changes.
+export function applyReroute(moves, meta) {
+  db.exec('BEGIN');
+  try {
+    for (const b of moves.values()) stmt.reroute.run(b.minute, b.token, -b.mint, -b.burn, b.mint, b.burn);
     for (const [k, v] of Object.entries(meta)) stmt.setMeta.run(k, String(v));
     db.exec('COMMIT');
   } catch (e) {

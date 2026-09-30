@@ -199,6 +199,14 @@
     transaction carries a <code>MintAndWithdraw</code> or <code>DepositForBurn</code> event from TokenMessengerV2. Matching the
     <code>Transfer</code> event alone cannot work — an inbound mint names its recipient, never the minter. Both events are counted in
     <code>mint</code>/<code>burn</code> <em>and</em> in their own pair (<code>cmint</code>/<code>cburn</code>), never instead of them.</p>
+    <p><strong>When a transaction touches both CCTP and Gateway.</strong> It is filed under CCTP. CCTP's event says who minted or
+    burned; a Gateway log in the same transaction says where the USDC went next. Until 30&nbsp;September&nbsp;2026 Gateway took
+    precedence, and from 29&nbsp;September that mislabelled the main way USDC reaches Arc: it arrives by CCTP and is deposited straight
+    into the Gateway wallet. On 29&nbsp;September, 13.1M was published as "Gateway mint" that CCTP had minted, while Gateway's own
+    minter minted next to nothing; the per-chain list, read from CCTP's events, counted it too, so the CCTP total sat below the sum
+    of its own sources. The affected minutes were re-read and moved as far back as the RPC still serves logs
+    (<code>reroutedSince</code>); before that the amounts involved were small — 1.5M in total between 17 and 28&nbsp;September.
+    Net issuance with cross-chain movement taken out is unchanged either way: each mint was always subtracted exactly once.</p>
     <p><strong>Which chain.</strong> <code>DepositForBurn</code> carries the destination domain. An inbound mint carries none; the
     source domain is on the <code>MessageReceived</code> event that MessageTransmitterV2 emits right after it, so each mint is paired
     with the next unpaired <code>MessageReceived</code> in its transaction — which holds when a relayer batches several messages into
