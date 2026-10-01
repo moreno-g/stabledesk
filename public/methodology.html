@@ -199,12 +199,16 @@
     transaction carries a <code>MintAndWithdraw</code> or <code>DepositForBurn</code> event from TokenMessengerV2. Matching the
     <code>Transfer</code> event alone cannot work — an inbound mint names its recipient, never the minter. Both events are counted in
     <code>mint</code>/<code>burn</code> <em>and</em> in their own pair (<code>cmint</code>/<code>cburn</code>), never instead of them.</p>
-    <p><strong>When a transaction touches both CCTP and Gateway.</strong> It is filed under CCTP. CCTP's event says who minted or
-    burned; a Gateway log in the same transaction says where the USDC went next. Until 30&nbsp;September&nbsp;2026 Gateway took
+    <p><strong>When a transaction touches both CCTP and Gateway.</strong> Each mint and each burn is decided on its own: a mint is
+    CCTP's when CCTP minted in that transaction (<code>MintAndWithdraw</code>), a burn is CCTP's when CCTP burned in it
+    (<code>DepositForBurn</code>), and otherwise it is Gateway's. CCTP's event says who minted or burned; a Gateway log says where the
+    USDC came from or went next. Deciding per transaction got this wrong both ways. Until 30&nbsp;September&nbsp;2026 Gateway took
     precedence, and from 29&nbsp;September that mislabelled the main way USDC reaches Arc: it arrives by CCTP and is deposited straight
     into the Gateway wallet. On 29&nbsp;September, 13.1M was published as "Gateway mint" that CCTP had minted, while Gateway's own
     minter minted next to nothing; the per-chain list, read from CCTP's events, counted it too, so the CCTP total sat below the sum
-    of its own sources. The affected minutes were re-read and moved as far back as the RPC still serves logs
+    of its own sources. The fix of 30&nbsp;September gave CCTP precedence for the whole transaction instead, which filed a Gateway mint
+    as a CCTP arrival whenever the same transaction then bridged the USDC straight out by CCTP — on 30&nbsp;September, 4 transactions
+    and 1.545M. Both were corrected on 1&nbsp;October: the affected minutes were re-read and moved as far back as the RPC still serves logs
     (<code>reroutedSince</code>); before that the amounts involved were small — 1.5M in total between 17 and 28&nbsp;September.
     Net issuance with cross-chain movement taken out is unchanged either way: each mint was always subtracted exactly once.</p>
     <p><strong>Which chain.</strong> <code>DepositForBurn</code> carries the destination domain. An inbound mint carries none; the

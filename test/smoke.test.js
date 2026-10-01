@@ -658,7 +658,9 @@ test('CCTP events are paired, attributed per transaction, and kept apart from Ga
   assert.equal(find('in', 5).amount, 10, 'untracked mint consumed domain 3; the USDC mint pairs with 5');
   assert.equal(find('in', 3), undefined, 'the untracked asset is not counted');
   assert.equal(f.reduce((a, x) => a + x.cnt, 0), 4);
-  assert.deepEqual(parseCctp([out], null, tokens, tsAt), { txs: null, flows: new Map() }, 'not configured is null, not empty');
+  assert.deepEqual(parseCctp([out], null, tokens, tsAt), { txs: null, mintTxs: null, burnTxs: null, flows: new Map() }, 'not configured is null, not empty');
+  // Per direction: CCTP minted in tx2 and tx4, burned in tx1.
+  assert.deepEqual([[...r.mintTxs].sort(), [...r.burnTxs]], [['0xtx2', '0xtx4'], ['0xtx1']]);
 
   // One route per transaction, so a mint is never subtracted twice — and CCTP wins when both are
   // present: its event says who minted, a Gateway log says where the USDC went next (30 Sept 2026).
@@ -678,8 +680,9 @@ test('CCTP events are paired, attributed per transaction, and kept apart from Ga
   // The backfill's classifier: only mints and burns in CCTP transactions, per minute and token.
   const ZERO = '0x' + '0'.repeat(40);
   const tr = (from, to, amt, tx) => ({ address: USDC, topics: ['0xddf2', pad(from), pad(to)], data: '0x' + w(units(amt)), transactionHash: tx, blockNumber: '0x64' });
-  const pairs = [...cctpPairs([tr(ZERO, OTHER, 100, '0xtx2'), tr(cctp.tokenMinter, ZERO, 250, '0xtx1'), tr(ZERO, OTHER, 7, '0xnot'), tr(OTHER, OTHER, 9, '0xtx2')],
-    null, r.txs, tokens, tsAt).values()];
+  const pairs = [...cctpPairs([tr(ZERO, OTHER, 100, '0xtx2'), tr(cctp.tokenMinter, ZERO, 250, '0xtx1'), tr(ZERO, OTHER, 7, '0xnot'), tr(OTHER, OTHER, 9, '0xtx2'),
+    tr(ZERO, OTHER, 11, '0xtx1')],   // a mint in a transaction where CCTP only burned: not a CCTP mint
+    null, r, tokens, tsAt).values()];
   assert.equal(pairs.length, 1);
   assert.equal(pairs[0].cmint, 100, 'the plain transfer in a CCTP transaction is not a mint');
   assert.equal(pairs[0].cburn, 250);
@@ -716,24 +719,35 @@ test('CCTP pair and per-chain flows round-trip through the aggregates, backfill 
   const fl = db.cctpFlows(minute - 60).filter((x) => x.token === 'USYC');
   assert.deepEqual(fl.map((x) => [x.dir, x.domain, x.amount]), [['out', 7, 30], ['in', 0, 5]], 'largest first');
 
-  // The route correction moves a mint from the Gateway pair to the CCTP pair and touches nothing else.
-  const { rerouteMoves } = await import('../indexer.js');
+  // Correcting history: each mint or burn leaves the pair it was filed under and joins the one the
+  // per-event rule gives it. Four shapes, from what Arc actually does:
+  //   gwIn  — CCTP minted, then deposited into Gateway (MintAndWithdraw + Gateway log)
+  //   gwOut — Gateway minted, then CCTP burned it straight out (DepositForBurn + Gateway log)
+  //   cIn   — a plain CCTP arrival
+  //   gw    — Gateway alone
+  const { refileDeltas } = await import('../indexer.js');
   const RT = '0x' + '7'.repeat(40), ZA = '0x' + '0'.repeat(40), WHO = '0x' + '5'.repeat(40);
   const padT = (x) => '0x' + x.slice(2).padStart(64, '0');
   const tl = (from, to, units, tx) => ({ address: RT, topics: ['0xddf2', padT(from), padT(to)], data: '0x' + BigInt(units).toString(16), transactionHash: tx, blockNumber: '0x64' });
-  const mv = [...rerouteMoves(
-    [tl(ZA, WHO, 9e6, '0xboth'), tl(WHO, ZA, 2e6, '0xboth'), tl(WHO, WHO, 5e6, '0xboth'), tl(ZA, WHO, 4e6, '0xgw'), tl(ZA, WHO, 3e6, '0xcctp')],
-    new Set(['0xboth', '0xgw']), new Set(['0xboth', '0xcctp']), { [RT]: { symbol: 'USYC', decimals: 6 } }, () => minute + 5).values()];
-  assert.equal(mv.length, 1);
-  assert.deepEqual([mv[0].mint, mv[0].burn], [9, 2], 'only mints and burns in a transaction carrying both routes');
-  assert.equal(rerouteMoves([tl(ZA, WHO, 9e6, '0xboth')], null, new Set(['0xboth']), { [RT]: { symbol: 'USYC', decimals: 6 } }, () => minute).size, 0,
-    'no Gateway on the network, nothing to move');
+  const tok = { [RT]: { symbol: 'USYC', decimals: 6 } };
+  const sets = { txs: new Set(['gwIn', 'gwOut', 'cIn']), mintTxs: new Set(['gwIn', 'cIn']), burnTxs: new Set(['gwOut']) };
+  const gwTxs = new Set(['gwIn', 'gwOut', 'gw']);
+  const logs = [tl(ZA, WHO, 9e6, 'gwIn'), tl(ZA, WHO, 4e6, 'gwOut'), tl(WHO, ZA, 4e6, 'gwOut'), tl(ZA, WHO, 3e6, 'cIn'), tl(WHO, ZA, 2e6, 'gw'), tl(WHO, WHO, 5e6, 'gwIn')];
+  const one = (scheme) => { const m = [...refileDeltas(logs, gwTxs, sets, tok, () => minute + 5, scheme).values()]; return m.length ? m[0] : null; };
+  // From "Gateway first": gwIn's mint and gwOut's burn move to CCTP; gwOut's mint stays Gateway.
+  const v0 = one('v0');
+  assert.deepEqual([v0.bmint, v0.cmint, v0.bburn, v0.cburn], [-9, 9, -4, 4]);
+  // From "CCTP first, per transaction": only gwOut's mint was wrong — a Gateway mint filed as CCTP.
+  const v1 = one('v1');
+  assert.deepEqual([v1.bmint, v1.cmint, v1.bburn, v1.cburn], [4, -4, 0, 0]);
+  assert.equal(refileDeltas(logs, gwTxs, null, tok, () => minute, 'v1').size, 0, 'CCTP not configured: nothing to refile');
+
   const m2 = minute + 60;
   db.applyBatch(new Map([[`${m2}|USYC`, { minute: m2, token: 'USYC', volume: 0, cnt: 0, mint: 40, burn: 6, bmint: 30, bburn: 5, cmint: 10, cburn: 1 }]]), new Map(), []);
-  db.applyReroute(new Map([['k', { minute: m2, token: 'USYC', mint: 30, burn: 5 }]]), { reroute_test_marker: 9 });
+  db.applyRouteDeltas(new Map([['k', { minute: m2, token: 'USYC', bmint: -30, bburn: -5, cmint: 30, cburn: 5 }]]), { reroute_test_marker: 9 });
   const after = db.getHistory('USYC', m2, 60).find((p) => p.t === m2);
   assert.deepEqual([after.mint, after.burn, after.bmint, after.bburn, after.cmint, after.cburn], [40, 6, 0, 0, 40, 6],
-    'raw mint and burn untouched; the Gateway share becomes CCTP share');
+    'raw mint and burn untouched; only the route pairs move');
   assert.equal(db.getMetaValue('reroute_test_marker'), '9');
 
   // Pruning rolls minutes into days — the CCTP pair and the flows both — rather than dropping them.

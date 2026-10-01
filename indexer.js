@@ -304,15 +304,21 @@ const logMinute = (l, tsAt, exact) => {
 // so downstream can tell "none crossed" from "never looked".
 export function parseCctp(logs, cctp, tokens, tsAt, exact = false) {
   const flows = new Map();
-  if (!cctp) return { txs: null, flows };
+  if (!cctp) return { txs: null, mintTxs: null, burnTxs: null, flows };
   const { depositForBurn: DFB, mintAndWithdraw: MAW, messageReceived: MR } = CCTP_TOPICS;
   const txs = new Set();
+  // Which transactions CCTP minted in, and which it burned in. A route is decided per mint or burn,
+  // not per transaction: one transaction can carry a Gateway mint and a CCTP burn (see routeOfEvent).
+  const mintTxs = new Set(), burnTxs = new Set();
   const byTx = new Map();
   for (const l of logs || []) {
     const a = String(l.address || '').toLowerCase(), t0 = l.topics?.[0];
     const messenger = a === cctp.tokenMessenger && (t0 === DFB || t0 === MAW);
     if (!messenger && !(a === cctp.messageTransmitter && t0 === MR)) continue;
-    if (messenger) txs.add(l.transactionHash);
+    if (messenger) {
+      txs.add(l.transactionHash);
+      (t0 === MAW ? mintTxs : burnTxs).add(l.transactionHash);
+    }
     let list = byTx.get(l.transactionHash);
     if (!list) { list = []; byTx.set(l.transactionHash, list); }
     list.push(l);
@@ -347,7 +353,7 @@ export function parseCctp(logs, cctp, tokens, tsAt, exact = false) {
       } catch { /* malformed event — skip it rather than void the range */ }
     }
   }
-  return { txs, flows };
+  return { txs, mintTxs, burnTxs, flows };
 }
 
 // Pure: which cross-chain route a transaction took. One route per transaction, so a mint is
@@ -363,23 +369,42 @@ export function parseCctp(logs, cctp, tokens, tsAt, exact = false) {
 export const routeOf = (tx, gatewayTxs, cctpTxs) =>
   (cctpTxs && cctpTxs.has(tx) ? 'cctp' : gatewayTxs && gatewayTxs.has(tx) ? 'gateway' : null);
 
-// Pure: what the old precedence filed under Gateway and the new one files under CCTP — mints and
-// burns in transactions carrying both — per (minute, token). The re-route pass moves exactly these.
-export function rerouteMoves(logs, gatewayTxs, cctpTxs, tokens, tsAt, exact = false) {
+// Pure: the route of one mint or burn. Per event, not per transaction: a mint is CCTP's when CCTP
+// minted in that transaction (MintAndWithdraw), a burn when CCTP burned in it (DepositForBurn), and
+// otherwise Gateway's if Gateway was touched. Deciding per transaction filed a Gateway mint as a CCTP
+// arrival whenever the same transaction then bridged the USDC out by CCTP: on 30 Sept 2026, 4
+// transactions and 1.545M — Gateway minted on Arc and CCTP burned it straight back out.
+export const routeOfEvent = (tx, isMint, gatewayTxs, cctp) =>
+  routeOf(tx, gatewayTxs, cctp ? (isMint ? cctp.mintTxs : cctp.burnTxs) : null);
+
+// Pure: how indexed history must change to match the per-event rule, given the rule it was filed
+// under. 'v0' = Gateway first, per transaction (until 30 Sept 2026); 'v1' = CCTP first, per transaction
+// (30 Sept – 1 Oct). Returns deltas to the route pairs per (minute, token): each mint or burn is taken
+// out of the pair it was filed under and put in the pair it belongs to. Raw mint and burn never move.
+export function refileDeltas(logs, gatewayTxs, cctp, tokens, tsAt, scheme, exact = false) {
   const out = new Map();
-  if (!gatewayTxs || !cctpTxs) return out;
+  if (!cctp) return out;
+  const gw = gatewayTxs || new Set();
+  const old = (tx) => (scheme === 'v0'
+    ? (gw.has(tx) ? 'gateway' : cctp.txs.has(tx) ? 'cctp' : null)
+    : (cctp.txs.has(tx) ? 'cctp' : gw.has(tx) ? 'gateway' : null));
   for (const log of logs || []) {
     const meta = tokens[String(log.address || '').toLowerCase()];
-    if (!meta || !gatewayTxs.has(log.transactionHash) || !cctpTxs.has(log.transactionHash)) continue;
+    if (!meta) continue;
     const from = topicAddr(log.topics[1]), to = topicAddr(log.topics[2]);
     if (from !== ZERO && to !== ZERO) continue;
+    const isMint = from === ZERO;
+    const was = old(log.transactionHash), now = routeOfEvent(log.transactionHash, isMint, gatewayTxs, cctp);
+    if (was === now) continue;
     let amount;
     try { amount = toUnits(log.data, meta.decimals); } catch { continue; }
     const minute = logMinute(log, tsAt, exact);
     const key = minute + '|' + meta.symbol;
-    let b = out.get(key);
-    if (!b) { b = { minute, token: meta.symbol, mint: 0, burn: 0 }; out.set(key, b); }
-    if (from === ZERO) b.mint += amount; else b.burn += amount;
+    let d = out.get(key);
+    if (!d) { d = { minute, token: meta.symbol, bmint: 0, bburn: 0, cmint: 0, cburn: 0 }; out.set(key, d); }
+    const field = (route) => (route === 'gateway' ? 'b' : 'c') + (isMint ? 'mint' : 'burn');
+    if (was) d[field(was)] -= amount;
+    if (now) d[field(now)] += amount;
   }
   return out;
 }
@@ -387,14 +412,15 @@ export function rerouteMoves(logs, gatewayTxs, cctpTxs, tokens, tsAt, exact = fa
 // Pure: the CCTP share of mint and burn per (minute, token), from Transfer logs. What the backfill
 // adds to minutes indexed before CCTP was measured — classified by exactly the rule processLogs
 // applies live, which is the point of it being one function.
-export function cctpPairs(logs, gatewayTxs, cctpTxs, tokens, tsAt, exact = false) {
+export function cctpPairs(logs, gatewayTxs, cctp, tokens, tsAt, exact = false) {
   const out = new Map();
-  if (!cctpTxs) return out;
+  if (!cctp) return out;
   for (const log of logs || []) {
     const meta = tokens[String(log.address || '').toLowerCase()];
-    if (!meta || routeOf(log.transactionHash, gatewayTxs, cctpTxs) !== 'cctp') continue;
+    if (!meta) continue;
     const from = topicAddr(log.topics[1]), to = topicAddr(log.topics[2]);
     if (from !== ZERO && to !== ZERO) continue;
+    if (routeOfEvent(log.transactionHash, from === ZERO, gatewayTxs, cctp) !== 'cctp') continue;
     let amount;
     try { amount = toUnits(log.data, meta.decimals); } catch { continue; }
     const minute = logMinute(log, tsAt, exact);
@@ -580,7 +606,6 @@ function processLogs(logs, opts = {}, gatewayTxs = null, tsAt = approxTs, cctp =
   const buckets = new Map(), addrs = new Map(), recents = [];
   const txMax = largestPerTxToken(logs, tsAt);
   const viaGateway = (tx) => !!gatewayTxs && gatewayTxs.has(tx);
-  const cctpTxs = cctp?.txs || null;
 
   const getBk = (minute, symbol) => {
     const key = minute + '|' + symbol;
@@ -605,7 +630,7 @@ function processLogs(logs, opts = {}, gatewayTxs = null, tsAt = approxTs, cctp =
 
     // `bridged` keeps its original meaning — Circle Gateway — for the consumers that read it; `route`
     // is the full answer, and is what says a burn was USDC leaving by CCTP rather than a redemption.
-    const route = routeOf(log.transactionHash, gatewayTxs, cctpTxs);
+    const route = from === ZERO || to === ZERO ? routeOfEvent(log.transactionHash, from === ZERO, gatewayTxs, cctp) : null;
     const bridged = route === 'gateway';
 
     if (from === ZERO) {
@@ -1038,8 +1063,8 @@ async function cctpBackfillStep(budgetMs = CCTP_BACKFILL_BUDGET_MS) {
     // Transactions that also carry a Gateway log were filed under Gateway when these blocks were
     // indexed; they are left to the re-route pass below, which moves them exactly once. Counting them
     // here as well would put the same mint in both pairs.
-    const cctpOnly = new Set([...(cctp.txs || [])].filter((tx) => !r.gatewayTxs?.has(tx)));
-    const pairs = cctpPairs(r.logs, null, cctpOnly, TOKENS, r.tsAt, true);
+    const outside = (set) => new Set([...(set || [])].filter((tx) => !r.gatewayTxs?.has(tx)));
+    const pairs = cctpPairs(r.logs, null, { txs: outside(cctp.txs), mintTxs: outside(cctp.mintTxs), burnTxs: outside(cctp.burnTxs) }, TOKENS, r.tsAt, true);
     // Everything from block `lo` on is now attributed; the minute holding `lo` may still hold older
     // blocks, so the measured span starts at the next whole minute — until the last chunk, whose
     // `lo` is the first block of the coverage and leaves nothing older in its minute.
@@ -1099,8 +1124,8 @@ async function rerouteStep(budgetMs = CCTP_BACKFILL_BUDGET_MS) {
       return;
     }
     const cctp = parseCctp(r.cctpLogs, CCTP, TOKENS, r.tsAt, true);
-    const moves = rerouteMoves(r.logs, r.gatewayTxs, cctp.txs, TOKENS, r.tsAt, true);
-    db.applyReroute(moves, { [REROUTE_META.hi]: lo - 1, [REROUTE_META.since]: minuteOf(r.tsAt, lo) });
+    const deltas = refileDeltas(r.logs, r.gatewayTxs, cctp, TOKENS, r.tsAt, 'v0', true);
+    db.applyRouteDeltas(deltas, { [REROUTE_META.hi]: lo - 1, [REROUTE_META.since]: minuteOf(r.tsAt, lo) });
     hi = lo - 1;
     rerouteSpan = Math.min(CCTP_BACKFILL_SPAN, rerouteSpan * 2);
     if (hi >= floor) await sleep(CHUNK_DELAY);
@@ -1109,6 +1134,57 @@ async function rerouteStep(budgetMs = CCTP_BACKFILL_BUDGET_MS) {
     db.setMetaValue(REROUTE_META.done, 1);
     console.log('[reroute] done');
   }
+}
+
+// The second correction: blocks filed between 30 Sept and 1 Oct 2026 under "CCTP first, per
+// transaction" (the reroute pass above, and live indexing in that window) are re-read and moved to the
+// per-event rule. Only where a v1 filing exists: a database the v1 code never touched has none.
+const REFILE_META = { liveFrom: 'refile_live_from', hi: 'refile_hi', floor: 'refile_floor', done: 'refile_done' };
+let refileSpan = CCTP_BACKFILL_SPAN;
+
+function initRefile() {
+  if (!HAS_CCTP || db.getMetaValue(REFILE_META.liveFrom) != null) return;
+  const cp = db.getCheckpoint();
+  const v1From = db.getMetaValue(REROUTE_META.liveFrom);
+  // No v1 history: a cold database, or one the v1 code never ran on.
+  if (cp == null || v1From == null) {
+    db.setMetaValue(REFILE_META.liveFrom, 0); db.setMetaValue(REFILE_META.done, 1); return;
+  }
+  // v1 covers what its reroute pass reached (above reroute_hi) and everything indexed live since — or,
+  // on a database the v1 code started cold (reroute_live_from 0), everything this database holds.
+  const floor = Number(v1From) === 0
+    ? (Number(db.getMetaValue(INDEX_FROM)) || db.firstIndexedBlock() || 0)
+    : Number(db.getMetaValue(REROUTE_META.hi)) + 1;
+  db.setMetaValue(REFILE_META.liveFrom, cp + 1);
+  db.setMetaValue(REFILE_META.hi, cp);
+  db.setMetaValue(REFILE_META.floor, floor);
+}
+
+async function refileStep(budgetMs = CCTP_BACKFILL_BUDGET_MS) {
+  if (!HAS_CCTP || db.getMetaValue(REFILE_META.done) === '1' || db.getMetaValue(REFILE_META.liveFrom) == null) return;
+  let hi = Number(db.getMetaValue(REFILE_META.hi));
+  const floor = Number(db.getMetaValue(REFILE_META.floor)) || 0;
+  const t0 = Date.now();
+  while (hi >= floor && Date.now() - t0 < budgetMs) {
+    const lo = Math.max(floor, hi - refileSpan + 1);
+    let r;
+    try { r = await getBridgeLogsRange(lo, hi); } catch (e) {
+      if (refileSpan <= CCTP_MIN_SPAN && historyPruned(e)) {
+        db.setMetaValue(REFILE_META.done, 1);
+        console.log(`[refile] blocks up to ${hi} are no longer served — stopping there`);
+        return;
+      }
+      refileSpan = Math.max(CCTP_MIN_SPAN, Math.floor(refileSpan / 2));
+      console.error(`[refile] ${lo}-${hi}: ${(e.causes || [e.message]).join(' | ')} — span now ${refileSpan}`);
+      return;
+    }
+    const cctp = parseCctp(r.cctpLogs, CCTP, TOKENS, r.tsAt, true);
+    db.applyRouteDeltas(refileDeltas(r.logs, r.gatewayTxs, cctp, TOKENS, r.tsAt, 'v1', true), { [REFILE_META.hi]: lo - 1 });
+    hi = lo - 1;
+    refileSpan = Math.min(CCTP_BACKFILL_SPAN, refileSpan * 2);
+    if (hi >= floor) await sleep(CHUNK_DELAY);
+  }
+  if (hi < floor) { db.setMetaValue(REFILE_META.done, 1); console.log('[refile] done'); }
 }
 
 // ---- sent-history seed ----
@@ -1241,7 +1317,8 @@ export function cctpView(summary, since, asOf) {
     // CCTP arrivals deposited into Gateway were filed under Gateway until 30 Sept 2026. `reroutedSince`
     // is how far back that has been corrected; before it, a window's CCTP total can sit below the sum
     // of its per-chain sources, which are read from CCTP's own events and were never affected.
-    rerouting: HAS_GATEWAY && db.getMetaValue(REROUTE_META.liveFrom) != null && db.getMetaValue(REROUTE_META.done) !== '1',
+    rerouting: HAS_GATEWAY && ((db.getMetaValue(REROUTE_META.liveFrom) != null && db.getMetaValue(REROUTE_META.done) !== '1')
+      || (db.getMetaValue(REFILE_META.liveFrom) != null && db.getMetaValue(REFILE_META.done) !== '1')),
     reroutedSince: (Number(db.getMetaValue(REROUTE_META.since)) || 0) * 1000 || null,
     byToken,
   };
@@ -1641,6 +1718,7 @@ async function tickOnce() {
     try { await cctpBackfillStep(); } catch (e) { console.error('[cctp]', e.message || e); }
     try { await sentSeedStep(); } catch (e) { console.error('[sent]', e.message || e); }
     try { await rerouteStep(); } catch (e) { console.error('[reroute]', e.message || e); }
+    try { await refileStep(); } catch (e) { console.error('[refile]', e.message || e); }
   } catch (e) {
     // The chain answered, so this one is on us — keep serving indexed history and say so.
     degrade(String(e.message || e));
@@ -1666,6 +1744,7 @@ export async function start() {
   openObservationWindow();
   initCctp();
   initSent();
+  initRefile();     // first: it reads whether the previous code left a v1 filing behind
   initReroute();
 
   loadPersistedSupplies();

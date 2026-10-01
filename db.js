@@ -633,13 +633,13 @@ export function applyCctpBackfill(pairs, flows, meta) {
   }
 }
 
-// One chunk of the route correction: mints and burns moved from the Gateway pair to the CCTP pair in
-// the minutes they were counted, with the progress marker, in one transaction. The raw mint and burn
-// are untouched — only which route they are a share of changes.
-export function applyReroute(moves, meta) {
+// One chunk of a route correction: deltas to the Gateway and CCTP pairs in the minutes they were
+// counted, with the progress marker, in one transaction. The raw mint and burn are untouched — only
+// which route they are a share of changes.
+export function applyRouteDeltas(deltas, meta) {
   db.exec('BEGIN');
   try {
-    for (const b of moves.values()) stmt.reroute.run(b.minute, b.token, -b.mint, -b.burn, b.mint, b.burn);
+    for (const d of deltas.values()) stmt.reroute.run(d.minute, d.token, d.bmint, d.bburn, d.cmint, d.cburn);
     for (const [k, v] of Object.entries(meta)) stmt.setMeta.run(k, String(v));
     db.exec('COMMIT');
   } catch (e) {
