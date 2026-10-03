@@ -215,7 +215,9 @@ function renderNamed(d){
     ['Holds'+(d.baseDenomination?' · '+d.baseDenomination:''), compact((d.tvlByDenomination||{})[d.baseDenomination]||0),
       [Object.entries(d.tvlByDenomination||{}).filter(([k,v])=>k!==d.baseDenomination&&v>0).map(([k,v])=>'+ '+compact(v)+' '+k).join(' · '),
        'stablecoins in its contracts'].filter(Boolean).join(' · ')],
-    ['Share of chain TVL', ((d.share||0)*100).toFixed(1)+'%', 'of '+compact(d.chainTvl)+(d.baseDenomination?' '+d.baseDenomination:'')+' total'],
+    // Smart-contract wallets are named here but kept out of TVL, so they have no share of it.
+    (d.wallets ? ['Share of chain TVL', 'Not TVL', 'wallets are kept out of TVL']
+      : ['Share of chain TVL', ((d.share||0)*100).toFixed(1)+'%', 'of '+compact(d.chainTvl)+(d.baseDenomination?' '+d.baseDenomination:'')+' total']),
     ['Moved', compact(d.windowVolume), 'retained window (~7d)'],
     ['Transfers', nf.format(d.windowTransfers||0), 'retained window (~7d)'],
   ].map(([l,v,s])=>'<div class="kpi"><div class="lab">'+l+'</div><div class="val">'+v+'</div><div class="sub2">'+s+'</div></div>').join('');

@@ -6,7 +6,7 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.5.0-22c55e.svg)](https://nodejs.org)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-success.svg)](https://github.com/moreno-g/stabledesk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Network: Arc Testnet](https://img.shields.io/badge/network-Arc_Testnet-9B7EDE.svg)](https://stabledesk.xyz)
+[![Network: Arc Mainnet](https://img.shields.io/badge/network-Arc_Mainnet-25C4B8.svg)](https://stabledesk.xyz/v1/status)
 
 **Stabledesk** measures every stablecoin on **Arc**, Circle's L1 — supply, real volume, TVL and
 flows — read straight from the chain, with a [published method](https://stabledesk.xyz/methodology)
@@ -15,15 +15,12 @@ and a free data API.
 **[stabledesk.xyz](https://stabledesk.xyz)** · [@getStabledesk](https://x.com/getStabledesk) ·
 [how we publish numbers](COMMS.md)
 
-**Running against the Arc public testnet.** Arc mainnet has not launched publicly yet — Circle has
-[announced September 16, 2026](https://www.circle.com/pressroom/circle-announces-founding-validator-cohort-and-major-integrations-for-arc-ahead-of-september-16-mainnet-launch)
-for the public launch, with a founding validator cohort and 100+ builders already on a private
-mainnet. Until that date the figures on the live site are faucet-funded testnet volume and
-represent no real value. That caveat is repeated on every page that shows a number, not just here.
-Mainnet support is built and has been exercised against the pre-launch network; it is one
-environment variable away (see [Networks](#networks)).
+**Live on Arc mainnet since launch day, 16 September 2026** (chain `5042` — check it at
+[`/v1/status`](https://stabledesk.xyz/v1/status)). Every figure on the site is read from the chain,
+and every rule that turns logs into a figure is on [`/methodology`](https://stabledesk.xyz/methodology),
+including the ones that turned out wrong and how they were corrected.
 
-Not another explorer — Arcscan already does blocks and transactions. Stabledesk is the
+Not another explorer — the Arc explorer already does blocks and transactions. Stabledesk is the
 **stablecoin-finance analytics layer**: what actually moved, how much of it was real economic
 activity rather than routing noise, what it cost the network to move it, and which protocols hold
 the value.
@@ -35,23 +32,30 @@ Read-only. Zero dependencies — Node's native `fetch` and `node:sqlite`, nothin
 - **Three volume measures, all published** — raw (every `Transfer` event), **real** (one largest
   transfer per transaction per token, so routing hops and contract internals don't count twice),
   and **adjusted** (real, minus infrastructure talking to infrastructure). Showing all three means
-  every filtering step is auditable rather than asserted. The adjusted filter is a *rate*: each
-  address is measured over its own observed span — first block seen to last — so $2M in a day is
-  infrastructure and the same $2M across a month is not, and every flagged address publishes the
-  window and the two limits it was actually judged against.
+  every filtering step is auditable rather than asserted. An address counts as infrastructure the way
+  Visa/Allium define it — it *sent* more than 1,000 transfers or $10M in 30 days — and every flagged
+  address publishes what it sent and the window it was judged over.
+- **Cross-chain flows, separated from issuance** — USDC and EURC arriving on or leaving Arc through
+  **Circle CCTP**, with the chain on the other side, and **Circle Gateway**'s rebalancing, each
+  attributed per mint and burn from the protocol's own events. What is left is what was actually
+  issued or redeemed on Arc (`/v1/cctp`, `organicNetIssuance24h`).
 - **Network economics** — gas on Arc is paid in USDC, so fees are dollars read straight from
   transaction receipts: no price feed, no oracle. Headline metric is *cost to move $1M*.
-- **Stablecoin supply, share and velocity** per token, plus mint/burn. Assets are configured by
-  *contract*, not by symbol, because a symbol can be deployed more than once on one chain — Arc
-  testnet carries two independent USYC contracts, and the chain's supply of it is the sum. A wrapper
-  whose supply is exactly the USDC it custodies is deliberately not counted as issuance.
+- **Stablecoin supply, share and velocity** per token, plus mint/burn — **per currency**: dollars,
+  euros and every other denomination are totalled on their own and never added together. Assets are
+  configured by *contract*, not by symbol, because a symbol can be deployed more than once on one
+  chain (Arc testnet carried two independent USYC contracts). A wrapper whose supply is exactly the
+  USDC it custodies is deliberately not counted as issuance.
 - **Per-block activity** + **largest transfers** over a stated window, in real time.
 - **History past the retention window** — per-day aggregates are kept indefinitely, so `30d`, `90d`,
   `1y` and `all` ranges exist and every series says which table answered it and how far back the
   record actually reaches.
 - **Ecosystem** (`/ecosystem`) — every protocol on Arc with its **TVL**, flow, status and official links, plus
   the contracts holding balances nobody has named yet. TVL is measured as stablecoin balances held by
-  contracts, which needs no per-protocol adapter on a chain where value is denominated in USDC.
+  contracts, which needs no per-protocol adapter on a chain where value is denominated in USDC. Each
+  protocol's contracts come from its operator's own published address list (Aave, Morpho, Uniswap,
+  Circle); pools are attributed only when their factory confirms them, and smart-contract wallets —
+  contracts by bytecode, wallets by function — are named but kept out of TVL.
 
 ## Run
 
@@ -165,18 +169,14 @@ database file so faucet volume can never be mixed into mainnet aggregates.
 | DB file | `arc-mainnet.db` | `arc.db` |
 
 Mainnet **refuses to start** with any of its three variables missing, rather than falling back to
-testnet — serving faucet play-money as real value is the one failure worth crashing over. Nothing
-in the mainnet profile is hardcoded because, as of this writing, there is no public mainnet to
-hardcode: chain 5042 produces blocks, but access is gated and Circle has not opened it — public
-launch is announced for September 16, 2026. Anything built into the source before then would be a
-guess shipped as a fact, and it stays out of the source even now that the date is known: a date is
-not an endpoint, a token list, or a Gateway deployment.
+testnet — serving faucet play-money as real value is the one failure worth crashing over. Mainnet
+addresses come from the environment rather than the source, taken from Circle's published contract
+lists, and `npm run verify` checks every one of them against the chain (bytecode, symbol, decimals,
+registry) before they are trusted. The separate database files mean neither network's history is
+ever mixed into the other's.
 
-Testnet endpoints are public and need no credentials, which is the practical difference: a
-mainnet deployment depends on an access grant that can be withdrawn, and was. The site currently
-runs on testnet for that reason. Switching back is `ARC_NETWORK=mainnet` plus a working
-endpoint — the separate database files mean neither network's history is disturbed by the other,
-in either direction.
+The site has run on Arc mainnet since launch day, 16 September 2026. Testnet is still supported:
+`ARC_NETWORK` unset runs the same code against it.
 
 Both are EVM, gas is paid in USDC, and there are no reorgs. That last property is what keeps the
 indexer simple: a transfer's timestamp is derived from its block number rather than from a header
@@ -188,9 +188,8 @@ timestamps.
 
 1. ✅ **Historical indexer** (SQLite) → time series: volumes, mint/burn, top addresses.
 2. ✅ **Public API** — `/v1` with API keys, free/pro tiers, rate limiting, `/docs` developer page.
-3. ✅ **Deployed** at [stabledesk.xyz](https://stabledesk.xyz), on the Arc public testnet. Mainnet
-   is implemented and was run against the pre-launch network; it resumes when Arc opens publicly,
-   announced for September 16, 2026.
+3. ✅ **Live on Arc mainnet** at [stabledesk.xyz](https://stabledesk.xyz) since launch day,
+   16 September 2026.
 4. ✅ **Alerts** — live in-app feed + browser watchlist + Pro webhook alerts (`/v1/alerts`).
 5. ✅ **Ecosystem registry + TVL** — `protocols.js` (curated, contribution-based — see `PROTOCOLS.md`),
    `tvl.js` (balance scanner + unnamed-contract discovery), `/ecosystem`, `/protocol`, global search,
@@ -202,8 +201,13 @@ timestamps.
 8. ✅ **Permanent history** — per-day aggregates survive the minute table's 7-day window, so launch
    day stays readable after launch week (`30d`/`90d`/`1y`/`all`). Backups of what cannot be
    re-indexed: `backup.js`, see `DEPLOY.md`.
-9. **Billing** — USDC on Base is implemented (`payments.js`); card payment is not.
-10. **Notable-transfer posting** — built and tested (`whalewatch.js`), off until
+9. ✅ **Cross-chain flows** — CCTP in and out per counterparty chain, Gateway separated from issuance,
+   attributed per mint and burn (`/v1/cctp`), shipped 18 September 2026.
+10. ✅ **Attribution and currency** — TVL attributed from operators' published address lists and from
+    on-chain factory and implementation checks; supply, volume and TVL kept per currency; smart-contract
+    wallets out of TVL.
+11. **Billing** — USDC on Base is implemented (`payments.js`); card payment is not.
+12. **Notable-transfer posting** — built and tested (`whalewatch.js`), off until
     `WHALEWATCH_ENABLED=true`: enabling it starts publishing, which should be a deliberate act
     rather than a side effect of a deploy.
 

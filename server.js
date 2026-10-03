@@ -88,6 +88,8 @@ function applyNetwork(html) {
     .replaceAll('{{TOKENS_DETAIL}}', tokensDetail)
     .replaceAll('{{GATEWAY_STATUS}}', gatewayStatus)
     .replaceAll('{{CCTP_STATUS}}', cctpStatus)
+    // "the Arc testnet" but "Arc", not "the Arc": the article belongs to the testnet label only.
+    .replaceAll('{{THE_NET}}', CHAIN.isTestnet ? `the ${CHAIN.label}` : CHAIN.label)
     .replaceAll('{{NET}}', CHAIN.label)
     .replaceAll('{{RPC_URL}}', CHAIN.endpoints[0] || '')
     .replaceAll('{{CHAIN_ID}}', String(CHAIN.chainId))
@@ -565,7 +567,10 @@ const server = http.createServer(async (req, res) => {
     const p = protocolById(protoMatch[1]);
     if (!p) return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404);
     const d = tvl.detail(p.id);
-    const tvlTxt = compactNum(d?.tvl ?? 0);
+    // In the base denomination, other currencies named beside it — never added to it.
+    const base = d?.baseDenomination, byDen = d?.tvlByDenomination || {};
+    const others = Object.entries(byDen).filter(([k, v]) => k !== base && v > 0).map(([k, v]) => `${compactNum(v)} ${k}`);
+    const tvlTxt = `${compactNum(byDen[base] || 0)}${base ? ` ${base}` : ''}${others.length ? ` (+ ${others.join(', ')})` : ''}`;
     const net = CHAIN.label;
     const cat = CATEGORIES[p.category]?.label || p.category;
     return serveTemplated(req, res, 'protocol.html', p.id, {
@@ -577,8 +582,10 @@ const server = http.createServer(async (req, res) => {
       OG_DESC: `${cat} · ${tvlTxt} held in stablecoins`,
       ROBOTS: 'index, follow',
       PROTOCOL: p.name,
-      SSR: `${p.name} is ${article(cat)} ${cat.toLowerCase()} protocol on ${net}, holding ${tvlTxt} in stablecoins across `
-        + `${p.contracts.length} tracked contract${p.contracts.length === 1 ? '' : 's'}.`,
+      SSR: p.wallets
+        ? `${p.name} on ${net}: smart-contract wallets holding ${tvlTxt}. Wallets, not a protocol, so kept out of TVL.`
+        : `${p.name} is ${article(cat)} ${cat.toLowerCase()} protocol on ${net}, holding ${tvlTxt} in stablecoins across `
+          + `${p.contracts.length} tracked contract${p.contracts.length === 1 ? '' : 's'}.`,
     });
   }
   if (path === '/protocol' || path === '/protocol.html') {

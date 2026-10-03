@@ -71,6 +71,9 @@ they get is the missing clause, added as a reply.
 
 ## September 16, 2026
 
+*Done.* The site switched to Arc mainnet on launch day and has run there since; the testnet wording
+left the pages with the switch, as planned below.
+
 Circle has [announced](https://www.circle.com/pressroom/circle-announces-founding-validator-cohort-and-major-integrations-for-arc-ahead-of-september-16-mainnet-launch)
 the public Arc mainnet launch for that date. It is the day this file's output changes, so the
 change is written down before it happens rather than improvised on the morning.
