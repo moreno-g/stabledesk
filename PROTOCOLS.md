@@ -65,14 +65,16 @@ Two optional fields attribute contracts created after the entry is written, and 
 the chain before anything is attributed:
 
 ```js
-factories: [{ address: '0x…', type: 'uniswap-v3' }],  // or 'uniswap-v2'
+factories: [{ address: '0x…', type: 'uniswap-v3' }],  // or 'uniswap-v2', 'morpho-vault-v2'
 implementations: ['0x…'],                            // EIP-1967 implementation address
 ```
 
 A pool is claimed when the listed factory, asked `getPool(token0, token1, fee)` (v3) or
 `getPair(token0, token1)` (v2), returns the pool's own address — a pool that merely reports that factory
-from `factory()` is not attributed. A proxy is claimed when its implementation slot points at a listed
-implementation. Other factory designs need their own question and are added as a new `type`.
+from `factory()` is not attributed. A Morpho vault is claimed when the listed factory answers `true` to
+`isVaultV2(address)`, from the list it keeps of the vaults it created. A proxy is claimed when its
+implementation slot points at a listed implementation. Other factory designs need their own question and
+are added as a new `type`.
 
 ### Which contracts to list
 

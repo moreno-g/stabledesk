@@ -54,7 +54,7 @@ Read-only. Zero dependencies — Node's native `fetch` and `node:sqlite`, nothin
   the contracts holding balances nobody has named yet. TVL is measured as stablecoin balances held by
   contracts, which needs no per-protocol adapter on a chain where value is denominated in USDC. Each
   protocol's contracts come from its operator's own published address list (Aave, Morpho, Uniswap,
-  Circle); pools are attributed only when their factory confirms them, and smart-contract wallets —
+  Circle); pools and vaults are attributed only when their factory confirms them, and smart-contract wallets —
   contracts by bytecode, wallets by function — are named but kept out of TVL.
 
 ## Run

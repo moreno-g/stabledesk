@@ -169,20 +169,47 @@ async function probeIdentities() {
 //     Uniswap's factory returning its address is.
 // Checked once, re-checked weekly: an implementation can be upgraded, a pool cannot change factory.
 const IMPL_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
-const SEL = { factory: '0xc45a0155', token0: '0x0dfe1681', token1: '0xd21220a7', fee: '0xddca3f43', getPool: '0x1698ee82', getPair: '0xe6a43905' };
+const SEL = { factory: '0xc45a0155', token0: '0x0dfe1681', token1: '0xd21220a7', fee: '0xddca3f43', getPool: '0x1698ee82', getPair: '0xe6a43905', isVaultV2: '0x5edec50d' };
 const ATTRIBUTION_RECHECK_MS = 7 * 86400000;
+const RULES_META = 'attribution_rules';
+// Factories that keep a list of what they created and answer "is this one of mine?" for any address.
+// What they create does not name its factory, so each of them is asked about every candidate.
+const MEMBERSHIP = { 'morpho-vault-v2': SEL.isVaultV2 };
+const isTrue = (h) => typeof h === 'string' && /^0x0*1$/.test(h);
 const word = (a) => String(a).toLowerCase().replace(/^0x/, '').padStart(64, '0');
 const asAddr = (h) => (typeof h === 'string' && h.length >= 42 && !/^0x0*$/.test(h) ? '0x' + h.slice(-40).toLowerCase() : null);
 
 // Pure: what the answers attribute, given the rules. `verified` is the factory's own reply, keyed by
-// pool address. Exported for the tests.
-export function attributeFromChain(address, answers, rules, verified = new Map()) {
+// pool address; `members` is the factory that answered yes to "is this one of yours?", keyed the same
+// way. Exported for the tests.
+export function attributeFromChain(address, answers, rules, verified = new Map(), members = new Map()) {
   const impl = asAddr(answers.impl);
   if (impl && rules.implementations.has(impl)) return { protocol: rules.implementations.get(impl), basis: `implementation:${impl}`, impl };
   const factory = asAddr(answers.factory);
   const rule = factory && rules.factories.get(factory);
   if (rule && verified.get(address) === address) return { protocol: rule.protocol, basis: `factory:${factory}`, impl };
+  const owner = members.get(address);
+  const listed = owner && rules.factories.get(owner);
+  if (listed && MEMBERSHIP[listed.type]) return { protocol: listed.protocol, basis: `factory:${owner}`, impl };
   return { protocol: null, basis: null, impl };
+}
+
+// The calls that ask each list-keeping factory whether it created `address`.
+export function membershipQuestions(address, rules) {
+  return [...rules.factories.entries()].filter(([, r]) => MEMBERSHIP[r.type])
+    .map(([f, r]) => ({ to: f, data: MEMBERSHIP[r.type] + word(address) }));
+}
+
+// When the rules last changed. A contract checked against older rules was only cleared by those rules,
+// so a new rule re-opens every earlier answer instead of waiting out the recheck interval.
+function rulesSince(rules) {
+  const print = JSON.stringify([[...rules.factories.keys()].sort(), [...rules.implementations.keys()].sort()]);
+  let saved = null;
+  try { saved = JSON.parse(db.getMetaValue(RULES_META) || 'null'); } catch {}
+  if (saved?.print === print) return saved.since;
+  const since = Date.now();
+  db.setMetaValue(RULES_META, JSON.stringify({ print, since }));
+  return since;
 }
 
 // The call that asks a factory whether it created `answers`' pool, or null if no rule applies.
@@ -204,9 +231,11 @@ async function probeAttribution() {
   const holding = new Map();
   for (const r of db.balanceRows()) holding.set(r.address, (holding.get(r.address) || 0) + r.balance);
   const checked = db.attributionChecked([...holding.keys()]);
+  const since = rulesSince(rules);
   const now = Date.now();
+  const fresh = (at) => at >= since && now - at < ATTRIBUTION_RECHECK_MS;
   const targets = [...holding.entries()]
-    .filter(([a, bal]) => bal >= TVL_CANDIDATE_MIN && !isRegistered(a) && !(now - (checked.get(a) || 0) < ATTRIBUTION_RECHECK_MS))
+    .filter(([a, bal]) => bal >= TVL_CANDIDATE_MIN && !isRegistered(a) && !fresh(checked.get(a) || 0))
     .sort((x, y) => y[1] - x[1])
     .slice(0, IDENTITY_PER_PASS)
     .map(([a]) => a);
@@ -228,10 +257,20 @@ async function probeAttribution() {
       const { out: rep } = await rpcSoft(questions.map((e) => ({ method: 'eth_call', params: [e.q, 'latest'] })));
       questions.forEach((e, i) => { const got = asAddr(rep[i]); if (got) verified.set(e.x.address, got); });
     }
+    const asks = answers.filter((x) => x.answered).flatMap((x) => membershipQuestions(x.address, rules).map((q) => ({ x, q })));
+    const members = new Map();
+    if (asks.length) {
+      const { out: yes } = await rpcSoft(asks.map((e) => ({ method: 'eth_call', params: [e.q, 'latest'] })));
+      asks.forEach((e, i) => {
+        // No reply is not a no: leave the contract unchecked so the next pass asks again.
+        if (typeof yes[i] !== 'string') e.x.answered = false;
+        else if (isTrue(yes[i])) members.set(e.x.address, e.q.to);
+      });
+    }
     for (const x of answers) {
       // Nothing came back at all: we did not get to ask, which is not an answer. Try again next pass.
       if (!x.answered) continue;
-      const r = attributeFromChain(x.address, x, rules, verified);
+      const r = attributeFromChain(x.address, x, rules, verified, members);
       db.setAttribution(x.address, r.impl, r.protocol, r.basis);
       if (r.protocol) attributed += 1;
     }
@@ -447,10 +486,18 @@ export function computeAggregate() {
   // Contracts holding real balances that no registry entry claims. This is the work queue: the
   // page shows them so they can be identified and listed, which is how the registry grows from
   // evidence instead of assumption.
-  const shortlist = [...byAddress.entries()]
-    .filter(([addr, e]) => e.total >= TVL_CANDIDATE_MIN && !protocolForAddress(addr))
-    .sort((a, b) => inBase(b[1].byToken) - inBase(a[1].byToken) || b[1].total - a[1].total)
-    .slice(0, 50);
+  // Ranked within each currency, never across it: ranking by the base currency alone put every
+  // euro-only contract below the cut however much it held — 301k EURC in one Morpho vault, on
+  // 3 October 2026. The base currency keeps 50 places, every other currency 10.
+  const unnamed = [...byAddress.entries()].filter(([addr, e]) => e.total >= TVL_CANDIDATE_MIN && !protocolForAddress(addr));
+  const picked = new Map();
+  for (const d of Object.keys(inDen)) {
+    const held = (e) => sumByDenomination(e.byToken)[d] || 0;
+    unnamed.filter(([, e]) => held(e) > 0).sort((a, b) => held(b[1]) - held(a[1]))
+      .slice(0, d === BASE_DENOMINATION ? 50 : 10).forEach(([a, e]) => picked.set(a, e));
+  }
+  const shortlist = [...picked.entries()]
+    .sort((a, b) => inBase(b[1].byToken) - inBase(a[1].byToken) || b[1].total - a[1].total);
   // What each one says it is, read from the contract itself. A column of bare hex is a work queue
   // nobody can act on; "Synthra Perpetual Liquidity Token" is one somebody can. Derived, never
   // asserted — a contract's own name() is a fact about the contract and says nothing about who runs

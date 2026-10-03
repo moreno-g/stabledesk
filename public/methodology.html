@@ -304,11 +304,19 @@
     address identical on every EVM chain), <code>team</code> (the operator confirmed or published it — its docs, its address book), or
     <code>observed</code> (we found and classified it ourselves — which is not a claim about who operates it). Only the first two are marked
     verified. Two entries may never claim the same contract, because that would double-count its balance.</p>
-    <p><strong>Contracts nobody lists one by one.</strong> Pools and smart accounts are created without a registry edit, so two rules
-    attribute them, each on the chain's own answer. A pool belongs to a protocol when that protocol's <em>factory</em>, asked for the pool's
+    <p><strong>Contracts nobody lists one by one.</strong> Pools, vaults and smart accounts are created without a registry edit, so
+    rules attribute them, each on the chain's own answer. A pool belongs to a protocol when that protocol's <em>factory</em>, asked for the pool's
     tokens and fee (<code>getPool</code> / <code>getPair</code>), returns the pool's address — a contract that only claims the factory is not
-    attributed. A proxy belongs to an entry when its EIP-1967 implementation slot points at the implementation listed for it. Each
-    attributed contract carries the fact that decided it (<code>factory:0x…</code> or <code>implementation:0x…</code>).</p>
+    attributed. A Morpho vault belongs to Morpho when Morpho's published vault factory answers <code>true</code> to
+    <code>isVaultV2(address)</code>, from the list it keeps of the vaults it created. A proxy belongs to an entry when its EIP-1967
+    implementation slot points at the implementation listed for it. Each attributed contract carries the fact that decided it
+    (<code>factory:0x…</code> or <code>implementation:0x…</code>). A contract checked against the rules is checked again when they change,
+    rather than after the usual week.</p>
+    <p><strong>What adding Morpho's vaults corrected, on 3&nbsp;October&nbsp;2026.</strong> A Morpho vault keeps the deposits it has not
+    yet put into a market; the rest sits in Morpho's market contract, which was already counted. That idle balance was counted in the chain
+    total but under no protocol: on 3&nbsp;October, 2.00M USDC across three vaults (1.94M in one Steakhouse vault alone) and about 0.30M
+    EURC in a Galaxy vault, against 42.8k USDC in the market contract. Morpho's own address list publishes the factory, so the vaults are now
+    Morpho's. The chain total does not move; the share of it we can name does.</p>
     <p><strong>How many contracts are measured, and which.</strong> One pass reads <code>balanceOf</code> for every tracked asset against
     every target, so the number of targets per pass is capped — at <strong>600</strong> — to keep a pass inside the public RPC's rate limit.
     That budget is split rather than spent on the same contracts every time. Registry addresses are always read, because a listed protocol
