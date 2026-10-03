@@ -42,7 +42,8 @@ Node **≥ 22.5.0** (obligatoire : `node:sqlite`). Zéro dépendance npm, ESM, `
 - Circle Gateway repositionne de la liquidité — ce n'est **pas** de l'émission. Voir le commentaire
   dans `chains.js`. Même règle pour **CCTP** (burn sur une chaîne, mint sur l'autre) : attribué par
   transaction, publié à part (`cmint`/`cburn`, `/v1/cctp`), retiré de l'émission organique.
-- Toute page affichant un nombre répète l'avertissement testnet. Ne pas le retirer d'une page.
+- Sur testnet, toute page affichant un nombre répète l'avertissement testnet (dérivé de `chain.isTestnet`).
+  Ne pas le retirer d'une page. Le site tourne sur mainnet depuis le 16 septembre 2026.
 - `arc.db` à la racine est la base locale : ne pas la commiter ni la supprimer. Sur Railway,
   `DB_PATH` doit pointer dans le volume monté (`RAILWAY_VOLUME_MOUNT_PATH`).
 

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stabledesk · Methodology</title>
-<meta name="description" content="How Stabledesk measures stablecoin activity on the {{NET}} — real volume (single-directional method), mint/burn, velocity, and data sources.">
+<meta name="description" content="How Stabledesk measures stablecoin activity on {{THE_NET}} — real volume (single-directional method), mint/burn, velocity, and data sources.">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Stabledesk">
 <meta property="og:title" content="Stabledesk · Methodology">
@@ -16,7 +16,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:site" content="@getStabledesk">
 <meta name="twitter:title" content="Stabledesk · Methodology">
-<meta name="twitter:description" content="How Stabledesk measures stablecoin activity on the {{NET}}.">
+<meta name="twitter:description" content="How Stabledesk measures stablecoin activity on {{THE_NET}}.">
 <meta name="twitter:image" content="https://stabledesk.xyz/og.png">
 <meta property="og:image:alt" content="Stabledesk — methodology">
 <meta property="og:locale" content="en_US">
@@ -73,9 +73,9 @@
 <body>
 <div class="wrap">
   <div class="top"><div class="logo"></div><h1>Methodology</h1><button class="iconbtn" id="themeBtn" type="button" style="margin-left:auto" aria-label="Theme"></button></div>
-  <p class="sub">How Stabledesk measures stablecoin activity on the {{NET}}. <a href="/">← Back to the terminal</a></p>
+  <p class="sub">How Stabledesk measures stablecoin activity on {{THE_NET}}. <a href="/">← Back to the terminal</a></p>
 
-  <p class="lead">Stabledesk indexes on-chain <code>Transfer</code> events for the {{NET}} stablecoins and turns them into
+  <p class="lead">Stabledesk indexes on-chain <code>Transfer</code> events for {{THE_NET}} stablecoins and turns them into
   time series, supply metrics and flow analytics — with a deliberate focus on <strong>real economic volume</strong>, not raw event counts.</p>
 
   <h2>Data source</h2>
@@ -99,7 +99,7 @@
     than folded into a total. <strong>The same applies to volume</strong>: until August 2026 the 24-hour figure was a sum of
     transferred amounts across currencies, so it answered no question, and every token's share was measured against that mixed
     total. Volume is grouped the same way now, and each share is a share of the volume moved in its own currency.</p>
-    <p style="margin-bottom:0">We track the {{NET}} stablecoins over their ERC-20 interface: {{TOKENS_DETAIL}}. That list is
+    <p style="margin-bottom:0">We track {{THE_NET}} stablecoins over their ERC-20 interface: {{TOKENS_DETAIL}}. That list is
     generated from the running configuration rather than written here, so it cannot drift from what is actually indexed — the full
     set of contract addresses is in <code>/openapi.json</code> and on <code>/v1/status</code>. An asset carried by more than one
     contract is measured across all of them; see <em>What is counted as a stablecoin</em> below. A historical indexer backfills
@@ -426,7 +426,7 @@
         <a href="https://github.com/moreno-g/stabledesk">Source</a>
       </nav>
     </div>
-    <div class="sf-legal">© 2026 Stabledesk · Live {{NET}} data · Prototype v0 — read-only · not investment advice.</div>
+    <div class="sf-legal">© 2026 Stabledesk · Live {{NET}} data · read-only · not investment advice.</div>
   </footer>
 </div>
 </body>

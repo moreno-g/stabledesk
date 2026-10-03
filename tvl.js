@@ -532,7 +532,7 @@ export const history = (protocol = '*', days = 30) => db.tvlSeries(historyKey(pr
 export function detail(id, opts = {}) {
   const agg = aggregate();
   const p = agg.protocols.find((x) => x.id === id);
-  if (!p) return null;
+  if (!p) return walletDetail(id, agg, opts);
   const contracts = [...p.contracts, ...derivedAddresses(p.id)].map((address) => {
     const balances = db.balancesForAddress(address);
     const stats = db.addressStats(address);
@@ -565,6 +565,42 @@ export function detail(id, opts = {}) {
     recent,
     series: history(p.id, opts.days || 30),
     chainTvl: chainBase,
+    lastRun,
+  };
+}
+
+// An entry naming smart-contract wallets is kept out of the protocol ranking, so detail() above does
+// not find it — and every link to one of its accounts (search, labels, the ecosystem tile) answered
+// "not found", for an account holding $86M. The page exists; it just says what the accounts are.
+function walletDetail(id, agg, opts = {}) {
+  const entry = PROTOCOLS.find((x) => x.id === id && x.wallets);
+  if (!entry) return null;
+  const addrs = [...entry.contracts, ...derivedAddresses(entry.id)];
+  const contracts = addrs.map((address) => {
+    const balances = db.balancesForAddress(address);
+    const byToken = Object.fromEntries(balances.map((b) => [b.token, b.balance]));
+    const stats = db.addressStats(address);
+    return {
+      address, label: getLabel(address)?.name || null, basis: attributionBasis(address),
+      tvl: balances.reduce((a, b) => a + b.balance, 0), byToken, byDenomination: sumByDenomination(byToken),
+      windowVolume: stats?.volume || 0, windowTransfers: stats?.transfers || 0, lastBlock: stats?.last_block || null,
+    };
+  }).sort((a, b) => inBase(b.byToken) - inBase(a.byToken) || b.tvl - a.tvl);
+  const flow = db.volumeForAddresses(addrs);
+  const w = agg.totals.smartWallets || { tvl: 0, byToken: {}, accounts: 0 };
+  return {
+    ...publicShape(entry),
+    wallets: true,
+    baseDenomination: BASE_DENOMINATION,
+    tvl: w.tvl, tvlByToken: w.byToken, tvlByDenomination: sumByDenomination(w.byToken),
+    contractsWithBalance: w.accounts,
+    observed: w.accounts > 0,
+    windowVolume: flow.volume, windowTransfers: flow.transfers,
+    share: null,                     // not a share of TVL: these balances are excluded from it
+    contractDetail: contracts,
+    recent: addrs.flatMap((c) => db.addressRecent(c, opts.recent || 8)).sort((a, b) => b.block - a.block).slice(0, opts.recent || 8),
+    series: [],
+    chainTvl: agg.totals.byDenomination?.[BASE_DENOMINATION]?.tvl || 0,
     lastRun,
   };
 }
