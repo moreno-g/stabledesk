@@ -245,11 +245,16 @@ const REGISTRY = [
     name: 'Morpho',
     vendor: 'Morpho Labs',
     category: 'lending',
-    desc: 'Lending. Every Morpho market lives in one contract, so its balance is the protocol\'s liquidity.',
+    desc: 'Lending. Every Morpho market lives in one contract, which holds what is supplied and not lent; Morpho vaults hold what they have not yet put into a market.',
     links: { site: 'https://morpho.org', docs: 'https://docs.morpho.org/get-started/resources/addresses/' },
     contracts: [
       '0x34cd04070dd72b14e241112f6d83812df5af7fcd',   // Morpho — holds every market's liquidity
       '0xf02615d094fc02fc031c35fe705e175aa4653f20',   // Adaptive Curve IRM
+    ],
+    // Curators create vaults without a registry edit. The factory keeps a list of its own and answers
+    // isVaultV2(address); a vault holds only its idle balance, the rest sits in the contract above.
+    factories: [
+      { address: '0x3b0eefabfa22ec7cf2c73877ac16e78d76749f12', type: 'morpho-vault-v2' },   // VaultV2Factory
     ],
     networks: ['mainnet'],
     source: 'team',
@@ -310,9 +315,9 @@ const REGISTRY = [
 ];
 
 const ADDR = /^0x[0-9a-f]{40}$/;
-// How a factory is asked whether it created a pool. Each type is one question the factory answers
+// How a factory is asked whether it created a contract. Each type is one question the factory answers
 // from its own storage, which is what makes the attribution unforgeable.
-export const FACTORY_TYPES = ['uniswap-v2', 'uniswap-v3'];
+export const FACTORY_TYPES = ['uniswap-v2', 'uniswap-v3', 'morpho-vault-v2'];
 
 // Fail loudly at import time rather than serving a broken registry. A malformed entry here would
 // otherwise show up as a protocol with no TVL, which looks like a real (zero) measurement.

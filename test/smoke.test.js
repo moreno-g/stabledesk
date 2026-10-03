@@ -783,6 +783,18 @@ test('a pool is attributed only when its factory confirms it, a proxy only by it
   assert.equal(attributeFromChain(POOL, { impl: w(OTHER) }, rules).protocol, null);
   assert.equal(attributeFromChain(POOL, { impl: '0x' + '0'.repeat(64) }, rules).impl, null, 'an empty slot is no implementation');
 
+  // A factory that keeps a list of its own is asked about the contract, since the contract does not name it.
+  const { membershipQuestions } = await import('../tvl.js');
+  const VF = '0x' + 'e'.repeat(40), VAULT = '0x' + '3'.repeat(40);
+  const withVaults = { factories: new Map([...rules.factories, [VF, { protocol: 'morpho', type: 'morpho-vault-v2' }]]), implementations: rules.implementations };
+  assert.deepEqual(membershipQuestions(VAULT, withVaults), [{ to: VF, data: '0x5edec50d' + VAULT.slice(2).padStart(64, '0') }],
+    'one isVaultV2 question per list-keeping factory, none for pool factories');
+  assert.deepEqual(attributeFromChain(VAULT, {}, withVaults, new Map(), new Map([[VAULT, VF]])),
+    { protocol: 'morpho', basis: `factory:${VF}`, impl: null });
+  assert.equal(attributeFromChain(VAULT, {}, withVaults).protocol, null, 'no yes from the factory, no attribution');
+  assert.equal(attributeFromChain(VAULT, {}, withVaults, new Map(), new Map([[VAULT, V3]])).protocol, null,
+    'a pool factory cannot vouch for a contract by membership');
+
   // A derived attribution names the address everywhere, but a listed address always wins over it.
   const { setDerivedAttributions, protocolForAddress, attributionBasis, derivedAddresses } = await import('../protocols.js');
   const listed = '0xca11bde05977b3631167028862be2a173976ca11';   // Multicall3, listed on both networks
@@ -818,7 +830,8 @@ test('the Arc mainnet registry loads, with every address claimed once', async ()
   assert.equal(out.hub, 'aave-v4');
   assert.equal(out.morpho, 'morpho');
   assert.equal(out.pm, 'uniswap');
-  assert.equal(out.f.length, 2, 'Uniswap v2 and v3 factories');
+  assert.equal(out.f.length, 3, 'Uniswap v2 and v3 factories, Morpho vault factory');
+  assert.ok(out.f.includes('0x3b0eefabfa22ec7cf2c73877ac16e78d76749f12'), 'Morpho VaultV2Factory, from Morpho\'s address list');
   assert.equal(out.i.length, 1);
   assert.ok(!out.ids.includes('wrapped-usdc'), 'a testnet-only entry stays off mainnet');
 
@@ -1072,6 +1085,19 @@ test('tvl attributes balances to protocols and reports the rest as unattributed'
   assert.equal(ad.tvl, 500);
   // …and a registered one redirects to the owning protocol instead of claiming to be unnamed.
   assert.equal(tvl.addressDetail(registered).id, owner.id);
+});
+
+test('the unnamed list ranks each currency on its own, so a euro-only contract is not cut by dollar holders', async () => {
+  const db = await import('../db.js');
+  const tvl = await import('../tvl.js');
+  const big = Array.from({ length: 60 }, (_, i) => '0x' + (0x5000 + i).toString(16).padStart(40, '0'));
+  const euro = '0x' + 'ee'.repeat(20);
+  db.upsertBalances([...big.map((a) => ({ address: a, token: 'USDC', balance: 10000 })), { address: euro, token: 'EURC', balance: 9000 }]);
+  const cand = tvl.computeAggregate().candidates.map((c) => c.address);
+  assert.ok(cand.includes(euro), 'the largest euro-only holder is listed');
+  assert.equal(cand.filter((a) => big.includes(a)).length, 50, 'the base currency keeps its 50 places');
+  assert.ok(cand.indexOf(euro) > cand.indexOf(big[0]), 'and the list is still ordered by the base currency first');
+  db.upsertBalances([...big, euro].map((a) => ({ address: a, token: a === euro ? 'EURC' : 'USDC', balance: 0 })));
 });
 
 // ---- CSV export ----

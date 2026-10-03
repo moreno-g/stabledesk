@@ -862,7 +862,7 @@ function build() {
             tvlByToken: { type: 'object', additionalProperties: { type: 'number' } },
             tvlByDenomination: { type: 'object', additionalProperties: { type: 'number' }, description: 'The protocol\'s TVL per currency. Protocols are ranked by the base denomination; `tvl` adds currencies at face value and is kept for existing consumers.' },
             contracts: { type: 'array', items: { type: 'string' }, description: 'Listed contracts. Contracts attributed by a rule are counted in `derivedContracts`.' },
-            factories: { type: 'array', items: { type: 'object', properties: { address: { type: 'string' }, type: { type: 'string', enum: ['uniswap-v2', 'uniswap-v3'] } } }, description: 'A pool is attributed when this factory returns its address for its own tokens and fee.' },
+            factories: { type: 'array', items: { type: 'object', properties: { address: { type: 'string' }, type: { type: 'string', enum: ['uniswap-v2', 'uniswap-v3', 'morpho-vault-v2'] } } }, description: 'A pool is attributed when this factory returns its address for its own tokens and fee (uniswap-v2, uniswap-v3); a vault when the factory answers true to isVaultV2(address) (morpho-vault-v2).' },
             implementations: { type: 'array', items: { type: 'string' }, description: 'An EIP-1967 proxy is attributed when its implementation slot points here.' },
             derivedContracts: { type: 'integer', description: 'Contracts attributed by `factories` or `implementations`, as verified on-chain.' },
             wallets: { type: 'boolean', description: 'The entry names smart-contract wallets: named, never counted as TVL.' },
