@@ -28,7 +28,7 @@
     --bg:#0B0F14; --panel:#121820; --panel-2:#161D26; --inset:#0E141B;
     --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583;
     --line:#212B36; --line-2:#2B3742; --accent:#25C4B8;
-    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C;
+    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C; --gbpa:#D97BA6;
     --good:#37C98A; --warn:#E7A93A; --bad:#E5686A;
     --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
     --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
@@ -37,12 +37,12 @@
   @media (prefers-color-scheme:light){:root{
     --bg:#EEF1F5; --panel:#FFFFFF; --panel-2:#F4F7FA; --inset:#EAEEF3;
     --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2; --line:#E1E6EC; --line-2:#D2DAE2;
-    --accent:#0FA79E; --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69;
+    --accent:#0FA79E; --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69; --gbpa:#B04F80;
     --good:#128A5B; --warn:#B4791A; --bad:#D2494B;
     --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08);
   }}
-  :root[data-theme="dark"]{--bg:#0B0F14; --panel:#121820; --panel-2:#161D26; --inset:#0E141B; --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583; --line:#212B36; --line-2:#2B3742; --accent:#25C4B8; --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C; --good:#37C98A; --warn:#E7A93A; --bad:#E5686A; --shadow:0 1px 2px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.28)}
-  :root[data-theme="light"]{--bg:#EEF1F5; --panel:#FFFFFF; --panel-2:#F4F7FA; --inset:#EAEEF3; --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2; --line:#E1E6EC; --line-2:#D2DAE2; --accent:#0FA79E; --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69; --good:#128A5B; --warn:#B4791A; --bad:#D2494B; --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08)}
+  :root[data-theme="dark"]{--bg:#0B0F14; --panel:#121820; --panel-2:#161D26; --inset:#0E141B; --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583; --line:#212B36; --line-2:#2B3742; --accent:#25C4B8; --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C; --gbpa:#D97BA6; --good:#37C98A; --warn:#E7A93A; --bad:#E5686A; --shadow:0 1px 2px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.28)}
+  :root[data-theme="light"]{--bg:#EEF1F5; --panel:#FFFFFF; --panel-2:#F4F7FA; --inset:#EAEEF3; --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2; --line:#E1E6EC; --line-2:#D2DAE2; --accent:#0FA79E; --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69; --gbpa:#B04F80; --good:#128A5B; --warn:#B4791A; --bad:#D2494B; --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08)}
   *{box-sizing:border-box} html,body{margin:0}
   body{font-family:var(--sans); background:var(--bg); color:var(--ink); -webkit-font-smoothing:antialiased; line-height:1.5; padding:clamp(14px,3vw,30px)}
   .shell{max-width:1180px; margin:0 auto}
@@ -208,7 +208,7 @@ const TOK={{TOKENS_JSON}};
 // Per-token accent. The fallback matters: a token added to the network profile without a palette
 // entry would otherwise emit var(undefined), which paints nothing at all — a blank page that reads
 // as missing data rather than a missing colour.
-const TCOLOR={USDC:'--usdc',EURC:'--eurc',USYC:'--usyc',USDT:'--usdt'};
+const TCOLOR={USDC:'--usdc',EURC:'--eurc',USYC:'--usyc',USDT:'--usdt',GBPA:'--gbpa'};
 const tokenColor=(t)=>`var(${TCOLOR[t]||'--accent'})`;
 const short=(a)=>a?a.slice(0,6)+'…'+a.slice(-4):'—';
 const esc=(s)=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

@@ -30,7 +30,7 @@
     --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583;
     --line:#212B36; --line-2:#2B3742;
     --accent:#25C4B8; --accent-2:#3AD7CB;
-    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C;
+    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C; --gbpa:#D97BA6;
     --good:#37C98A; --warn:#E7A93A; --bad:#E5686A;
     --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
     --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
@@ -43,7 +43,7 @@
       --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2;
       --line:#E1E6EC; --line-2:#D2DAE2;
       --accent:#0FA79E; --accent-2:#0B7E77;
-      --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69;
+      --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69; --gbpa:#B04F80;
       --good:#128A5B; --warn:#B4791A; --bad:#D2494B;
       --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08);
     }
@@ -54,7 +54,7 @@
     --ink:#E9EEF4; --ink-2:#9AA6B3; --ink-3:#697583;
     --line:#212B36; --line-2:#2B3742;
     --accent:#25C4B8; --accent-2:#3AD7CB;
-    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C;
+    --usdc:#25C4B8; --eurc:#5B8DEF; --usyc:#9B7EDE; --usdt:#3FB98C; --gbpa:#D97BA6;
     --good:#37C98A; --warn:#E7A93A; --bad:#E5686A;
     --shadow:0 1px 2px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.28);
   }
@@ -63,7 +63,7 @@
     --ink:#101820; --ink-2:#55606E; --ink-3:#8B95A2;
     --line:#E1E6EC; --line-2:#D2DAE2;
     --accent:#0FA79E; --accent-2:#0B7E77;
-    --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69;
+    --usdc:#0FA79E; --eurc:#3F72D9; --usyc:#7E5FD0; --usdt:#2E8F69; --gbpa:#B04F80;
     --good:#128A5B; --warn:#B4791A; --bad:#D2494B;
     --shadow:0 1px 2px rgba(16,24,33,.05),0 12px 34px rgba(16,24,33,.08);
   }
@@ -190,7 +190,7 @@
   .flowrow:first-child{border-top:0}
   .flowrow .sy{display:flex; align-items:center; gap:8px; font-weight:700; font-size:13px; width:74px; flex:none}
   .flowrow .sy i{width:9px; height:9px; border-radius:3px; background:var(--c)}
-  .flowrow.usdc{--c:var(--usdc)} .flowrow.eurc{--c:var(--eurc)} .flowrow.usyc{--c:var(--usyc)} .flowrow.usdt{--c:var(--usdt)}
+  .flowrow.usdc{--c:var(--usdc)} .flowrow.eurc{--c:var(--eurc)} .flowrow.usyc{--c:var(--usyc)} .flowrow.usdt{--c:var(--usdt)} .flowrow.gbpa{--c:var(--gbpa)}
   .flowrow .big{font-family:var(--mono); font-size:17px; font-weight:600; font-variant-numeric:tabular-nums}
   .flowrow .sub{font-size:10.5px; color:var(--ink-3); font-family:var(--mono); margin-top:1px}
   .flowrow .rt{margin-left:auto; text-align:right}
@@ -201,7 +201,7 @@
   th.r,td.r{text-align:right}
   td{padding:8px 0; border-top:1px solid var(--line); font-variant-numeric:tabular-nums}
   .chip{font-family:var(--mono); font-size:10.5px; font-weight:700; padding:2px 7px; border-radius:5px; background:color-mix(in srgb,var(--c) 16%,transparent); color:var(--c)}
-  .chip.usdc{--c:var(--usdc)} .chip.eurc{--c:var(--eurc)} .chip.usyc{--c:var(--usyc)} .chip.usdt{--c:var(--usdt)}
+  .chip.usdc{--c:var(--usdc)} .chip.eurc{--c:var(--eurc)} .chip.usyc{--c:var(--usyc)} .chip.usdt{--c:var(--usdt)} .chip.gbpa{--c:var(--gbpa)}
   .addr{font-family:var(--mono); color:var(--ink-2)}
   .amt{font-family:var(--mono); font-weight:600}
   .rank{font-family:var(--mono); color:var(--ink-3); width:20px}
@@ -213,7 +213,7 @@
   .stbl td:first-child{text-align:left}
   .stbl .sy{display:inline-flex; align-items:center; gap:6px; font-weight:700; font-family:var(--sans)}
   .stbl .sy i{width:8px; height:8px; border-radius:2px; background:var(--c)}
-  .stbl tr.usdc{--c:var(--usdc)} .stbl tr.eurc{--c:var(--eurc)} .stbl tr.usyc{--c:var(--usyc)} .stbl tr.usdt{--c:var(--usdt)}
+  .stbl tr.usdc{--c:var(--usdc)} .stbl tr.eurc{--c:var(--eurc)} .stbl tr.usyc{--c:var(--usyc)} .stbl tr.usdt{--c:var(--usdt)} .stbl tr.gbpa{--c:var(--gbpa)}
   .sharecell{min-width:52px}
   .sharebar{height:5px; border-radius:3px; background:var(--inset); overflow:hidden; margin-top:4px}
   .sharebar span{display:block; height:100%; background:var(--c); border-radius:3px; transition:width .4s ease}
@@ -521,7 +521,7 @@ const TOK={{TOKENS_JSON}};
 // Per-token chart colour. Falls back to the accent rather than emitting var(undefined), which
 // renders as no stroke at all — an empty chart that looks like missing data rather than a missing
 // palette entry. Adding a token to the network profile must never be able to blank a chart.
-const TCOLOR={ALL:'--accent',USDC:'--usdc',EURC:'--eurc',USYC:'--usyc',USDT:'--usdt'};
+const TCOLOR={ALL:'--accent',USDC:'--usdc',EURC:'--eurc',USYC:'--usyc',USDT:'--usdt',GBPA:'--gbpa'};
 const tokenColor=(t)=>`var(${TCOLOR[t]||'--accent'})`;
 
 let chart = { token:'ALL', range:'24h', metric:'real' };

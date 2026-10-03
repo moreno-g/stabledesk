@@ -1962,6 +1962,7 @@ test('denomination: non-USD stablecoins on Arc are declared before they are trac
   assert.equal(denominationOf('cNGN'), 'NGN');
   assert.equal(denominationOf('QCAD'), 'CAD');
   assert.equal(denominationOf('MXNB'), 'MXN');
+  assert.equal(denominationOf('GBPA'), 'GBP');
 });
 
 test('denomination: an undeclared symbol yields null, never a guess', async () => {

@@ -45,6 +45,10 @@ export const TIERS = {
 export const DENOMINATION = {
   USDC: 'USD', USDT: 'USD', USYC: 'USD',
   EURC: 'EUR',
+  // Agant GBP, issued by Agant Finance (UK). On Arc mainnet at 0xbbe6aab0ed76e90aea0d1cd978ec231c8adcdf8b,
+  // the address it has on Ethereum and Base; verified on 3 October 2026 call by call — name "Agant GBP",
+  // 6 decimals, 575,218.37 in supply, no tracked asset custodied, so an issuer and not a wrapper.
+  GBPA: 'GBP',
   // Deployed on Arc testnet and not tracked yet. Listed in advance so that adding one to ARC_TOKENS
   // is a one-line change that cannot accidentally contaminate the dollar total.
   QCAD: 'CAD', MXNB: 'MXN', cNGN: 'NGN', ZARU: 'ZAR', tKRW1: 'KRW',
