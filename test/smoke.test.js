@@ -1138,6 +1138,22 @@ test('an EIP-7702 account is a wallet, and one recorded as a contract before the
   assert.equal(db.balanceRows().some((r) => r.address === acct), false, 'its balance leaves the TVL table');
 });
 
+test('moved volume is kept per token, and published per currency only once it covers the week', async () => {
+  const db = await import('../db.js');
+  const tvl = await import('../tvl.js');
+  const a = '0x' + '8'.repeat(40);
+  db.applyBatch(new Map(), new Map([[a, { transfers: 3, volume: 350, lastBlock: 10, firstBlock: 10,
+    byToken: { USDC: { transfers: 2, volume: 300, lastBlock: 10 }, EURC: { transfers: 1, volume: 50, lastBlock: 10 } } }]]), []);
+  assert.deepEqual(db.volumeByTokenForAddresses([a]), { USDC: 300, EURC: 50 }, 'not one 350 that is part euros');
+  assert.equal(tvl.movedComplete(), false, 'counting began with this database: less than a week covered');
+  const since = db.getMetaValue('addr_token_since');
+  db.setMetaValue('addr_token_since', Date.now() - 8 * 86400000);
+  assert.equal(tvl.movedComplete(), true);
+  assert.ok(tvl.computeAggregate().protocols.every((p) => p.windowVolumeByDenomination && typeof p.windowVolumeByDenomination === 'object'));
+  db.setMetaValue('addr_token_since', since);
+  assert.ok(tvl.computeAggregate().protocols.every((p) => p.windowVolumeByDenomination === null), 'null, not a smaller number');
+});
+
 // ---- CSV export ----
 test('csv quotes correctly and neutralises spreadsheet formulas', async () => {
   const { toCsv } = await import('../csv.js');

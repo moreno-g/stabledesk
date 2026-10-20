@@ -534,10 +534,15 @@ export function feeMetrics(sample, blocksInWindow, blocksPerDay, volumeMoved, bu
 // the cheapest edge of the funding graph, used to tie an operational wallet back to its funder.
 // `firstBlock` is kept for a different reason: it is the denominator of the noise filter's rate, and
 // without it a total over an unknown span was being compared against a per-day limit.
-function bumpAddr(map, a, amount, block, from, sent = false) {
+function bumpAddr(map, a, amount, block, from, sent = false, token = null) {
   let x = map.get(a);
-  if (!x) { x = { transfers: 0, volume: 0, lastBlock: 0, firstBlock: block, firstFrom: null, sentTransfers: 0, sentVolume: 0, sentFirst: null, sentLast: null }; map.set(a, x); }
+  if (!x) { x = { transfers: 0, volume: 0, lastBlock: 0, firstBlock: block, firstFrom: null, sentTransfers: 0, sentVolume: 0, sentFirst: null, sentLast: null, byToken: {} }; map.set(a, x); }
   x.transfers += 1; x.volume += amount; x.lastBlock = Math.max(x.lastBlock, block);
+  // Per token as well: `volume` adds every token's face value together, which is a quantity of nothing.
+  if (token) {
+    const t = x.byToken[token] || (x.byToken[token] = { transfers: 0, volume: 0, lastBlock: 0 });
+    t.transfers += 1; t.volume += amount; t.lastBlock = Math.max(t.lastBlock, block);
+  }
   x.firstBlock = Math.min(x.firstBlock ?? block, block);
   if (from && !x.firstFrom) x.firstFrom = from;
   if (sent) {
@@ -644,8 +649,8 @@ function processLogs(logs, opts = {}, gatewayTxs = null, tsAt = approxTs, cctp =
       else if (route === 'cctp') bk.cburn += amount;
       if (opts.live && amount >= NOTABLE_MIN) pushFeed({ ts, kind: 'burn', token: meta.symbol, amount, from, to, block, bridged, route });
     } else {
-      bumpAddr(addrs, from, amount, block, null, true);
-      bumpAddr(addrs, to, amount, block, from);
+      bumpAddr(addrs, from, amount, block, null, true, meta.symbol);
+      bumpAddr(addrs, to, amount, block, from, false, meta.symbol);
       recents.push({ block, ts, token: meta.symbol, frm: from, too: to, amount });
       if (opts.live) {
         const ev = { ts, kind: 'transfer', token: meta.symbol, amount, from, to, block };
