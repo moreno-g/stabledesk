@@ -260,6 +260,14 @@ function denomCell(by, base){
   return compact(main)+(base?' <span style="font-size:10.5px;color:var(--ink-3)">'+esc(base)+'</span>':'')+rest;
 }
 
+// Moved, per currency once per-token counting covers the retained week. Until then the old figure, which
+// adds every currency's face value together, and the cell says so instead of passing it off as dollars.
+function movedCell(by, total, base){
+  return by ? denomCell(by, base)
+    : '<span title="Every currency added at face value — per-currency figures start once a full week is counted">'
+      + compact(total) + ' <span style="font-size:10.5px;color:var(--ink-3)">all</span></span>';
+}
+
 function renderRows(){
   const d = state.data; if(!d) return;
   const base = d.totals?.baseDenomination;
@@ -283,7 +291,7 @@ function renderRows(){
       + '<td class="r amt">'+denomCell(p.tvlByDenomination, base)+'</td>'
       + '<td class="r"><span class="amt" style="font-size:11px">'+(share*100).toFixed(1)+'%</span>'
         + '<div class="bar"><i style="width:'+Math.min(100,share*100).toFixed(1)+'%"></i></div></td>'
-      + '<td class="r amt">'+compact(p.windowVolume)+'</td>'
+      + '<td class="r amt">'+movedCell(p.windowVolumeByDenomination, p.windowVolume, base)+'</td>'
       + '<td class="r" style="color:var(--ink-3)" title="Contracts holding a balance / listed contracts, plus those attributed by factory or implementation">'
         +(p.contractsWithBalance||0)+'/'+((p.contracts||[]).length+(p.derivedContracts||0))+'</td>'
       + '<td class="links">'+(links||'<span style="color:var(--ink-3)">—</span>')+'</td></tr>';
@@ -345,7 +353,7 @@ function render(d){
       + '</td>'
     + '<td class="r amt">'+denomCell(c.tvlByDenomination, state.data?.totals?.baseDenomination)+'</td>'
     + '<td style="font-size:11px;color:var(--ink-3);font-family:var(--mono)">'+esc(Object.keys(c.byToken||{}).join(' · ')||'—')+'</td>'
-    + '<td class="r amt">'+compact(c.volume)+'</td>'
+    + '<td class="r amt">'+movedCell(c.volumeByDenomination, c.volume, state.data?.totals?.baseDenomination)+'</td>'
     + '<td class="r" style="color:var(--ink-3)">'+nf.format(c.transfers||0)+'</td></tr>').join('')
     : '<tr><td colspan="6" class="empty">Every contract holding a balance is accounted for.</td></tr>';
 

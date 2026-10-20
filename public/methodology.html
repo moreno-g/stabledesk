@@ -380,9 +380,9 @@
       <tr><td>Fees / day</td><td>Mean fee per sampled block × blocks per day — a run rate, not a cumulative total.</td></tr>
       <tr><td>Cost to move $1M</td><td>Total network fees ÷ real dollar-stablecoin volume, scaled to $1M. What the network charges to move a million dollars.</td></tr>
       <tr><td>Flagged address</td><td>An address that sent more than 1,000 transfers or $10M in 30 days — the monthly limits whole on history shorter than a month, its average monthly rate beyond.</td></tr>
-      <tr><td>TVL</td><td>Sum of indexed stablecoin balances held by addresses with bytecode, read with <code>balanceOf</code>.</td></tr>
+      <tr><td>TVL</td><td>Sum of indexed stablecoin balances held by contracts, read with <code>balanceOf</code>, per currency. A contract is an address with bytecode, except an EIP-7702 delegation designator, which marks an ordinary account; smart-contract wallets are kept out.</td></tr>
       <tr><td>Attributed TVL</td><td>The part of TVL held by contracts a registry entry claims. The remainder is reported as unattributed.</td></tr>
-      <tr><td>Protocol "moved"</td><td>Transfer volume across a protocol's contracts over the retained window (~7 days) — not 24 hours.</td></tr>
+      <tr><td>Protocol "moved"</td><td>Transfer volume across a protocol's contracts over the retained window (~7 days) — not 24 hours — per currency. Until 20&nbsp;October&nbsp;2026 it added every token's face value into one number, so an FX pool's figure was half euros; per-token counting started that day, and until it covers a full week the page shows the old figure marked "all" rather than a per-currency figure covering less time.</td></tr>
       <tr><td>Observed</td><td>A listed protocol we have seen hold a balance or move value. Distinguishes a live entry from one only listed.</td></tr>
     </tbody>
   </table>

@@ -337,6 +337,20 @@ for (const col of ['sent_transfers INTEGER NOT NULL DEFAULT 0', 'sent_volume REA
                    'sent_first_block INTEGER', 'sent_last_block INTEGER']) {
   try { db.exec(`ALTER TABLE addr_stats ADD COLUMN ${col}`); } catch { /* already present */ }
 }
+// What each address moved, per token. addr_stats adds every token's face value into one `volume`, so a
+// protocol's "moved" figure was dollars plus euros plus pounds — on an FX pool, half of it euros. Same
+// window and pruning as addr_stats; `addr_token_since` records when counting began, because until the
+// table covers the whole window its sums cover less time than addr_stats does.
+db.exec(`CREATE TABLE IF NOT EXISTS addr_token_stats (
+  address    TEXT    NOT NULL,
+  token      TEXT    NOT NULL,
+  transfers  INTEGER NOT NULL DEFAULT 0,
+  volume     REAL    NOT NULL DEFAULT 0,
+  last_block INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (address, token)
+);
+CREATE INDEX IF NOT EXISTS idx_ats_block ON addr_token_stats(last_block);
+INSERT OR IGNORE INTO meta(k, v) VALUES('addr_token_since', CAST(CAST(strftime('%s','now') AS INTEGER) * 1000 AS TEXT));`)
 // Migration: when this address was last asked what it calls itself. Distinct from `checked`, which the
 // contract-discovery path also writes — so `checked` cannot mean "identity has been probed", and using
 // it as though it did would re-ask every silent contract on every pass, burning the whole per-pass
@@ -437,6 +451,9 @@ const stmt = {
       sent_first_block = MIN(COALESCE(sent_first_block, ?), ?), sent_last_block = MAX(COALESCE(sent_last_block, ?), ?)
     WHERE address = ?`),
   insRecent: db.prepare('INSERT INTO recent(block, ts, token, frm, too, amount) VALUES(?, ?, ?, ?, ?, ?)'),
+  upAddrTok: db.prepare(`INSERT INTO addr_token_stats(address, token, transfers, volume, last_block) VALUES(?, ?, ?, ?, ?)
+    ON CONFLICT(address, token) DO UPDATE SET transfers = addr_token_stats.transfers + excluded.transfers,
+      volume = addr_token_stats.volume + excluded.volume, last_block = MAX(addr_token_stats.last_block, excluded.last_block)`),
   trimRecent: db.prepare('DELETE FROM recent WHERE id <= (SELECT MAX(id) FROM recent) - ?'),
   trimRecentTs: db.prepare('DELETE FROM recent WHERE ts < ?'),
   recentWindow: db.prepare('SELECT COUNT(*) AS rows, MIN(ts) AS a, MAX(ts) AS b FROM recent'),
@@ -455,6 +472,7 @@ const stmt = {
   coverage: db.prepare('SELECT MIN(minute) AS a, MAX(minute) AS b FROM buckets'),
   dailyCoverage: db.prepare('SELECT MIN(day) AS a, MAX(day) AS b, COUNT(DISTINCT day) AS days FROM buckets_daily'),
   pruneAddrs: db.prepare('DELETE FROM addr_stats WHERE last_block < ?'),
+  pruneAddrToks: db.prepare('DELETE FROM addr_token_stats WHERE last_block < ?'),
   // Roll the minutes about to be deleted into their day, then delete them. Additive on conflict,
   // because a day straddling the cutoff is rolled up across two prunes and both halves must land.
   rollupDaily: db.prepare(`INSERT INTO buckets_daily(day, token, volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt, cmint, cburn)
@@ -550,6 +568,7 @@ export function applyBatch(buckets, addrs, recents, flows = null) {
     for (const [addr, x] of addrs) {
       stmt.upAddr.run(addr, x.transfers, x.volume, x.lastBlock, x.firstFrom || null, x.firstBlock ?? x.lastBlock ?? null,
         x.sentTransfers || 0, x.sentVolume || 0, x.sentFirst ?? null, x.sentLast ?? null);
+      for (const [token, t] of Object.entries(x.byToken || {})) stmt.upAddrTok.run(addr, token, t.transfers, t.volume, t.lastBlock);
     }
     for (const r of recents) stmt.insRecent.run(r.block, r.ts, r.token, r.frm, r.too, r.amount);
     for (const t of topOf(recents)) stmt.insTop.run(t.day, t.token, t.amount, t.frm, t.too, t.block, t.ts);
@@ -1338,6 +1357,21 @@ export function volumeForAddresses(addrs) {
   return { volume, transfers, addressesSeen: found };
 }
 
+// The same addresses, per token: { USDC: volume, … }. The caller groups tokens into currencies.
+export function volumeByTokenForAddresses(addrs) {
+  const list = [...new Set((addrs || []).map((a) => String(a).toLowerCase()))];
+  const out = {};
+  for (let i = 0; i < list.length; i += 200) {
+    const part = list.slice(i, i + 200);
+    const rows = db.prepare(`SELECT token, SUM(volume) AS v FROM addr_token_stats
+      WHERE address IN (${part.map(() => '?').join(',')}) GROUP BY token`).all(...part);
+    for (const r of rows) out[r.token] = (out[r.token] || 0) + (r.v || 0);
+  }
+  return out;
+}
+// When per-token counting began (ms).
+export const addrTokenSince = () => Number(getMetaValue('addr_token_since')) || null;
+
 // ---- chain availability record (see chainuptime.js) ----
 
 const cestmt = {
@@ -1427,6 +1461,7 @@ export function prune(nowSec, latestBlock, blockMs) {
   }
 
   stmt.pruneAddrs.run(latestBlock - weekBlocks);
+  stmt.pruneAddrToks.run(latestBlock - weekBlocks);
   stmt.pruneFees.run(cutoff);
   stmt.pruneBuckets2.run(cutoff);   // same cutoff: mean and median must cover the same window
   // The raw transfer window, by time. The row cap in applyBatch bounds it between prunes.

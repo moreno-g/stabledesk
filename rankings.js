@@ -49,11 +49,16 @@ export function daily() {
       tvlByDenomination: p.tvlByDenomination,
     }));
 
+  // Ranked by the base denomination once per-currency counting covers the window; until then by the
+  // face-value total, and `denomination` is null to say which of the two this is.
+  const movedIn = (p) => (p.windowVolumeByDenomination ? p.windowVolumeByDenomination[base] || 0 : p.windowVolume);
   const byVolume = [...live]
-    .filter((p) => p.windowVolume > 0)
-    .sort((a, b) => b.windowVolume - a.windowVolume)
+    .filter((p) => movedIn(p) > 0)
+    .sort((a, b) => movedIn(b) - movedIn(a))
     .slice(0, RANKING_TOP_N)
-    .map((p, i) => ({ rank: i + 1, id: p.id, name: p.name, category: p.category, windowVolume: p.windowVolume, windowTransfers: p.windowTransfers }));
+    .map((p, i) => ({ rank: i + 1, id: p.id, name: p.name, category: p.category, windowVolume: movedIn(p),
+      denomination: p.windowVolumeByDenomination ? base : null, windowVolumeByDenomination: p.windowVolumeByDenomination ?? null,
+      windowTransfers: p.windowTransfers }));
 
   // Movers need a stored baseline, so they are empty on day one rather than showing 0%.
   const moves = tvl.movers(1).filter((m) => m.pct != null && Math.abs(m.pct) >= RANKING_MIN_MOVE_PCT);
@@ -110,7 +115,7 @@ export function digest(r = daily()) {
   if (r.byVolume.length) {
     L.push('');
     L.push('Most active');
-    for (const p of r.byVolume) L.push(`${p.rank}. ${p.name} — ${compact(p.windowVolume)} moved`);
+    for (const p of r.byVolume) L.push(`${p.rank}. ${p.name} — ${compact(p.windowVolume)}${p.denomination ? ' ' + p.denomination : ''} moved`);
   }
 
   if (r.unnamed.count) {
