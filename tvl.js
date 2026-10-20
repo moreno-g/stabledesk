@@ -20,7 +20,7 @@ import { rpcSoft, TOKENS, toUnits } from './rpc.js';
 import * as db from './db.js';
 import { PROTOCOLS, protocolForAddress, publicShape, registryStats, isRegistered, attributionRules, setDerivedAttributions, derivedAddresses, attributionBasis, walletAddresses } from './protocols.js';
 import { getLabel } from './labels.js';
-import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_STALEST_SWEEP, TVL_ROTATE_SLICE, TVL_FAST_SLICE, TVL_SLOW_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS, BASE_DENOMINATION, sumByDenomination } from './constants.js';
+import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_STALEST_SWEEP, TVL_ROTATE_SLICE, TVL_FAST_SLICE, TVL_SLOW_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS, BASE_DENOMINATION, sumByDenomination, isContractCode, isDelegatedEoa } from './constants.js';
 
 // A balance in the base denomination — the headline currency — from a per-token breakdown.
 const inBase = (byToken) => (BASE_DENOMINATION ? sumByDenomination(byToken)[BASE_DENOMINATION] || 0 : 0);
@@ -80,13 +80,33 @@ async function discoverContracts(limit) {
     part.forEach((a, i) => {
       const code = out[i];
       if (typeof code !== 'string') return;      // endpoint gave us nothing — retry next cycle
-      const isContract = code.length > 2;
+      const isContract = isContractCode(code);
       db.markContract(a, isContract, isContract ? (code.length - 2) / 2 : 0);
       if (isContract) found += 1;
     });
     await sleep(TVL_DELAY);
   }
   return found;
+}
+
+// EIP-7702 accounts recorded as contracts before isContractCode knew them. One bounded sweep in address
+// order, its cursor kept in meta; discovery classifies new addresses correctly, so the sweep ends.
+const DELEGATION_CURSOR = 'delegation_recheck_cursor';
+async function recheckDelegations(limit) {
+  const after = db.getMetaValue(DELEGATION_CURSOR) ?? '';
+  if (after === 'done') return 0;
+  const suspects = db.delegationSuspects(after, limit);
+  if (!suspects.length) { db.setMetaValue(DELEGATION_CURSOR, 'done'); return 0; }
+  const { out } = await rpcSoft(suspects.map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] })));
+  let wallets = 0;
+  for (let i = 0; i < suspects.length; i++) {
+    // No answer: stop here and resume from this address next pass, rather than skip it.
+    if (typeof out[i] !== 'string') return wallets;
+    if (isDelegatedEoa(out[i]) || out[i] === '0x') { db.markEoa(suspects[i]); wallets += 1; }
+    db.setMetaValue(DELEGATION_CURSOR, suspects[i]);
+  }
+  if (wallets) console.log(`[tvl] ${wallets} EIP-7702 account(s) reclassified as wallets`);
+  return wallets;
 }
 
 // One pass of balanceOf over every target × every indexed stablecoin.
@@ -169,7 +189,10 @@ async function probeIdentities() {
 //     Uniswap's factory returning its address is.
 // Checked once, re-checked weekly: an implementation can be upgraded, a pool cannot change factory.
 const IMPL_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
-const SEL = { factory: '0xc45a0155', token0: '0x0dfe1681', token1: '0xd21220a7', fee: '0xddca3f43', getPool: '0x1698ee82', getPair: '0xe6a43905', isVaultV2: '0x5edec50d' };
+const SEL = { factory: '0xc45a0155', token0: '0x0dfe1681', token1: '0xd21220a7', fee: '0xddca3f43', tickSpacing: '0xd0c93a7c',
+  getPool: '0x1698ee82', getPoolByTickSpacing: '0x28af8d0b', getPair: '0xe6a43905', isVaultV2: '0x5edec50d' };
+// A Safe proxy keeps its singleton (the Safe code it runs) in storage slot 0, not in the EIP-1967 slot.
+const SINGLETON_SLOT = '0x0';
 const ATTRIBUTION_RECHECK_MS = 7 * 86400000;
 const RULES_META = 'attribution_rules';
 // Factories that keep a list of what they created and answer "is this one of mine?" for any address.
@@ -185,6 +208,9 @@ const asAddr = (h) => (typeof h === 'string' && h.length >= 42 && !/^0x0*$/.test
 export function attributeFromChain(address, answers, rules, verified = new Map(), members = new Map()) {
   const impl = asAddr(answers.impl);
   if (impl && rules.implementations.has(impl)) return { protocol: rules.implementations.get(impl), basis: `implementation:${impl}`, impl };
+  // The whole word must be an address: a slot that merely ends in one is packed state, not a singleton.
+  const singleton = /^0x0{24}[0-9a-f]{40}$/i.test(answers.slot0 || '') ? asAddr(answers.slot0) : null;
+  if (singleton && rules.singletons?.has(singleton)) return { protocol: rules.singletons.get(singleton), basis: `singleton:${singleton}`, impl };
   const factory = asAddr(answers.factory);
   const rule = factory && rules.factories.get(factory);
   if (rule && verified.get(address) === address) return { protocol: rule.protocol, basis: `factory:${factory}`, impl };
@@ -203,7 +229,8 @@ export function membershipQuestions(address, rules) {
 // When the rules last changed. A contract checked against older rules was only cleared by those rules,
 // so a new rule re-opens every earlier answer instead of waiting out the recheck interval.
 function rulesSince(rules) {
-  const print = JSON.stringify([[...rules.factories.keys()].sort(), [...rules.implementations.keys()].sort()]);
+  const print = JSON.stringify([[...rules.factories.keys()].sort(), [...rules.implementations.keys()].sort(),
+    [...(rules.singletons?.keys() || [])].sort()]);
   let saved = null;
   try { saved = JSON.parse(db.getMetaValue(RULES_META) || 'null'); } catch {}
   if (saved?.print === print) return saved.since;
@@ -213,7 +240,7 @@ function rulesSince(rules) {
 }
 
 // The call that asks a factory whether it created `answers`' pool, or null if no rule applies.
-function factoryQuestion(answers, rules) {
+export function factoryQuestion(answers, rules) {
   const factory = asAddr(answers.factory);
   const rule = factory && rules.factories.get(factory);
   const t0 = asAddr(answers.token0), t1 = asAddr(answers.token1);
@@ -222,12 +249,17 @@ function factoryQuestion(answers, rules) {
   if (rule.type === 'uniswap-v3' && typeof answers.fee === 'string' && answers.fee.length > 2) {
     return { to: factory, data: SEL.getPool + word(t0) + word(t1) + word(BigInt(answers.fee).toString(16)) };
   }
+  // Slipstream (Aerodrome's concentrated liquidity) keys pools by tick spacing, not fee. The pool's
+  // answer is already an ABI word, sign-extended, so it is passed back to the factory as it came.
+  if (rule.type === 'slipstream' && typeof answers.tickSpacing === 'string' && answers.tickSpacing.length === 66) {
+    return { to: factory, data: SEL.getPoolByTickSpacing + word(t0) + word(t1) + word(answers.tickSpacing) };
+  }
   return null;
 }
 
 async function probeAttribution() {
   const rules = attributionRules();
-  if (!rules.factories.size && !rules.implementations.size) return 0;
+  if (!rules.factories.size && !rules.implementations.size && !rules.singletons?.size) return 0;
   const holding = new Map();
   for (const r of db.balanceRows()) holding.set(r.address, (holding.get(r.address) || 0) + r.balance);
   const checked = db.attributionChecked([...holding.keys()]);
@@ -241,16 +273,21 @@ async function probeAttribution() {
     .map(([a]) => a);
   if (!targets.length) return 0;
   let attributed = 0;
-  const PER = 5;
+  const PER = 7;
   for (const part of chunk(targets, Math.max(1, Math.floor(TVL_CHUNK * 2 / PER)))) {
     const { out } = await rpcSoft(part.flatMap((a) => [
       { method: 'eth_getStorageAt', params: [a, IMPL_SLOT, 'latest'] },
+      { method: 'eth_getStorageAt', params: [a, SINGLETON_SLOT, 'latest'] },
       { method: 'eth_call', params: [{ to: a, data: SEL.factory }, 'latest'] },
       { method: 'eth_call', params: [{ to: a, data: SEL.token0 }, 'latest'] },
       { method: 'eth_call', params: [{ to: a, data: SEL.token1 }, 'latest'] },
       { method: 'eth_call', params: [{ to: a, data: SEL.fee }, 'latest'] },
+      { method: 'eth_call', params: [{ to: a, data: SEL.tickSpacing }, 'latest'] },
     ]));
-    const answers = part.map((a, i) => ({ address: a, impl: out[i * PER], factory: out[i * PER + 1], token0: out[i * PER + 2], token1: out[i * PER + 3], fee: out[i * PER + 4], answered: out.slice(i * PER, i * PER + PER).some((x) => typeof x === 'string') }));
+    const answers = part.map((a, i) => {
+      const [impl, slot0, factory, token0, token1, fee, tickSpacing] = out.slice(i * PER, i * PER + PER);
+      return { address: a, impl, slot0, factory, token0, token1, fee, tickSpacing, answered: out.slice(i * PER, i * PER + PER).some((x) => typeof x === 'string') };
+    });
     const questions = answers.map((x) => ({ x, q: factoryQuestion(x, rules) })).filter((e) => e.q);
     const verified = new Map();
     if (questions.length) {
@@ -336,6 +373,7 @@ export function selectTargets(registry, known, opts = {}) {
 export async function refresh() {
   try {
     const contractsFound = await discoverContracts(40);
+    if (await recheckDelegations(200)) invalidateAggregate();
 
     // Registry addresses are always scanned, even with no recorded activity: a protocol that has
     // just deployed holds a balance before it shows up in any transfer ranking.

@@ -1235,6 +1235,23 @@ export function addressIdentities(addrs) {
 }
 export const markContract = (a, isContract, codeSize) => tvstmt.markCode.run(a, isContract ? 1 : 0, codeSize || 0, Date.now());
 
+// EIP-7702 accounts recorded as contracts before the rule knew them: every row whose code was exactly
+// 23 bytes, the size of a delegation designator, in address order from `after`. Re-read, not assumed —
+// a genuine 23-byte contract stays a contract.
+export const delegationSuspects = (after, limit) => db.prepare(`SELECT address FROM address_meta
+  WHERE is_contract = 1 AND code_size = 23 AND address > ? ORDER BY address LIMIT ?`).all(after, limit).map((r) => r.address);
+// An address the chain shows to be an EOA: no longer a contract, and its balances leave the TVL table,
+// which only ever holds contracts' balances.
+export function markEoa(address) {
+  const a = String(address).toLowerCase();
+  db.exec('BEGIN');
+  try {
+    db.prepare('UPDATE address_meta SET is_contract = 0, code_size = 0, code_hash = NULL WHERE address = ?').run(a);
+    db.prepare('DELETE FROM tvl WHERE address = ?').run(a);
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+
 // ---- attribution by rule ----
 const atstmt = {
   set: db.prepare(`INSERT INTO address_meta(address, is_contract, impl, attributed_to, attribution_basis, attribution_checked)

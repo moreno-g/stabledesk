@@ -285,3 +285,11 @@ export const PAYMENT_RECEIVE_ADDRESS = '0x06ed94D5Fd3392989C8A3dEE30196e1D1beabb
 export const PRO_PRICE_USD = 29;
 export const PRO_DURATION_DAYS = 30;
 export const ORDER_EXPIRY_MS = 2 * 60 * 60 * 1000; // unpaid orders (and their unique amount) expire after 2h
+
+// What counts as a contract, read from eth_getCode. Any code at all used to mean "contract", and EIP-7702
+// broke that: an externally owned account that delegates to wallet code carries the 23-byte designator
+// 0xef0100 followed by the delegate's address. A private key still signs for it, so it is a wallet.
+// Counted as a contract, its balance became TVL — on 20 October 2026 five such accounts were among the
+// fifty largest "unnamed contracts" on Arc mainnet.
+export const isDelegatedEoa = (code) => typeof code === 'string' && /^0xef0100[0-9a-f]{40}$/i.test(code);
+export const isContractCode = (code) => typeof code === 'string' && code.length > 2 && !isDelegatedEoa(code);

@@ -65,15 +65,18 @@ Two optional fields attribute contracts created after the entry is written, and 
 the chain before anything is attributed:
 
 ```js
-factories: [{ address: '0x…', type: 'uniswap-v3' }],  // or 'uniswap-v2', 'morpho-vault-v2'
+factories: [{ address: '0x…', type: 'uniswap-v3' }],  // or 'uniswap-v2', 'slipstream', 'morpho-vault-v2'
 implementations: ['0x…'],                            // EIP-1967 implementation address
+singletons: ['0x…'],                                 // Safe singleton, read from storage slot 0
 ```
 
 A pool is claimed when the listed factory, asked `getPool(token0, token1, fee)` (v3) or
 `getPair(token0, token1)` (v2), returns the pool's own address — a pool that merely reports that factory
-from `factory()` is not attributed. A Morpho vault is claimed when the listed factory answers `true` to
+from `factory()` is not attributed. A Slipstream pool (Aero) is asked of its factory with
+`getPool(token0, token1, tickSpacing)`. A Morpho vault is claimed when the listed factory answers `true` to
 `isVaultV2(address)`, from the list it keeps of the vaults it created. A proxy is claimed when its
-implementation slot points at a listed implementation. Other factory designs need their own question and
+implementation slot points at a listed implementation, and a Safe when its storage slot 0 is exactly a
+listed singleton. Other factory designs need their own question and
 are added as a new `type`.
 
 ### Which contracts to list

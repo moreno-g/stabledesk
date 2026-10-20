@@ -20,7 +20,7 @@ import { createHash } from 'node:crypto';
 import { rpc, rpcSoft, hex } from './rpc.js';
 import * as db from './db.js';
 import { getLabel } from './labels.js';
-import { ENTITY_TOP_N, ENTITY_REFRESH_MS, ENTITY_WARMUP_MS, DERIVE_CHUNK, DERIVE_DELAY } from './constants.js';
+import { ENTITY_TOP_N, ENTITY_REFRESH_MS, ENTITY_WARMUP_MS, DERIVE_CHUNK, DERIVE_DELAY, isContractCode } from './constants.js';
 
 // Well-known 4-byte selectors. Their presence in deployed bytecode is strong evidence of the
 // interface a contract implements — no ABI, no source, no verification service required.
@@ -122,7 +122,7 @@ async function deriveBatch(addresses, validators) {
     await sleep(DERIVE_DELAY);
   }
 
-  const contracts = addresses.filter((a) => (codes.get(a) || '0x').length > 2);
+  const contracts = addresses.filter((a) => isContractCode(codes.get(a)));
   const extra = new Map();
   for (const part of chunk(contracts, DERIVE_CHUNK)) {
     const { out } = await rpcSoft(part.flatMap((a) => [
@@ -142,7 +142,7 @@ async function deriveBatch(addresses, validators) {
   for (const address of addresses) {
     const code = codes.get(address);
     if (code == null) continue; // endpoint returned nothing usable — retry next cycle
-    const isContract = code.length > 2;
+    const isContract = isContractCode(code);
     const e = extra.get(address) || {};
     const m = {
       address,
