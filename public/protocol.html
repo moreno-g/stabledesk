@@ -227,7 +227,7 @@ function renderNamed(d){
     '<tr><td><span class="addr">'+esc(c.address)+'</span>'+(c.label?' <span class="badge">'+esc(c.label)+'</span>':'')
       // How the contract came to be attributed: listed by address, or by a rule the chain confirmed.
       +(c.basis&&c.basis!=='listed'?' <span class="badge" title="Attributed because the chain says so: '+esc(c.basis)+'">'
-        +(c.basis.startsWith('factory:')?'via factory':'via implementation')+'</span>':'')+'</td>'
+        +(c.basis.startsWith('factory:')?'via factory':c.basis.startsWith('singleton:')?'via Safe singleton':'via implementation')+'</span>':'')+'</td>'
     + '<td style="font-size:11px;color:var(--ink-3);font-family:var(--mono)">'+esc(Object.keys(c.byToken||{}).join(' · ')||'—')+'</td>'
     + '<td class="r amt">'+compact((c.byDenomination||{})[d.baseDenomination]||0)
       +Object.entries(c.byDenomination||{}).filter(([k,v])=>k!==d.baseDenomination&&v>0).map(([k,v])=>'<div style="font-size:10.5px;color:var(--ink-3)">+ '+compact(v)+' '+esc(k)+'</div>').join('')+'</td>'

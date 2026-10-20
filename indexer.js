@@ -4,7 +4,7 @@
 import { rpc, net, hex, topicAddr, toUnits, TOKENS, TOKEN_ADDRS, TRANSFER_TOPIC, ZERO, GATEWAY_ADDRS, HAS_GATEWAY, CCTP, CCTP_ADDRS, HAS_CCTP } from './rpc.js';
 import * as db from './db.js';
 import { getLabel } from './labels.js';
-import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES, denominationOf, cctpChainName, BASE_DENOMINATION } from './constants.js';
+import { NOISE_FILTER, FEE_SAMPLE, CHAIN_HALT_MS, RPC_AUTH_STATUSES, denominationOf, cctpChainName, BASE_DENOMINATION, isContractCode } from './constants.js';
 import { CHAIN } from './chains.js';
 import * as chainalert from './chainalert.js';
 import { SEEN_KEY, UNOBSERVED } from './chainuptime.js';
@@ -704,7 +704,7 @@ async function detectContracts(addresses) {
   if (!unknown.length) return;
   try {
     const { out } = await rpc(unknown.map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] })));
-    unknown.forEach((a, i) => codeCache.set(a, typeof out[i] === 'string' && out[i].length > 2));
+    unknown.forEach((a, i) => codeCache.set(a, isContractCode(out[i])));
   } catch { /* retry next tick */ }
   if (codeCache.size > 5000) for (const k of [...codeCache.keys()].slice(0, codeCache.size - 5000)) codeCache.delete(k);
 }

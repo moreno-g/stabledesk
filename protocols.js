@@ -22,6 +22,8 @@
 //                       not enough: anyone can deploy that.
 //   `implementations` — an EIP-1967 proxy is claimed when its implementation slot points at one of
 //                       these. The slot is chain state, not a self-description.
+//   `singletons`      — a Safe proxy is claimed when storage slot 0, where Safe keeps the code it
+//                       runs, holds exactly one of these addresses.
 //
 // Third-party protocols are added two ways: contributions (see PROTOCOLS.md) and discovery —
 // tvl.js surfaces unregistered contracts holding real stablecoin balances, which is the queue
@@ -213,6 +215,31 @@ const REGISTRY = [
     verified: true,
     added: '2026-09-28',
   },
+  // Aero publishes its Arc deployment in its own repository (deployment-addresses/arc.json). Its pools
+  // are EIP-1167 clones of one pool implementation, so they are attributed by the factory's answer,
+  // never by the clone's bytecode: anyone can clone an implementation, only the factory registers.
+  {
+    id: 'aero',
+    name: 'Aero',
+    vendor: 'Dromos Labs',
+    category: 'dex',
+    desc: 'Spot and FX exchange. On Arc since launch day as Aero Lite: concentrated-liquidity (Slipstream) '
+      + 'pools, each a separate contract, attributed here when Aero\'s factory confirms it created them.',
+    links: { site: 'https://aero.xyz', docs: 'https://aero.xyz/articles/aero-lite-is-live-on-arc/',
+      github: 'https://github.com/dromos-labs/metadex-slipstream-public/blob/main/deployment-addresses/arc.json' },
+    contracts: [
+      '0xb89df768af2cfe637ceb352c587fe8edaf491d03',   // CL factory
+      '0xb4702e1375f712da2e0d5f534c30c0c1513edb2b',   // swap router
+      '0xc84bb45d43cd25d02b83b4c085eaa4e08da8f473',   // position manager
+    ],
+    factories: [
+      { address: '0xb89df768af2cfe637ceb352c587fe8edaf491d03', type: 'slipstream' },
+    ],
+    networks: ['mainnet'],
+    source: 'team',
+    verified: true,
+    added: '2026-10-20',
+  },
   {
     id: 'aave-v4',
     name: 'Aave v4',
@@ -312,12 +339,45 @@ const REGISTRY = [
     verified: false,
     added: '2026-09-28',
   },
+  // Wallets too: a Safe is a multisig account, and its balance is its owners' money, not a deposit in a
+  // protocol. The singletons are Safe's canonical deployments, listed for Arc (5042) in Safe's own
+  // safe-deployments repository and confirmed on-chain on 20 October 2026: each answers VERSION().
+  {
+    id: 'safe',
+    name: 'Multisig wallets (Safe)',
+    vendor: null,
+    category: 'custody',
+    desc: 'Multisig smart-contract wallets running Safe\'s code. Each Safe belongs to its owners: balances '
+      + 'here are wallets, not deposits in a protocol.',
+    links: { site: 'https://safe.global', github: 'https://github.com/safe-global/safe-deployments' },
+    contracts: [
+      '0x3e5c63644e683549055b9be8653de26e0b4cd36e',   // SafeL2 1.3.0
+      '0xfb1bffc9d739b8d520daf37df666da4c687191ea',   // SafeL2 1.3.0 (EIP-155)
+      '0xd9db270c1b5e3bd161e8c8503c55ceabee709552',   // Safe 1.3.0
+      '0x69f4d1788e39c87893c980c06edf4b7f686e2938',   // Safe 1.3.0 (EIP-155)
+      '0x29fcb43b46531bca003ddc8fcb67ffe91900c762',   // SafeL2 1.4.1
+      '0x41675c099f32341bf84bfc5382af534df5c7461a',   // Safe 1.4.1
+      '0xedd160febbd92e350d4d398fb636302fccd67c7e',   // SafeL2 1.5.0
+      '0xff51a5898e281db6dfc7855790607438df2ca44b',   // Safe 1.5.0
+    ],
+    singletons: [
+      '0x3e5c63644e683549055b9be8653de26e0b4cd36e', '0xfb1bffc9d739b8d520daf37df666da4c687191ea',
+      '0xd9db270c1b5e3bd161e8c8503c55ceabee709552', '0x69f4d1788e39c87893c980c06edf4b7f686e2938',
+      '0x29fcb43b46531bca003ddc8fcb67ffe91900c762', '0x41675c099f32341bf84bfc5382af534df5c7461a',
+      '0xedd160febbd92e350d4d398fb636302fccd67c7e', '0xff51a5898e281db6dfc7855790607438df2ca44b',
+    ],
+    wallets: true,
+    networks: ['mainnet'],
+    source: 'canonical',
+    verified: true,
+    added: '2026-10-20',
+  },
 ];
 
 const ADDR = /^0x[0-9a-f]{40}$/;
 // How a factory is asked whether it created a contract. Each type is one question the factory answers
 // from its own storage, which is what makes the attribution unforgeable.
-export const FACTORY_TYPES = ['uniswap-v2', 'uniswap-v3', 'morpho-vault-v2'];
+export const FACTORY_TYPES = ['uniswap-v2', 'uniswap-v3', 'slipstream', 'morpho-vault-v2'];
 
 // Fail loudly at import time rather than serving a broken registry. A malformed entry here would
 // otherwise show up as a protocol with no TVL, which looks like a real (zero) measurement.
@@ -333,6 +393,7 @@ function validate(p) {
     if (!FACTORY_TYPES.includes(f.type)) throw new Error(`protocols: ${p.id} has unknown factory type "${f.type}"`);
   }
   for (const i of p.implementations || []) if (!ADDR.test(i)) throw new Error(`protocols: ${p.id} has invalid implementation "${i}"`);
+  for (const s of p.singletons || []) if (!ADDR.test(s)) throw new Error(`protocols: ${p.id} has invalid singleton "${s}"`);
   return p;
 }
 
@@ -363,11 +424,13 @@ const byId = new Map(PROTOCOLS.map((p) => [p.id, p]));
 // The attribution rules, indexed. Read by tvl.js, which checks each candidate against the chain.
 const factoryIndex = new Map();
 const implIndex = new Map();
+const singletonIndex = new Map();
 for (const p of PROTOCOLS) {
   for (const f of p.factories || []) factoryIndex.set(f.address, { protocol: p.id, type: f.type });
   for (const i of p.implementations || []) implIndex.set(i, p.id);
+  for (const s of p.singletons || []) singletonIndex.set(s, p.id);
 }
-export const attributionRules = () => ({ factories: factoryIndex, implementations: implIndex });
+export const attributionRules = () => ({ factories: factoryIndex, implementations: implIndex, singletons: singletonIndex });
 
 // Every address, listed or derived, that belongs to an entry marked `wallets`. Smart-contract wallets
 // have bytecode, which is how TVL tells a contract from a wallet — and account abstraction makes that
@@ -423,6 +486,7 @@ export function publicShape(p) {
     // The rules that attribute contracts not listed above, published so they can be checked.
     factories: p.factories || [],
     implementations: p.implementations || [],
+    singletons: p.singletons || [],
     derivedContracts: derivedAddresses(p.id).length,
     wallets: !!p.wallets,
     source: p.source,

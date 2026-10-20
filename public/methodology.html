@@ -294,9 +294,18 @@
     106.5M of USDC and 3.7M of EURC read as "110.2M". The daily TVL series is kept per currency from that date. Earlier days summed
     the two and counted smart-contract wallets (below), so they are not joined onto the new series.</p>
     <p><strong>Smart-contract wallets are wallets.</strong> Account abstraction breaks the bytecode test: a smart account has code and is
-    still somebody's wallet. Accounts identified as such — today, EIP-1967 proxies whose implementation is Circle's single-owner modular
-    account — are named on the ecosystem page and kept <em>out</em> of TVL, on their own line. On 28&nbsp;September&nbsp;2026 two of them held
+    still somebody's wallet. Accounts identified as such — EIP-1967 proxies whose implementation is Circle's single-owner modular
+    account, and since 20&nbsp;October&nbsp;2026 Safe multisigs, whose slot 0 holds one of Safe's canonical singletons — are named on the
+    ecosystem page and kept <em>out</em> of TVL, on their own line. On 28&nbsp;September&nbsp;2026 two of them held
     $100.8M of the $211M then reported as Arc TVL; from that day the total excludes them, and earlier days are not restated.</p>
+    <p><strong>An EIP-7702 account is not a contract at all.</strong> An ordinary account can delegate to wallet code, and it then
+    answers <code>eth_getCode</code> with a 23-byte designator, <code>0xef0100</code> followed by the delegate's address. A private key
+    still signs for it. Until 20&nbsp;October&nbsp;2026 any code at all meant "contract", so these accounts were scanned and their balances
+    counted as unattributed TVL. They are now classified as wallets when first seen, and those recorded earlier were re-read and moved out.</p>
+    <p><strong>What this corrected, on 20&nbsp;October&nbsp;2026.</strong> Among the fifty largest unnamed holders that day, five were
+    EIP-7702 accounts ($418k) and five were Safes ($252k, €71k and £167k — three quarters of everything then counted as sterling TVL).
+    Both now sit outside the total. Four were Aero pools ($1.23M, €221k, £61k), now attributed to Aero by its factory. Earlier days are
+    not restated.</p>
     <p><strong>Unattributed value is reported, never hidden.</strong> A contract holding a balance that no registry entry claims is counted
     in the chain total and listed separately as unattributed. We publish the share of TVL we can actually name, next to the total — an
     ecosystem page that quietly drops what it cannot label is understating the chain, and one that assigns it to a plausible protocol is
@@ -307,11 +316,12 @@
     verified. Two entries may never claim the same contract, because that would double-count its balance.</p>
     <p><strong>Contracts nobody lists one by one.</strong> Pools, vaults and smart accounts are created without a registry edit, so
     rules attribute them, each on the chain's own answer. A pool belongs to a protocol when that protocol's <em>factory</em>, asked for the pool's
-    tokens and fee (<code>getPool</code> / <code>getPair</code>), returns the pool's address — a contract that only claims the factory is not
-    attributed. A Morpho vault belongs to Morpho when Morpho's published vault factory answers <code>true</code> to
+    tokens and fee (<code>getPool</code> / <code>getPair</code>; for Aero's Slipstream pools, tokens and tick spacing), returns the pool's
+    address — a contract that only claims the factory is not attributed. A Morpho vault belongs to Morpho when Morpho's published vault factory answers <code>true</code> to
     <code>isVaultV2(address)</code>, from the list it keeps of the vaults it created. A proxy belongs to an entry when its EIP-1967
-    implementation slot points at the implementation listed for it. Each attributed contract carries the fact that decided it
-    (<code>factory:0x…</code> or <code>implementation:0x…</code>). A contract checked against the rules is checked again when they change,
+    implementation slot points at the implementation listed for it, and a Safe when its slot 0 is exactly one of the singletons listed.
+    Each attributed contract carries the fact that decided it (<code>factory:0x…</code>, <code>implementation:0x…</code> or
+    <code>singleton:0x…</code>). A contract checked against the rules is checked again when they change,
     rather than after the usual week.</p>
     <p><strong>What adding Morpho's vaults corrected, on 3&nbsp;October&nbsp;2026.</strong> A Morpho vault keeps the deposits it has not
     yet put into a market; the rest sits in Morpho's market contract, which was already counted. That idle balance was counted in the chain

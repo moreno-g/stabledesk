@@ -795,6 +795,23 @@ test('a pool is attributed only when its factory confirms it, a proxy only by it
   assert.equal(attributeFromChain(VAULT, {}, withVaults, new Map(), new Map([[VAULT, V3]])).protocol, null,
     'a pool factory cannot vouch for a contract by membership');
 
+  // A Safe is claimed by the singleton in its slot 0 — the whole word, not a slot that happens to end in it.
+  const SAFE = '0x' + '5'.repeat(40);
+  const withSafe = { ...rules, singletons: new Map([[SAFE, 'safe']]) };
+  assert.deepEqual(attributeFromChain(POOL, { slot0: w(SAFE) }, withSafe), { protocol: 'safe', basis: `singleton:${SAFE}`, impl: null });
+  assert.equal(attributeFromChain(POOL, { slot0: '0x' + '1'.repeat(24) + SAFE.slice(2) }, withSafe).protocol, null, 'packed state is not a singleton');
+  assert.equal(attributeFromChain(POOL, { slot0: w(SAFE) }, rules).protocol, null, 'no singleton rule, no claim');
+
+  // Slipstream pools are asked of their factory by tick spacing, passed back exactly as the pool gave it.
+  const { factoryQuestion } = await import('../tvl.js');
+  const SLIP = '0x' + '6'.repeat(40), T0 = '0x' + 'a'.repeat(40), T1 = '0x' + 'b'.repeat(40);
+  const slip = { factories: new Map([[SLIP, { protocol: 'aero', type: 'slipstream' }]]), implementations: new Map() };
+  const neg = '0x' + 'f'.repeat(64);   // tickSpacing -1, sign-extended as the ABI returns it
+  assert.deepEqual(factoryQuestion({ factory: w(SLIP), token0: w(T0), token1: w(T1), tickSpacing: neg }, slip),
+    { to: SLIP, data: '0x28af8d0b' + T0.slice(2).padStart(64, '0') + T1.slice(2).padStart(64, '0') + 'f'.repeat(64) });
+  assert.equal(factoryQuestion({ factory: w(SLIP), token0: w(T0), token1: w(T1) }, slip), null, 'no tick spacing, no question');
+  assert.equal(attributeFromChain(POOL, { factory: w(SLIP) }, slip, new Map([[POOL, POOL]])).protocol, 'aero');
+
   // A derived attribution names the address everywhere, but a listed address always wins over it.
   const { setDerivedAttributions, protocolForAddress, attributionBasis, derivedAddresses } = await import('../protocols.js');
   const listed = '0xca11bde05977b3631167028862be2a173976ca11';   // Multicall3, listed on both networks
@@ -822,15 +839,17 @@ test('the Arc mainnet registry loads, with every address claimed once', async ()
     ARC_CCTP_TOKEN_MINTER: '0xfd78ee919681417d192449715b2594ab58f5d002',
     ARC_GATEWAY_WALLET: '0x77777777dcc4d5a8b6e418fd04d8997ef11000ee', ARC_GATEWAY_MINTER: '0x2222222d7164433c4c09b0b0d809a9b52c04c205' };
   const out = JSON.parse(execFileSync(process.execPath, ['-e',
-    "import('./protocols.js').then(m=>console.log(JSON.stringify({ids:m.PROTOCOLS.map(p=>p.id),f:[...m.attributionRules().factories.keys()],i:[...m.attributionRules().implementations.keys()],hub:m.protocolForAddress('0x17288dfc86205301064577b98b02b81017e6f79c')?.id,morpho:m.protocolForAddress('0x34cd04070dd72b14e241112f6d83812df5af7fcd')?.id,pm:m.protocolForAddress('0x8366a39cc670b4001a1121b8f6a443a643e40951')?.id})))"],
+    "import('./protocols.js').then(m=>console.log(JSON.stringify({ids:m.PROTOCOLS.map(p=>p.id),f:[...m.attributionRules().factories.keys()],i:[...m.attributionRules().implementations.keys()],s:[...m.attributionRules().singletons.keys()],hub:m.protocolForAddress('0x17288dfc86205301064577b98b02b81017e6f79c')?.id,morpho:m.protocolForAddress('0x34cd04070dd72b14e241112f6d83812df5af7fcd')?.id,pm:m.protocolForAddress('0x8366a39cc670b4001a1121b8f6a443a643e40951')?.id})))"],
     { env, cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' }).toString());
-  for (const id of ['uniswap', 'aave-v4', 'morpho', 'circle-stablefx', 'usyc-teller', 'circle-msca-accounts', 'arc-memo', 'multicall3from', 'circle-cctp', 'circle-gateway']) {
+  for (const id of ['uniswap', 'aero', 'aave-v4', 'morpho', 'circle-stablefx', 'usyc-teller', 'circle-msca-accounts', 'safe', 'arc-memo', 'multicall3from', 'circle-cctp', 'circle-gateway']) {
     assert.ok(out.ids.includes(id), `${id} is on mainnet`);
   }
   assert.equal(out.hub, 'aave-v4');
   assert.equal(out.morpho, 'morpho');
   assert.equal(out.pm, 'uniswap');
-  assert.equal(out.f.length, 3, 'Uniswap v2 and v3 factories, Morpho vault factory');
+  assert.equal(out.f.length, 4, 'Uniswap v2 and v3 factories, Morpho vault factory, Aero CL factory');
+  assert.ok(out.f.includes('0xb89df768af2cfe637ceb352c587fe8edaf491d03'), 'Aero CL factory, from Aero\'s deployment file');
+  assert.equal(out.s.length, 8, 'Safe singletons 1.3.0, 1.4.1 and 1.5.0, L1 and L2');
   assert.ok(out.f.includes('0x3b0eefabfa22ec7cf2c73877ac16e78d76749f12'), 'Morpho VaultV2Factory, from Morpho\'s address list');
   assert.equal(out.i.length, 1);
   assert.ok(!out.ids.includes('wrapped-usdc'), 'a testnet-only entry stays off mainnet');
@@ -1098,6 +1117,25 @@ test('the unnamed list ranks each currency on its own, so a euro-only contract i
   assert.equal(cand.filter((a) => big.includes(a)).length, 50, 'the base currency keeps its 50 places');
   assert.ok(cand.indexOf(euro) > cand.indexOf(big[0]), 'and the list is still ordered by the base currency first');
   db.upsertBalances([...big, euro].map((a) => ({ address: a, token: a === euro ? 'EURC' : 'USDC', balance: 0 })));
+});
+
+test('an EIP-7702 account is a wallet, and one recorded as a contract before the rule is turned back', async () => {
+  const { isContractCode, isDelegatedEoa } = await import('../constants.js');
+  const designator = '0xef0100' + '1c08930b2d330447e6c05b5be8c4caf172b4a174';
+  assert.equal(isDelegatedEoa(designator), true);
+  assert.equal(isContractCode(designator), false, 'a key signs for it: not a contract');
+  assert.equal(isContractCode('0x'), false);
+  assert.equal(isContractCode('0x6080604052'), true);
+  assert.equal(isContractCode(undefined), false, 'no answer is not a contract');
+
+  const db = await import('../db.js');
+  const acct = '0x' + '7'.repeat(40);
+  db.markContract(acct, true, 23);
+  db.upsertBalances([{ address: acct, token: 'USDC', balance: 900 }]);
+  assert.ok(db.delegationSuspects('', 1000).includes(acct), 'a 23-byte contract row is re-read, not assumed');
+  db.markEoa(acct);
+  assert.equal(db.delegationSuspects('', 1000).includes(acct), false);
+  assert.equal(db.balanceRows().some((r) => r.address === acct), false, 'its balance leaves the TVL table');
 });
 
 // ---- CSV export ----
