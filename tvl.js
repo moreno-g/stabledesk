@@ -97,13 +97,22 @@ async function recheckDelegations(limit) {
   if (after === 'done') return 0;
   const suspects = db.delegationSuspects(after, limit);
   if (!suspects.length) { db.setMetaValue(DELEGATION_CURSOR, 'done'); return 0; }
-  const { out } = await rpcSoft(suspects.map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] })));
   let wallets = 0;
-  for (let i = 0; i < suspects.length; i++) {
-    // No answer: stop here and resume from this address next pass, rather than skip it.
-    if (typeof out[i] !== 'string') return wallets;
-    if (isDelegatedEoa(out[i]) || out[i] === '0x') { db.markEoa(suspects[i]); wallets += 1; }
-    db.setMetaValue(DELEGATION_CURSOR, suspects[i]);
+  // In batches the RPC accepts. The first version sent the whole pass as one batch of 200; the endpoint
+  // refused it every time, every answer came back empty, and the sweep stood still without a word.
+  for (const part of chunk(suspects, TVL_CHUNK)) {
+    const { out } = await rpcSoft(part.map((a) => ({ method: 'eth_getCode', params: [a, 'latest'] })));
+    for (let i = 0; i < part.length; i++) {
+      // No answer: stop here and resume from this address next pass, rather than skip it.
+      if (typeof out[i] !== 'string') {
+        if (wallets) console.log(`[tvl] ${wallets} EIP-7702 account(s) reclassified as wallets`);
+        else console.warn(`[tvl] EIP-7702 recheck got no answer at ${part[i]}; resuming next pass`);
+        return wallets;
+      }
+      if (isDelegatedEoa(out[i]) || out[i] === '0x') { db.markEoa(part[i]); wallets += 1; }
+      db.setMetaValue(DELEGATION_CURSOR, part[i]);
+    }
+    await sleep(TVL_DELAY);
   }
   if (wallets) console.log(`[tvl] ${wallets} EIP-7702 account(s) reclassified as wallets`);
   return wallets;
