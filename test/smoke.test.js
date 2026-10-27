@@ -1138,20 +1138,28 @@ test('an EIP-7702 account is a wallet, and one recorded as a contract before the
   assert.equal(db.balanceRows().some((r) => r.address === acct), false, 'its balance leaves the TVL table');
 });
 
-test('moved volume is kept per token, and published per currency only once it covers the week', async () => {
+test('moved volume is counted per token and per day, and the week is a sum of days, not a running total', async () => {
   const db = await import('../db.js');
   const tvl = await import('../tvl.js');
   const a = '0x' + '8'.repeat(40);
-  db.applyBatch(new Map(), new Map([[a, { transfers: 3, volume: 350, lastBlock: 10, firstBlock: 10,
-    byToken: { USDC: { transfers: 2, volume: 300, lastBlock: 10 }, EURC: { transfers: 1, volume: 50, lastBlock: 10 } } }]]), []);
-  assert.deepEqual(db.volumeByTokenForAddresses([a]), { USDC: 300, EURC: 50 }, 'not one 350 that is part euros');
-  assert.equal(tvl.movedComplete(), false, 'counting began with this database: less than a week covered');
-  const since = db.getMetaValue('addr_token_since');
-  db.setMetaValue('addr_token_since', Date.now() - 8 * 86400000);
-  assert.equal(tvl.movedComplete(), true);
-  assert.ok(tvl.computeAggregate().protocols.every((p) => p.windowVolumeByDenomination && typeof p.windowVolumeByDenomination === 'object'));
-  db.setMetaValue('addr_token_since', since);
-  assert.ok(tvl.computeAggregate().protocols.every((p) => p.windowVolumeByDenomination === null), 'null, not a smaller number');
+  const day = Math.floor(Date.now() / 86400000);
+  const row = (token, d, volume) => ({ token, day: d, transfers: 1, volume });
+  db.applyBatch(new Map(), new Map([[a, { transfers: 4, volume: 1350, lastBlock: 10, firstBlock: 10, byTokenDay: {
+    a: row('USDC', day, 300), b: row('EURC', day, 50), c: row('USDC', day - 3, 200), d: row('USDC', day - 20, 800) } }]]), []);
+  const all = db.movedForAddresses([a], day - 30);
+  assert.deepEqual(all.byToken, { USDC: 1300, EURC: 50 });
+  const week = db.movedForAddresses([a], day - 6);
+  assert.deepEqual(week.byToken, { USDC: 500, EURC: 50 }, 'twenty days ago is not this week');
+  assert.equal(week.transfers, 3);
+
+  // While daily counting is younger than a week, the window starts with it and says so.
+  const w = tvl.movedWindow();
+  assert.equal(w.complete, false, 'counting began with this database');
+  assert.equal(w.sinceDay, day);
+  const since = db.getMetaValue('addr_token_daily_since');
+  db.setMetaValue('addr_token_daily_since', Date.now() - 30 * 86400000);
+  assert.deepEqual([tvl.movedWindow().complete, tvl.movedWindow().sinceDay], [true, day - 6]);
+  db.setMetaValue('addr_token_daily_since', since);
 });
 
 // ---- CSV export ----

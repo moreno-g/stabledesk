@@ -169,15 +169,15 @@ const $ = (s) => document.querySelector(s);
 const nf = new Intl.NumberFormat('en-US');
 const esc = (s) => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const short = (a) => a ? a.slice(0,10)+'…'+a.slice(-6) : '—';
-// Moved, per currency once per-token counting covers the retained week; until then every currency's face
-// value added together, labelled as such rather than passed off as one currency.
-function movedVal(by, total, base){
-  return by ? compact((by||{})[base]||0) : compact(total);
+// Moved, per currency, over the last 7 UTC days — or since daily counting began, while that is younger,
+// and the caption says which.
+function span(m){
+  return m && !m.complete ? 'since '+new Date(m.since).toISOString().slice(0,10) : 'last 7 days';
 }
-function movedSub(by, base, from){
-  if (!by) return 'all currencies at face value'+(from?' · per currency from '+new Date(from).toISOString().slice(0,10):'');
-  const rest = Object.entries(by).filter(([k,v])=>k!==base&&v>0).map(([k,v])=>'+ '+compact(v)+' '+k).join(' · ');
-  return [base, rest, 'retained window (~7d)'].filter(Boolean).join(' · ');
+function movedVal(by, total, base){ return compact((by||{})[base]||0); }
+function movedSub(by, base, m){
+  const rest = Object.entries(by||{}).filter(([k,v])=>k!==base&&v>0).map(([k,v])=>'+ '+compact(v)+' '+k).join(' · ');
+  return [base, rest, span(m)].filter(Boolean).join(' · ');
 }
 function compact(n){
   if(n==null||isNaN(n)) return '—';
@@ -228,8 +228,8 @@ function renderNamed(d){
     // Smart-contract wallets are named here but kept out of TVL, so they have no share of it.
     (d.wallets ? ['Share of chain TVL', 'Not TVL', 'wallets are kept out of TVL']
       : ['Share of chain TVL', ((d.share||0)*100).toFixed(1)+'%', 'of '+compact(d.chainTvl)+(d.baseDenomination?' '+d.baseDenomination:'')+' total']),
-    ['Moved', movedVal(d.windowVolumeByDenomination, d.windowVolume, d.baseDenomination), movedSub(d.windowVolumeByDenomination, d.baseDenomination, d.movedFrom)],
-    ['Transfers', nf.format(d.windowTransfers||0), 'retained window (~7d)'],
+    ['Moved', movedVal(d.windowVolumeByDenomination, d.windowVolume, d.baseDenomination), movedSub(d.windowVolumeByDenomination, d.baseDenomination, d.moved)],
+    ['Transfers', nf.format(d.windowTransfers||0), span(d.moved)],
   ].map(([l,v,s])=>'<div class="kpi"><div class="lab">'+l+'</div><div class="val">'+v+'</div><div class="sub2">'+s+'</div></div>').join('');
 
   const rows = d.contractDetail || [];
@@ -241,10 +241,8 @@ function renderNamed(d){
     + '<td style="font-size:11px;color:var(--ink-3);font-family:var(--mono)">'+esc(Object.keys(c.byToken||{}).join(' · ')||'—')+'</td>'
     + '<td class="r amt">'+compact((c.byDenomination||{})[d.baseDenomination]||0)
       +Object.entries(c.byDenomination||{}).filter(([k,v])=>k!==d.baseDenomination&&v>0).map(([k,v])=>'<div style="font-size:10.5px;color:var(--ink-3)">+ '+compact(v)+' '+esc(k)+'</div>').join('')+'</td>'
-    + '<td class="r amt">'+(c.windowVolumeByDenomination
-        ? compact(c.windowVolumeByDenomination[d.baseDenomination]||0)
-          +Object.entries(c.windowVolumeByDenomination).filter(([k,v])=>k!==d.baseDenomination&&v>0).map(([k,v])=>'<div style="font-size:10.5px;color:var(--ink-3)">+ '+compact(v)+' '+esc(k)+'</div>').join('')
-        : compact(c.windowVolume))+'</td>'
+    + '<td class="r amt">'+compact((c.windowVolumeByDenomination||{})[d.baseDenomination]||0)
+          +Object.entries(c.windowVolumeByDenomination||{}).filter(([k,v])=>k!==d.baseDenomination&&v>0).map(([k,v])=>'<div style="font-size:10.5px;color:var(--ink-3)">+ '+compact(v)+' '+esc(k)+'</div>').join('')+'</td>'
     + '<td class="r" style="color:var(--ink-3)">'+nf.format(c.windowTransfers||0)+'</td></tr>').join('')
     : '<tr><td colspan="5" class="empty">No contracts recorded.</td></tr>';
 }
@@ -264,8 +262,8 @@ function renderUnnamed(d){
       [Object.entries(d.tvlByDenomination||{}).filter(([k,v])=>k!==d.baseDenomination&&v>0).map(([k,v])=>'+ '+compact(v)+' '+k).join(' · '),
        'stablecoins at this address'].filter(Boolean).join(' · ')],
     ['Type', esc(d.kind || (d.isContract ? 'contract' : 'wallet')), d.codeSize ? nf.format(d.codeSize)+' bytes' : 'derived from bytecode'],
-    ['Moved', movedVal(d.windowVolumeByDenomination, d.windowVolume, d.baseDenomination), movedSub(d.windowVolumeByDenomination, d.baseDenomination, d.movedFrom)],
-    ['Transfers', nf.format(d.windowTransfers||0), 'retained window (~7d)'],
+    ['Moved', movedVal(d.windowVolumeByDenomination, d.windowVolume, d.baseDenomination), movedSub(d.windowVolumeByDenomination, d.baseDenomination, d.moved)],
+    ['Transfers', nf.format(d.windowTransfers||0), span(d.moved)],
   ].map(([l,v,s])=>'<div class="kpi"><div class="lab">'+l+'</div><div class="val">'+v+'</div><div class="sub2">'+s+'</div></div>').join('');
 
   // The static captions are written for a registry entry; an unattributed address is not a protocol

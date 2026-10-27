@@ -176,7 +176,7 @@
       <table>
         <thead><tr>
           <th>#</th><th>Protocol</th><th>Category</th><th>Status</th>
-          <th class="r">Holds</th><th class="r">Share</th><th class="r">Moved</th><th class="r">Contracts</th><th>Links</th>
+          <th class="r">Holds</th><th class="r">Share</th><th class="r movedHead">Moved</th><th class="r">Contracts</th><th>Links</th>
         </tr></thead>
         <tbody id="rows"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
       </table>
@@ -198,7 +198,7 @@
     </div>
     <div class="tblwrap">
       <table style="min-width:640px">
-        <thead><tr><th>#</th><th>Address</th><th class="r">Holds</th><th>Assets</th><th class="r">Moved</th><th class="r">Transfers</th></tr></thead>
+        <thead><tr><th>#</th><th>Address</th><th class="r">Holds</th><th>Assets</th><th class="r movedHead">Moved</th><th class="r">Transfers</th></tr></thead>
         <tbody id="candRows"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
       </table>
     </div>
@@ -260,16 +260,16 @@ function denomCell(by, base){
   return compact(main)+(base?' <span style="font-size:10.5px;color:var(--ink-3)">'+esc(base)+'</span>':'')+rest;
 }
 
-// Moved, per currency once per-token counting covers the retained week. Until then the old figure, which
-// adds every currency's face value together, and the cell says so instead of passing it off as dollars.
-function movedCell(by, total, base){
-  return by ? denomCell(by, base)
-    : '<span title="Every currency added at face value — per-currency figures start once a full week is counted">'
-      + compact(total) + ' <span style="font-size:10.5px;color:var(--ink-3)">all</span></span>';
-}
+// Moved, per currency, over the last 7 UTC days (see totals.moved for the span actually covered).
+function movedCell(by, total, base){ return denomCell(by || {}, base); }
 
 function renderRows(){
   const d = state.data; if(!d) return;
+  // The span the "Moved" column covers: 7 days, or since daily counting began while that is younger.
+  const m = d.totals?.moved;
+  document.querySelectorAll('.movedHead').forEach(th => {
+    th.textContent = m && !m.complete ? 'Moved since '+new Date(m.since).toISOString().slice(5,10) : 'Moved · 7d';
+  });
   const base = d.totals?.baseDenomination;
   const total = d.totals?.byDenomination?.[base]?.tvl || 0;
   let list = d.protocols || [];
