@@ -25,16 +25,30 @@ import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, T
 // A balance in the base denomination — the headline currency — from a per-token breakdown.
 const inBase = (byToken) => (BASE_DENOMINATION ? sumByDenomination(byToken)[BASE_DENOMINATION] || 0 : 0);
 
-// What a set of addresses moved over the retained window, per currency. Per-token counting began on
-// 20 October 2026; until it covers the whole week its sums cover less time than `windowVolume`, so
-// they are published as null rather than as a smaller number that would read as final.
-const MOVED_WINDOW_MS = 7 * 86400000;
-export function movedComplete(now = Date.now()) {
-  const since = db.addrTokenSince();
-  return !!since && now - since >= MOVED_WINDOW_MS;
+// What a set of addresses moved over the last 7 UTC days (today included), per currency. Read from the
+// per-day table: the old figure, addr_stats.volume, was a running total that only reset after a week of
+// inactivity, so for a busy contract it covered everything since first seen. Daily counting began on
+// 27 October 2026; until it reaches back a full week the window starts at that day, and `moved.since`
+// and `moved.complete` say so rather than letting a shorter span pass for a week.
+const MOVED_DAYS = 7;
+export function movedWindow(now = Date.now()) {
+  const today = Math.floor(now / 86400000);
+  const startDay = today - (MOVED_DAYS - 1);
+  const s = db.addrTokenSince();
+  const sinceDay = s ? Math.max(startDay, Math.floor(s / 86400000)) : startDay;
+  return { sinceDay, since: sinceDay * 86400000, complete: sinceDay === startDay, days: MOVED_DAYS };
 }
-export const movedFrom = () => { const s = db.addrTokenSince(); return s ? s + MOVED_WINDOW_MS : null; };
-const movedByDenomination = (addrs) => (movedComplete() ? sumByDenomination(db.volumeByTokenForAddresses(addrs)) : null);
+// { windowVolume (face value, every currency added — kept for existing consumers),
+//   windowVolumeByDenomination, windowTransfers } for a set of addresses.
+function moved(addrs, w = movedWindow()) {
+  const m = db.movedForAddresses(addrs, w.sinceDay);
+  return {
+    windowVolume: Object.values(m.byToken).reduce((a, b) => a + b, 0),
+    windowVolumeByDenomination: sumByDenomination(m.byToken),
+    windowTransfers: m.transfers,
+  };
+}
+const movedMeta = (w = movedWindow()) => ({ since: w.since, complete: w.complete, days: w.days });
 
 // The key a TVL history row is stored under. Per denomination since 28 Sept 2026: the rows before
 // that date, under the bare protocol id, summed euros into dollars and counted smart-contract wallets,
@@ -505,6 +519,7 @@ export function computeAggregate() {
       for (const [t, v] of Object.entries(e.byToken)) tokens[t] = (tokens[t] || 0) + v;
     }
     const flow = db.volumeForAddresses(all);
+    const mv = moved(all);
     return {
       ...publicShape(p),
       // Face values summed across tokens, kept for existing consumers. `tvlByDenomination` is the
@@ -516,9 +531,7 @@ export function computeAggregate() {
       // `observed` separates "listed but we have never seen it do anything" from "listed and live".
       // Without it, a brand-new registry entry is indistinguishable from a dead one.
       observed: withBalance > 0 || flow.addressesSeen > 0,
-      windowVolume: flow.volume,
-      windowVolumeByDenomination: movedByDenomination(all),
-      windowTransfers: flow.transfers,
+      ...mv,
     };
   }).sort((a, b) => inBase(b.tvlByToken) - inBase(a.tvlByToken) || b.tvl - a.tvl || a.name.localeCompare(b.name));
 
@@ -574,8 +587,10 @@ export function computeAggregate() {
       selfSymbol: id?.token_symbol || null,
       kind: id?.kind || null,
       codeSize: id?.code_size ?? null,
-      ...db.volumeForAddresses([address]),
-      volumeByDenomination: movedByDenomination([address]),
+      ...(({ windowVolume, windowVolumeByDenomination, windowTransfers }) => ({
+        volume: windowVolume, volumeByDenomination: windowVolumeByDenomination, transfers: windowTransfers,
+      }))(moved([address])),
+      addressesSeen: db.volumeForAddresses([address]).addressesSeen,
     };
   });
 
@@ -595,8 +610,8 @@ export function computeAggregate() {
       holders: byAddress.size,
       // Held by smart-contract wallets (registry entries marked `wallets`), outside every figure above.
       smartWallets: { ...inWallets, byDenomination: sumByDenomination(inWallets.byToken) },
-      // When `windowVolumeByDenomination` stops being null: per-token counting plus one full window.
-      movedFrom: movedFrom(),
+      // The span every "moved" figure covers: the last 7 UTC days, or less while daily counting is young.
+      moved: movedMeta(),
     },
     protocols,
     candidates,
@@ -653,9 +668,7 @@ export function detail(id, opts = {}) {
       tvl: balances.reduce((a, b) => a + b.balance, 0),
       byToken: Object.fromEntries(balances.map((b) => [b.token, b.balance])),
       byDenomination: sumByDenomination(Object.fromEntries(balances.map((b) => [b.token, b.balance]))),
-      windowVolume: stats?.volume || 0,
-      windowVolumeByDenomination: movedByDenomination([address]),
-      windowTransfers: stats?.transfers || 0,
+      ...moved([address]),
       lastBlock: stats?.last_block || null,
     };
   }).sort((a, b) => inBase(b.byToken) - inBase(a.byToken) || b.tvl - a.tvl);
@@ -670,7 +683,7 @@ export function detail(id, opts = {}) {
   return {
     ...p,
     baseDenomination: BASE_DENOMINATION,
-    movedFrom: movedFrom(),
+    moved: movedMeta(),
     share: chainBase ? (p.tvlByDenomination?.[BASE_DENOMINATION] || 0) / chainBase : 0,
     contractDetail: contracts,
     recent,
@@ -694,11 +707,9 @@ function walletDetail(id, agg, opts = {}) {
     return {
       address, label: getLabel(address)?.name || null, basis: attributionBasis(address),
       tvl: balances.reduce((a, b) => a + b.balance, 0), byToken, byDenomination: sumByDenomination(byToken),
-      windowVolume: stats?.volume || 0, windowVolumeByDenomination: movedByDenomination([address]),
-      windowTransfers: stats?.transfers || 0, lastBlock: stats?.last_block || null,
+      ...moved([address]), lastBlock: stats?.last_block || null,
     };
   }).sort((a, b) => inBase(b.byToken) - inBase(a.byToken) || b.tvl - a.tvl);
-  const flow = db.volumeForAddresses(addrs);
   const w = agg.totals.smartWallets || { tvl: 0, byToken: {}, accounts: 0 };
   return {
     ...publicShape(entry),
@@ -707,8 +718,8 @@ function walletDetail(id, agg, opts = {}) {
     tvl: w.tvl, tvlByToken: w.byToken, tvlByDenomination: sumByDenomination(w.byToken),
     contractsWithBalance: w.accounts,
     observed: w.accounts > 0,
-    windowVolume: flow.volume, windowVolumeByDenomination: movedByDenomination(addrs), windowTransfers: flow.transfers,
-    movedFrom: movedFrom(),
+    ...moved(addrs),
+    moved: movedMeta(),
     share: null,                     // not a share of TVL: these balances are excluded from it
     contractDetail: contracts,
     recent: addrs.flatMap((c) => db.addressRecent(c, opts.recent || 8)).sort((a, b) => b.block - a.block).slice(0, opts.recent || 8),
@@ -741,10 +752,8 @@ export function addressDetail(address) {
     isContract: !!meta?.is_contract,
     kind: meta?.kind || null,
     codeSize: meta?.code_size || null,
-    windowVolume: stats?.volume || 0,
-    windowVolumeByDenomination: movedByDenomination([a]),
-    movedFrom: movedFrom(),
-    windowTransfers: stats?.transfers || 0,
+    ...moved([a]),
+    moved: movedMeta(),
     lastBlock: stats?.last_block || null,
     recent: db.addressRecent(a, 12),
     largest: db.addressLargest(a, 8),

@@ -337,20 +337,22 @@ for (const col of ['sent_transfers INTEGER NOT NULL DEFAULT 0', 'sent_volume REA
                    'sent_first_block INTEGER', 'sent_last_block INTEGER']) {
   try { db.exec(`ALTER TABLE addr_stats ADD COLUMN ${col}`); } catch { /* already present */ }
 }
-// What each address moved, per token. addr_stats adds every token's face value into one `volume`, so a
-// protocol's "moved" figure was dollars plus euros plus pounds — on an FX pool, half of it euros. Same
-// window and pruning as addr_stats; `addr_token_since` records when counting began, because until the
-// table covers the whole window its sums cover less time than addr_stats does.
-db.exec(`CREATE TABLE IF NOT EXISTS addr_token_stats (
-  address    TEXT    NOT NULL,
-  token      TEXT    NOT NULL,
-  transfers  INTEGER NOT NULL DEFAULT 0,
-  volume     REAL    NOT NULL DEFAULT 0,
-  last_block INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (address, token)
+// What each address moved, per token and per UTC day. addr_stats adds every token's face value into
+// one cumulative `volume` that only resets after a week without activity, so for a busy contract it is
+// a total since first seen, not a week. A day column makes "the last 7 days" a sum over seven rows.
+// The first version (addr_token_stats, 20 Oct 2026) had addr_stats' flaw and is dropped.
+db.exec(`DROP TABLE IF EXISTS addr_token_stats;
+CREATE TABLE IF NOT EXISTS addr_token_daily (
+  address   TEXT    NOT NULL,
+  token     TEXT    NOT NULL,
+  day       INTEGER NOT NULL,
+  transfers INTEGER NOT NULL DEFAULT 0,
+  volume    REAL    NOT NULL DEFAULT 0,
+  PRIMARY KEY (address, token, day)
 );
-CREATE INDEX IF NOT EXISTS idx_ats_block ON addr_token_stats(last_block);
-INSERT OR IGNORE INTO meta(k, v) VALUES('addr_token_since', CAST(CAST(strftime('%s','now') AS INTEGER) * 1000 AS TEXT));`)
+CREATE INDEX IF NOT EXISTS idx_atd_day ON addr_token_daily(day);
+DELETE FROM meta WHERE k = 'addr_token_since';
+INSERT OR IGNORE INTO meta(k, v) VALUES('addr_token_daily_since', CAST(CAST(strftime('%s','now') AS INTEGER) * 1000 AS TEXT));`)
 // Migration: when this address was last asked what it calls itself. Distinct from `checked`, which the
 // contract-discovery path also writes — so `checked` cannot mean "identity has been probed", and using
 // it as though it did would re-ask every silent contract on every pass, burning the whole per-pass
@@ -451,9 +453,9 @@ const stmt = {
       sent_first_block = MIN(COALESCE(sent_first_block, ?), ?), sent_last_block = MAX(COALESCE(sent_last_block, ?), ?)
     WHERE address = ?`),
   insRecent: db.prepare('INSERT INTO recent(block, ts, token, frm, too, amount) VALUES(?, ?, ?, ?, ?, ?)'),
-  upAddrTok: db.prepare(`INSERT INTO addr_token_stats(address, token, transfers, volume, last_block) VALUES(?, ?, ?, ?, ?)
-    ON CONFLICT(address, token) DO UPDATE SET transfers = addr_token_stats.transfers + excluded.transfers,
-      volume = addr_token_stats.volume + excluded.volume, last_block = MAX(addr_token_stats.last_block, excluded.last_block)`),
+  upAddrTok: db.prepare(`INSERT INTO addr_token_daily(address, token, day, transfers, volume) VALUES(?, ?, ?, ?, ?)
+    ON CONFLICT(address, token, day) DO UPDATE SET transfers = addr_token_daily.transfers + excluded.transfers,
+      volume = addr_token_daily.volume + excluded.volume`),
   trimRecent: db.prepare('DELETE FROM recent WHERE id <= (SELECT MAX(id) FROM recent) - ?'),
   trimRecentTs: db.prepare('DELETE FROM recent WHERE ts < ?'),
   recentWindow: db.prepare('SELECT COUNT(*) AS rows, MIN(ts) AS a, MAX(ts) AS b FROM recent'),
@@ -472,7 +474,7 @@ const stmt = {
   coverage: db.prepare('SELECT MIN(minute) AS a, MAX(minute) AS b FROM buckets'),
   dailyCoverage: db.prepare('SELECT MIN(day) AS a, MAX(day) AS b, COUNT(DISTINCT day) AS days FROM buckets_daily'),
   pruneAddrs: db.prepare('DELETE FROM addr_stats WHERE last_block < ?'),
-  pruneAddrToks: db.prepare('DELETE FROM addr_token_stats WHERE last_block < ?'),
+  pruneAddrToks: db.prepare('DELETE FROM addr_token_daily WHERE day < ?'),
   // Roll the minutes about to be deleted into their day, then delete them. Additive on conflict,
   // because a day straddling the cutoff is rolled up across two prunes and both halves must land.
   rollupDaily: db.prepare(`INSERT INTO buckets_daily(day, token, volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt, cmint, cburn)
@@ -568,7 +570,7 @@ export function applyBatch(buckets, addrs, recents, flows = null) {
     for (const [addr, x] of addrs) {
       stmt.upAddr.run(addr, x.transfers, x.volume, x.lastBlock, x.firstFrom || null, x.firstBlock ?? x.lastBlock ?? null,
         x.sentTransfers || 0, x.sentVolume || 0, x.sentFirst ?? null, x.sentLast ?? null);
-      for (const [token, t] of Object.entries(x.byToken || {})) stmt.upAddrTok.run(addr, token, t.transfers, t.volume, t.lastBlock);
+      for (const t of Object.values(x.byTokenDay || {})) stmt.upAddrTok.run(addr, t.token, t.day, t.transfers, t.volume);
     }
     for (const r of recents) stmt.insRecent.run(r.block, r.ts, r.token, r.frm, r.too, r.amount);
     for (const t of topOf(recents)) stmt.insTop.run(t.day, t.token, t.amount, t.frm, t.too, t.block, t.ts);
@@ -1357,20 +1359,22 @@ export function volumeForAddresses(addrs) {
   return { volume, transfers, addressesSeen: found };
 }
 
-// The same addresses, per token: { USDC: volume, … }. The caller groups tokens into currencies.
-export function volumeByTokenForAddresses(addrs) {
+// What a set of addresses moved per token from `sinceDay` (UTC day number) on: { byToken, transfers }.
+// The caller groups tokens into currencies; a transfer count is not a currency and is summed.
+export function movedForAddresses(addrs, sinceDay) {
   const list = [...new Set((addrs || []).map((a) => String(a).toLowerCase()))];
-  const out = {};
+  const byToken = {};
+  let transfers = 0;
   for (let i = 0; i < list.length; i += 200) {
     const part = list.slice(i, i + 200);
-    const rows = db.prepare(`SELECT token, SUM(volume) AS v FROM addr_token_stats
-      WHERE address IN (${part.map(() => '?').join(',')}) GROUP BY token`).all(...part);
-    for (const r of rows) out[r.token] = (out[r.token] || 0) + (r.v || 0);
+    const rows = db.prepare(`SELECT token, SUM(volume) AS v, SUM(transfers) AS n FROM addr_token_daily
+      WHERE day >= ? AND address IN (${part.map(() => '?').join(',')}) GROUP BY token`).all(sinceDay, ...part);
+    for (const r of rows) { byToken[r.token] = (byToken[r.token] || 0) + (r.v || 0); transfers += r.n || 0; }
   }
-  return out;
+  return { byToken, transfers };
 }
-// When per-token counting began (ms).
-export const addrTokenSince = () => Number(getMetaValue('addr_token_since')) || null;
+// When per-token daily counting began (ms).
+export const addrTokenSince = () => Number(getMetaValue('addr_token_daily_since')) || null;
 
 // ---- chain availability record (see chainuptime.js) ----
 
@@ -1461,7 +1465,7 @@ export function prune(nowSec, latestBlock, blockMs) {
   }
 
   stmt.pruneAddrs.run(latestBlock - weekBlocks);
-  stmt.pruneAddrToks.run(latestBlock - weekBlocks);
+  stmt.pruneAddrToks.run(Math.floor(Date.now() / 86400000) - 8);   // a week plus the day in progress
   stmt.pruneFees.run(cutoff);
   stmt.pruneBuckets2.run(cutoff);   // same cutoff: mean and median must cover the same window
   // The raw transfer window, by time. The row cap in applyBatch bounds it between prunes.
