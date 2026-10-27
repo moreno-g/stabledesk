@@ -215,6 +215,27 @@ const REGISTRY = [
     verified: true,
     added: '2026-09-28',
   },
+  // Extended (formerly X10) moved its perps settlement from Starknet to Arc on 22 Oct 2026, its USDC
+  // arriving by CCTP. Its own team published both Arc addresses the day before, in DefiLlama's adapter
+  // registry (PR #21790, authored by an x10xchange engineer); Extended's docs list no Arc address yet.
+  {
+    id: 'extended',
+    name: 'Extended',
+    vendor: 'Extended (formerly X10)',
+    category: 'dex',
+    desc: 'Perpetuals exchange. Settles on Arc since 22 Oct 2026, after moving from Starknet; traders\' USDC margin '
+      + 'sits in its settlement contract.',
+    links: { site: 'https://extended.exchange', docs: 'https://docs.extended.exchange/about-extended/migration-from-starknet-to-arc',
+      github: 'https://github.com/DefiLlama/DefiLlama-Adapters/pull/21790' },
+    contracts: [
+      '0x89103959eef431bea308027b8a5073c5ddc867a2',   // settlement — holds traders' USDC
+      '0x4445aacacc2de174b77b37eb27529ce0b36bc580',
+    ],
+    networks: ['mainnet'],
+    source: 'team',
+    verified: true,
+    added: '2026-10-27',
+  },
   // Aero publishes its Arc deployment in its own repository (deployment-addresses/arc.json). Its pools
   // are EIP-1167 clones of one pool implementation, so they are attributed by the factory's answer,
   // never by the clone's bytecode: anyone can clone an implementation, only the factory registers.
