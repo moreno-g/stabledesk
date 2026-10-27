@@ -841,7 +841,7 @@ test('the Arc mainnet registry loads, with every address claimed once', async ()
   const out = JSON.parse(execFileSync(process.execPath, ['-e',
     "import('./protocols.js').then(m=>console.log(JSON.stringify({ids:m.PROTOCOLS.map(p=>p.id),f:[...m.attributionRules().factories.keys()],i:[...m.attributionRules().implementations.keys()],s:[...m.attributionRules().singletons.keys()],hub:m.protocolForAddress('0x17288dfc86205301064577b98b02b81017e6f79c')?.id,morpho:m.protocolForAddress('0x34cd04070dd72b14e241112f6d83812df5af7fcd')?.id,pm:m.protocolForAddress('0x8366a39cc670b4001a1121b8f6a443a643e40951')?.id})))"],
     { env, cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' }).toString());
-  for (const id of ['uniswap', 'aero', 'aave-v4', 'morpho', 'circle-stablefx', 'usyc-teller', 'circle-msca-accounts', 'safe', 'arc-memo', 'multicall3from', 'circle-cctp', 'circle-gateway']) {
+  for (const id of ['uniswap', 'aero', 'extended', 'aave-v4', 'morpho', 'circle-stablefx', 'usyc-teller', 'circle-msca-accounts', 'safe', 'arc-memo', 'multicall3from', 'circle-cctp', 'circle-gateway']) {
     assert.ok(out.ids.includes(id), `${id} is on mainnet`);
   }
   assert.equal(out.hub, 'aave-v4');
