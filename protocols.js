@@ -236,7 +236,9 @@ const REGISTRY = [
     verified: true,
     added: '2026-10-27',
   },
-  // Aero publishes its Arc deployment in its own repository (deployment-addresses/arc.json). Its pools
+  // Aero publishes its Arc deployments in its own repository: the Aero Lite launch of 16 Sept
+  // (deployment-addresses/cllitelaunch-arc.json) and the full launch of 21 Oct, with a new CL factory
+  // (cl-arc.json). Liquidity moved to the new pools, so both factories are rules. Its pools
   // are EIP-1167 clones of one pool implementation, so they are attributed by the factory's answer,
   // never by the clone's bytecode: anyone can clone an implementation, only the factory registers.
   {
@@ -244,16 +246,20 @@ const REGISTRY = [
     name: 'Aero',
     vendor: 'Dromos Labs',
     category: 'dex',
-    desc: 'Spot and FX exchange. On Arc since launch day as Aero Lite: concentrated-liquidity (Slipstream) '
-      + 'pools, each a separate contract, attributed here when Aero\'s factory confirms it created them.',
+    desc: 'Spot and FX exchange. On Arc since launch day, as Aero Lite until its full launch on 21 Oct: '
+      + 'concentrated-liquidity (Slipstream) pools, each a separate contract, attributed when Aero\'s factory confirms it created them.',
     links: { site: 'https://aero.xyz', docs: 'https://aero.xyz/articles/aero-lite-is-live-on-arc/',
-      github: 'https://github.com/dromos-labs/metadex-slipstream-public/blob/main/deployment-addresses/arc.json' },
+      github: 'https://github.com/dromos-labs/metadex-slipstream-public/blob/main/deployment-addresses/cl-arc.json' },
     contracts: [
-      '0xb89df768af2cfe637ceb352c587fe8edaf491d03',   // CL factory
-      '0xb4702e1375f712da2e0d5f534c30c0c1513edb2b',   // swap router
-      '0xc84bb45d43cd25d02b83b4c085eaa4e08da8f473',   // position manager
+      '0x7f83235643181e440433400a027618cd50879751',   // CL factory (full launch, 21 Oct)
+      '0x9ee35bf1bd69a03c6f0393582030fce8bb93d418',   // swap router
+      '0x4857db576ee0e45f10525ec59527bfd10beec60b',   // position manager
+      '0xb89df768af2cfe637ceb352c587fe8edaf491d03',   // CL factory (Aero Lite launch, 16 Sept)
+      '0xb4702e1375f712da2e0d5f534c30c0c1513edb2b',   // swap router (Aero Lite)
+      '0xc84bb45d43cd25d02b83b4c085eaa4e08da8f473',   // position manager (Aero Lite)
     ],
     factories: [
+      { address: '0x7f83235643181e440433400a027618cd50879751', type: 'slipstream' },
       { address: '0xb89df768af2cfe637ceb352c587fe8edaf491d03', type: 'slipstream' },
     ],
     networks: ['mainnet'],
