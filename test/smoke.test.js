@@ -847,7 +847,8 @@ test('the Arc mainnet registry loads, with every address claimed once', async ()
   assert.equal(out.hub, 'aave-v4');
   assert.equal(out.morpho, 'morpho');
   assert.equal(out.pm, 'uniswap');
-  assert.equal(out.f.length, 4, 'Uniswap v2 and v3 factories, Morpho vault factory, Aero CL factory');
+  assert.equal(out.f.length, 5, 'Uniswap v2 and v3 factories, Morpho vault factory, Aero CL factories (Lite and full launch)');
+  assert.ok(out.f.includes('0x7f83235643181e440433400a027618cd50879751'), 'Aero full-launch CL factory, from cl-arc.json');
   assert.ok(out.f.includes('0xb89df768af2cfe637ceb352c587fe8edaf491d03'), 'Aero CL factory, from Aero\'s deployment file');
   assert.equal(out.s.length, 8, 'Safe singletons 1.3.0, 1.4.1 and 1.5.0, L1 and L2');
   assert.ok(out.f.includes('0x3b0eefabfa22ec7cf2c73877ac16e78d76749f12'), 'Morpho VaultV2Factory, from Morpho\'s address list');
