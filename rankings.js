@@ -11,7 +11,7 @@
 import * as db from './db.js';
 import * as tvl from './tvl.js';
 import { CHAIN } from './chains.js';
-import { RANKING_TOP_N, RANKING_MIN_MOVE_PCT, BASE_DENOMINATION, sumByDenomination } from './constants.js';
+import { RANKING_TOP_N, RANKING_MIN_MOVE_PCT, TVL_CANDIDATE_MIN, BASE_DENOMINATION, sumByDenomination } from './constants.js';
 
 const DAY = 86400;
 const today = () => Math.floor(Date.now() / 1000 / DAY) * DAY;
@@ -60,8 +60,15 @@ export function daily() {
       denomination: p.windowVolumeByDenomination ? base : null, windowVolumeByDenomination: p.windowVolumeByDenomination ?? null,
       windowTransfers: p.windowTransfers }));
 
-  // Movers need a stored baseline, so they are empty on day one rather than showing 0%.
-  const moves = tvl.movers(1).filter((m) => m.pct != null && Math.abs(m.pct) >= RANKING_MIN_MOVE_PCT);
+  // Movers need a stored baseline, so they are empty on day one rather than showing 0%. A stored level
+  // too small to take a percentage of (see tvl.movers) is reported as new.
+  const { compared, read, moves: all } = tvl.movers(1);
+  const moves = all.filter((m) => m.isNew || Math.abs(m.pct) >= RANKING_MIN_MOVE_PCT);
+
+  // The three volume measures in the base denomination. `volume24h` is real volume, the figure the
+  // terminal's "24h volume" tile shows. It used to be raw volume — every Transfer event, mints and burns
+  // included — under that same label: 1.00B USD in the digest of 29 October 2026, against 301.7M real.
+  const inBase = (pick) => sumByDenomination(Object.fromEntries(Object.entries(summary.byToken || {}).map(([t, x]) => [t, pick(x)])))[base] || 0;
 
   return {
     day: isoDay(today()),
@@ -71,16 +78,26 @@ export function daily() {
       tvl: chainBase,
       attributedShare: agg.totals.byDenomination?.[base]?.attributedShare ?? 0,
       tvlByDenomination: agg.totals.byDenomination,
-      volume24h: sumByDenomination(Object.fromEntries(Object.entries(summary.byToken || {}).map(([t, x]) => [t, x.volume])))[base] || 0,
+      volume24h: inBase((x) => x.rvolume),
+      // Adjusted volume is the figure /methodology defends; real and adjusted are both printed so the
+      // digest can never be accused of quoting whichever number looks bigger. Until 30 October 2026 this
+      // was every currency added together.
+      adjustedVolume24h: inBase((x) => x.avolume),
+      rawVolume24h: inBase((x) => x.volume),
       transfers24h: summary.transfers,
-      // Adjusted volume is the figure /methodology defends; both are reported so the digest can
-      // never be accused of quoting whichever number looks bigger.
-      adjustedVolume24h: summary.avolume,
     },
     protocolsRanked: byTvl.length,
     byTvl,
     byVolume,
-    movers: moves.slice(0, RANKING_TOP_N).map((m) => ({ ...m, pctLabel: pct(m.pct) })),
+    // The span "moved" covers: the last 7 UTC days, or since daily counting began while that is shorter.
+    moved: agg.totals.moved,
+    movers: moves.slice(0, RANKING_TOP_N).map((m) => ({ ...m, pctLabel: m.isNew ? 'new' : pct(m.pct) })),
+    // Protocols with a stored level on both days, whether each day's levels were read at all, and the rule
+    // a move had to pass: an empty list is "no baseline", "today not read yet" or "nothing compared moved
+    // enough", three different statements the digest used to print as one, "no baseline yet".
+    moversCompared: compared,
+    moversRead: { yesterday: read.then, today: read.now },
+    moversRule: { floor: TVL_CANDIDATE_MIN, minPct: RANKING_MIN_MOVE_PCT, denomination: base },
     unnamed: { count: agg.candidates.length, tvl: agg.totals.byDenomination?.[base]?.unattributed ?? 0, denomination: base },
   };
 }
@@ -95,7 +112,8 @@ export function digest(r = daily()) {
   // Every figure names its currency: the digest is copied into posts, where an unlabelled number
   // gets read as dollars whatever it adds up.
   const cur = r.chain.denomination ? ` ${r.chain.denomination}` : '';
-  L.push(`TVL ${compact(r.chain.tvl)}${cur} across ${r.protocolsRanked} protocol${r.protocolsRanked === 1 ? '' : 's'} · 24h volume ${compact(r.chain.volume24h)}${cur}`);
+  L.push(`TVL ${compact(r.chain.tvl)}${cur} across ${r.protocolsRanked} protocol${r.protocolsRanked === 1 ? '' : 's'}`
+    + ` · 24h volume ${compact(r.chain.volume24h)}${cur} real, ${compact(r.chain.adjustedVolume24h)}${cur} adjusted`);
 
   if (r.byTvl.length) {
     L.push('');
@@ -106,15 +124,23 @@ export function digest(r = daily()) {
   if (r.movers.length) {
     L.push('');
     L.push('24h movers');
-    for (const m of r.movers) L.push(`${m.name} ${m.pctLabel} (${compact(m.from)} → ${compact(m.to)})`);
+    for (const m of r.movers) L.push(`${m.name} ${m.pctLabel} (${compact(m.from)} → ${compact(m.to)}${cur})`);
   } else {
+    // Said about what was compared, never about the whole registry: a protocol emptied to zero, or funded
+    // from zero, has no stored level on one of the two days and is not in the comparison.
+    const rule = r.moversRule, read = r.moversRead || {}, n = r.moversCompared || 0;
     L.push('');
-    L.push('24h movers: no baseline yet.');
+    L.push(read.yesterday === false || (read.yesterday == null && !n) ? '24h movers: no baseline yet.'
+      : read.today === false ? '24h movers: today\'s TVL not read yet.'
+      : n && rule ? `24h movers: none of the ${n} protocol${n === 1 ? '' : 's'} with a level on both days moved ${compact(rule.floor)}${cur} and ${+(rule.minPct * 100).toFixed(1)}% or more.`
+      : '24h movers: no protocol held a level on both days.');
   }
 
   if (r.byVolume.length) {
+    // The window is named: "moved" is a week, not a day, and it is shorter while daily counting is young.
+    const m = r.moved;
     L.push('');
-    L.push('Most active');
+    L.push(`Most active · ${!m || m.complete ? `last ${m?.days ?? 7} days` : `since ${new Date(m.since).toISOString().slice(0, 10)}`}`);
     for (const p of r.byVolume) L.push(`${p.rank}. ${p.name} — ${compact(p.windowVolume)}${p.denomination ? ' ' + p.denomination : ''} moved`);
   }
 

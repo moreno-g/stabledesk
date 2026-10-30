@@ -99,7 +99,14 @@
     computed against its own currency, and a tracked asset whose denomination we have not declared is reported separately rather
     than folded into a total. <strong>The same applies to volume</strong>: until August 2026 the 24-hour figure was a sum of
     transferred amounts across currencies, so it answered no question, and every token's share was measured against that mixed
-    total. Volume is grouped the same way now, and each share is a share of the volume moved in its own currency.</p>
+    total. Volume is grouped the same way now, and each share is a share of the volume moved in its own currency.
+    <strong>Corrected on 30&nbsp;October&nbsp;2026:</strong> three volume figures still added currencies at face value. The
+    terminal's main chart and <code>/v1/stablecoins/history</code> with <code>token=ALL</code>, the default of both, summed every
+    tracked token — on Arc mainnet on 29&nbsp;October, a real-volume line 23.7% above the dollar volume in it. The share of real
+    volume removed by the address filter (below) read 74.3% where the dollar share was 69.0%, and Gateway's share of real volume put
+    every currency in its denominator (0.166 for 0.205). <code>ALL</code> now means every tracked token in the currency gas is paid in,
+    and a series names its currency and its tokens; the two shares are computed per currency, the dollar figure leading. Series are
+    computed from per-token aggregates, so every range is corrected, history included.</p>
     <p style="margin-bottom:0">We track {{THE_NET}} stablecoins over their ERC-20 interface: {{TOKENS_DETAIL}}. That list is
     generated from the running configuration rather than written here, so it cannot drift from what is actually indexed — the full
     set of contract addresses is in <code>/openapi.json</code> and on <code>/v1/status</code>. An asset carried by more than one
@@ -118,6 +125,11 @@
     <code>Transfer</code> events (routing hops, contract internals), so within each transaction we keep only the
     <strong>largest transfer per token</strong> and discard the rest. Per token, not per transaction: a swap moves two different
     assets in one transaction, and collapsing it to a single leg would erase the smaller asset's volume entirely.</p>
+    <p><strong>Mints and burns are not counted in real or adjusted volume.</strong> A transfer from or to the zero address creates or
+    destroys supply rather than moving it between holders, so both filtered measures leave it out; it is published as mint, burn and
+    net issuance instead, and raw volume counts it like any other event. The difference is large: on Arc mainnet on
+    29&nbsp;October&nbsp;2026, mints and burns were 73% of raw USDC volume and 97% of the gap between raw and real — routing hops were
+    the other 3%. The measure is unchanged; this page did not say so until 30&nbsp;October&nbsp;2026.</p>
 
     <p><strong>3 · Adjusted volume</strong> — real volume, plus an <em>address-level</em> filter. Some addresses are infrastructure
     rather than economic actors: market-making bots, faucets, sequencers, test harnesses. Any address that <em>sent</em> more than
@@ -297,7 +309,11 @@
     still somebody's wallet. Accounts identified as such — EIP-1967 proxies whose implementation is Circle's single-owner modular
     account, and since 20&nbsp;October&nbsp;2026 Safe multisigs, whose slot 0 holds one of Safe's canonical singletons — are named on the
     ecosystem page and kept <em>out</em> of TVL, on their own line. On 28&nbsp;September&nbsp;2026 two of them held
-    $100.8M of the $211M then reported as Arc TVL; from that day the total excludes them, and earlier days are not restated.</p>
+    $100.8M of the $211M then reported as Arc TVL; from that day the total excludes them, and earlier days are not restated.
+    <strong>Corrected on 30&nbsp;October&nbsp;2026:</strong> the page of each such entry published the balance of all of them together —
+    on 29&nbsp;October <code>/protocol/safe</code> showed 261.9M USD where Safes held 362.8k, and the Circle MSCA page showed the same
+    total. Each page now sums its own accounts, and its description counts the accounts holding a balance rather than the contracts
+    listed for them. Chain TVL was not affected: these balances are outside it.</p>
     <p><strong>An EIP-7702 account is not a contract at all.</strong> An ordinary account can delegate to wallet code, and it then
     answers <code>eth_getCode</code> with a 23-byte designator, <code>0xef0100</code> followed by the delegate's address. A private key
     still signs for it. Until 20&nbsp;October&nbsp;2026 any code at all meant "contract", so these accounts were scanned and their balances
@@ -365,8 +381,8 @@
   <table>
     <thead><tr><th>Metric</th><th>Definition</th></tr></thead>
     <tbody>
-      <tr><td>Raw volume</td><td>Sum of every <code>Transfer</code> event value.</td></tr>
-      <tr><td>Real volume</td><td>Sum of the largest transfer per transaction, per token (routing hops &amp; contract internals removed).</td></tr>
+      <tr><td>Raw volume</td><td>Sum of every <code>Transfer</code> event value, mints and burns included.</td></tr>
+      <tr><td>Real volume</td><td>Sum of the largest transfer per transaction, per token (routing hops &amp; contract internals removed). Mints and burns are left out: they are issuance, reported as Mint / Burn.</td></tr>
       <tr><td>Adjusted volume</td><td>Real volume, minus transfers where both ends are flagged senders.</td></tr>
       <tr><td>Transfers</td><td>Count of transfer events in the period.</td></tr>
       <tr><td>Mint / Burn</td><td>Transfers from / to the zero address <code>0x000…000</code> — supply created / destroyed on-chain.</td></tr>
@@ -382,8 +398,10 @@
       <tr><td>Flagged address</td><td>An address that sent more than 1,000 transfers or $10M in 30 days — the monthly limits whole on history shorter than a month, its average monthly rate beyond.</td></tr>
       <tr><td>TVL</td><td>Sum of indexed stablecoin balances held by contracts, read with <code>balanceOf</code>, per currency. A contract is an address with bytecode, except an EIP-7702 delegation designator, which marks an ordinary account; smart-contract wallets are kept out.</td></tr>
       <tr><td>Attributed TVL</td><td>The part of TVL held by contracts a registry entry claims. The remainder is reported as unattributed.</td></tr>
-      <tr><td>Protocol "moved"</td><td>Transfer volume in and out of a protocol's contracts over the last 7 UTC days, today included, per currency; transfers are counted over the same days. <strong>Corrected on 27&nbsp;October&nbsp;2026:</strong> the figure was labelled a ~7-day window but was a running total per address that only reset after a week without activity, so for a busy contract it covered everything since it was first seen — Morpho showed 1.93B where its contracts had moved 107M dollars in the past week. It also added every token's face value together. It is now counted per address, token and UTC day. Daily counting began that day, so until it reaches back a week the page says "since" with the start date instead of passing a shorter span off as seven days.</td></tr>
+      <tr><td>Protocol "moved"</td><td>Transfer volume in and out of a protocol's contracts over 7 UTC days — the day of the newest indexed minute and the six before it — per currency; transfers are counted over the same days. <strong>Corrected on 27&nbsp;October&nbsp;2026:</strong> the figure was labelled a ~7-day window but was a running total per address that only reset after a week without activity, so for a busy contract it covered everything since it was first seen — Morpho showed 1.93B where its contracts had moved 107M dollars in the past week. It also added every token's face value together. It is now counted per address, token and UTC day. Daily counting began during that day, so until seven full days are counted the page says "since" with the start date instead of passing a shorter span off as seven days.</td></tr>
       <tr><td>Observed</td><td>A listed protocol we have seen hold a balance or move value. Distinguishes a live entry from one only listed.</td></tr>
+      <tr><td>Top addresses</td><td>Addresses ranked by what they moved in and out over 7 UTC days — the day of the newest indexed minute and the six before it — in the currency gas is paid in, from per-day counts; their other currencies are listed under each figure, unranked, and transfers count every token. <strong>Corrected on 30&nbsp;October&nbsp;2026:</strong> <code>/v1/addresses/top</code> announced <code>windowDays: 7</code>, and the terminal "across indexed history", over the flaw "moved" had until 27&nbsp;October: a running total per address, reset only after a week without activity — for a busy address everything since it was first seen, up to 44 days on mainnet — with every token's face value added. Daily counting began during 27&nbsp;October, so until seven full days are counted the window starts there, and the response and the terminal say so.</td></tr>
+      <tr><td>Daily digest</td><td>The ready-to-post summary on the ecosystem page and <code>/v1/rankings</code>. Its 24h volume is real volume in the currency gas is paid in, printed with adjusted volume; "Most active" names its window; a TVL move is listed when it is at least the floor for naming an unattributed contract (a tenth of the threshold for a notable transfer: 10,000 by default on Arc mainnet) and 2% of the day before, and as "new", without a percentage, when the level the day before was under that floor. A protocol without a stored level on one of the two days is not compared: zero levels are not stored, so a protocol emptied to zero, funded from zero or listed since is not among the movers. When nothing compared moves that much, the digest says how many protocols it compared, and it says so when today's levels have not been read yet. <strong>Corrected on 30&nbsp;October&nbsp;2026:</strong> the digest printed raw volume as "24h volume" — 1.00B USD on 29&nbsp;October, against the 301.7M real the terminal shows under that label — added every currency into its adjusted figure, left "Most active" to read as a day where it covers a week, took percentages of dust — "+43665838.9% (2.29 → 1000.0K)" — and said "no baseline yet" on days when levels existed and nothing had moved 2%.</td></tr>
     </tbody>
   </table>
 
@@ -398,11 +416,18 @@
     <em>after</em> the initial backfill. So a freshly-seeded history was timestamped at an assumption: on a chain running at 1s, the far
     end of a 20,000-block backfill landed nearly three hours from where it happened. Per-minute aggregates are additive, so that is not a
     figure that can be repaired later. The anchor still exists as a fallback for a range whose headers came back empty.</p>
-    <p style="margin-bottom:0"><strong>Which clock the windows use.</strong> Minute buckets are keyed by <em>chain</em> time. So every
+    <p><strong>Which clock the windows use.</strong> Minute buckets are keyed by <em>chain</em> time. So every
     rolling window — 24h volume, the fee window — ends at the newest minute actually measured, not at our wall clock, and never at a time
     the data has not reached. On a healthy chain those are seconds apart. When they are not, <code>windowEnd</code> says which instant the
     window ends at and <code>clockSkewSec</code> says how far that is from the wall clock. Anchoring to the wall clock instead would
-    publish "24h volume: 0" over a database holding days of transfers, which is the failure this makes visible rather than silent.</p>
+    publish "24h volume: 0" over a database holding days of transfers, which is the failure this makes visible rather than silent.
+    The 7-day windows — a protocol's "moved" and the top-addresses ranking — end on that minute's day too.</p>
+    <p style="margin-bottom:0"><strong>Corrected on 30&nbsp;October&nbsp;2026:</strong> the per-token pages showed a green "live" and
+    "24h" labels whenever the snapshot was valid — which it stays, by design, while the chain cannot be read — so figures days old read
+    as current, and their description told search engines "Live … over the last 24 hours". They now say what the terminal says: the
+    chain's state, how old the figures are, and the 24 hours up to the last indexed minute. The 7-day windows followed the wall clock:
+    with the chain frozen, the week slid past the data while still reading as seven days, and emptied after a week. They now end on the
+    day of the last indexed minute, and count as complete only once that week's first day was counted whole.</p>
   </div>
 
   <h2>How much history, and of what</h2>

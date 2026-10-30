@@ -25,7 +25,7 @@ import { normalizePath, dayOf, countable, keyPrefix, buildDigest, QUIET_DAYS_BEF
 import { sendTelegram, configured as tgConfigured } from './telegram.js';
 import { specJson, llmsTxt } from './openapi.js';
 import { runOnce } from './verify-network.js';
-import { RANGES, ADDR_RE, clampLimit, alignToBucket, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED, WHALEWATCH_ENABLED, WATCH_ENABLED, WATCH_EVERY_SEC, SITE_ORIGIN } from './constants.js';
+import { RANGES, ADDR_RE, clampLimit, alignToBucket, seriesScope, TOKEN_SYMBOLS, ENTITIES_ENABLED, TVL_ENABLED, WHALEWATCH_ENABLED, WATCH_ENABLED, WATCH_EVERY_SEC, SITE_ORIGIN } from './constants.js';
 import { CHAIN, NETWORK } from './chains.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -358,12 +358,19 @@ async function handle(req, res) {
   // accompany is only rebuilt when a tick completes. Without it the page cannot tell a halted chain
   // from a catch-up, and was captioning the latter 'no blocks being produced' — a false statement
   // about Arc, made by us, on a chain that was running fine.
-  if (path === '/api/state') return json(res, { ...live.snapshot, chain: chainStatus(), index: indexProgress(), tvl: TVL_ENABLED ? tvl.total() : null,
-    // Per currency — what the TVL tile shows. `tvl` above adds euros to dollars and is kept for old clients.
-    tvlByDenomination: TVL_ENABLED ? tvl.totalByDenomination() : null });
+  if (path === '/api/state') {
+    // The terminal's "Top addresses", from the same weekly ranking as /v1/addresses/top rather than the
+    // snapshot's cumulative addr_stats list. Cached in tvl.js, so a poll does not re-rank.
+    const { top, ...topWindow } = tvl.topMoved(8);
+    return json(res, { ...live.snapshot, chain: chainStatus(), index: indexProgress(), tvl: TVL_ENABLED ? tvl.total() : null,
+      // Per currency — what the TVL tile shows. `tvl` above adds euros to dollars and is kept for old clients.
+      tvlByDenomination: TVL_ENABLED ? tvl.totalByDenomination() : null,
+      top, topWindow });
+  }
   if (path === '/api/alerts') return json(res, { feed: alertFeed });
   if (path === '/api/history') {
-    const token = (u.searchParams.get('token') || 'ALL').toUpperCase();
+    // `ALL` is the base currency's tokens, never every token: see seriesScope.
+    const scope = seriesScope((u.searchParams.get('token') || 'ALL').toUpperCase());
     const r = RANGES[u.searchParams.get('range')] || RANGES['24h'];
     // Anchored to the same instant the snapshot's windows end at — now while live, the last
     // indexed minute once frozen. Charting a span that runs up to now on a halted chain draws an
@@ -373,7 +380,7 @@ async function handle(req, res) {
     // Aligned to the bucket grid — see alignToBucket. Every point is a whole interval.
     const since = r.span == null ? 0 : alignToBucket(endSec - r.span, r.group);
     return json(res, {
-      token, group: r.group, windowEnd: endSec * 1000,
+      token: scope.token, denomination: scope.denomination, tokens: scope.tokens, group: r.group, windowEnd: endSec * 1000,
       // Which table answered, which instant the range asked for, and how far back that table
       // actually reaches. A 90-day range served from a rollup that started last week is a one-week
       // series wearing a 90-day label; `since` vs `recordBegan` is what lets a caller — or our own
@@ -381,12 +388,12 @@ async function handle(req, res) {
       source: r.daily ? 'daily' : 'minute',
       since,
       recordBegan: r.daily ? db.dailyRecordBegan() : (db.getCoverage().a ?? null),
-      series: db.getSeries(token, since, r.group, r.daily),
+      series: db.getSeries(scope.tokens, since, r.group, r.daily),
     });
   }
   if (path === '/api/top') {
     const limit = clampLimit(u.searchParams.get('limit'), 50, 10);
-    return json(res, { top: db.getTop(limit) });
+    return json(res, tvl.topMoved(limit));
   }
   if (path === '/api/token') {
     const token = String(u.searchParams.get('token') || '').toUpperCase();
@@ -397,6 +404,10 @@ async function handle(req, res) {
     const dress = (x) => ({ ...x, fromLabel: lbl(x.frm), toLabel: lbl(x.too) });
     return json(res, {
       token, ok: !!s.ok, updatedAt: s.updatedAt ?? null,
+      // What the terminal reads to tell live figures from frozen ones. Without them the token pages
+      // showed a green "live" and "24h" labels on data days old whenever the chain could not be read.
+      stale: !!s.stale, degraded: !!s.degraded, chain: chainStatus(),
+      dataAt: s.dataAt ?? null, windowEnd: s.windowEnd ?? null,
       supply: s.supply?.[token] || null,
       summary24h: sm,
       netIssuance24h: sm ? sm.mint - sm.burn : null,
@@ -542,17 +553,23 @@ async function handle(req, res) {
     const volTxt = sup ? compactNum(sup.rvolume24h) : '—';
     const velTxt = velocityTxt(sup?.velocity);
     const issuance = sm ? sm.mint - sm.burn : null;
+    // Frozen figures are not described as live or as the last 24 hours: the window is the day up to the
+    // last indexed minute, and the page says which. The template is rebuilt from the snapshot every minute.
+    const frozen = !!s.degraded;
+    const to = frozen && s.windowEnd ? `${new Date(s.windowEnd).toISOString().slice(0, 16).replace('T', ' ')} UTC` : null;
     return serveTemplated(req, res, 'token.html', sym, {
       TITLE: `${sym} on ${net} — supply, volume & velocity · Stabledesk`,
-      DESCRIPTION: `Live ${sym} analytics on ${net} (Circle's L1): ${supplyTxt} supply, ${volTxt} real volume over 24h, `
+      DESCRIPTION: `${frozen ? '' : 'Live '}${sym} analytics on ${net} (Circle's L1): ${supplyTxt} supply, `
+        + `${volTxt} real volume ${to ? `over the 24 hours to ${to}` : 'over 24h'}, `
         + `${velTxt} velocity${issuance != null ? `, ${compactNum(issuance)} net issuance` : ''}. `
         + 'Transfer-size distribution, largest transfers and mint/burn, measured from chain data.',
       CANONICAL: `https://stabledesk.xyz/token/${sym.toLowerCase()}`,
       OG_TITLE: `${sym} on ${net} · Stabledesk`,
-      OG_DESC: `${supplyTxt} supply · ${volTxt} 24h real volume · ${velTxt} velocity`,
+      OG_DESC: `${supplyTxt} supply · ${volTxt} ${to ? `real volume, 24h to ${to}` : '24h real volume'} · ${velTxt} velocity`,
       ROBOTS: 'index, follow',
       TOKEN: sym,
-      SSR: `${sym} on ${net}: ${supplyTxt} supply, ${volTxt} real transfer volume over the last 24 hours, `
+      SSR: `${sym} on ${net}: ${supplyTxt} supply, ${volTxt} real transfer volume `
+        + `${to ? `over the 24 hours to ${to} (the last indexed minute)` : 'over the last 24 hours'}, `
         + `velocity ${velTxt}${issuance != null ? `, net issuance ${compactNum(issuance)}` : ''}.`,
     });
   }
@@ -580,10 +597,13 @@ async function handle(req, res) {
     const tvlTxt = `${compactNum(byDen[base] || 0)}${base ? ` ${base}` : ''}${others.length ? ` (+ ${others.join(', ')})` : ''}`;
     const net = CHAIN.label;
     const cat = CATEGORIES[p.category]?.label || p.category;
+    // A wallets entry lists the code its accounts run, not the accounts: count the accounts holding a balance.
+    const held = p.wallets ? d?.contractsWithBalance ?? 0 : p.contracts.length;
+    const unit = p.wallets ? 'account' : 'contract';
     return serveTemplated(req, res, 'protocol.html', p.id, {
       TITLE: `${p.name} on ${net} — TVL & activity · Stabledesk`,
       DESCRIPTION: `${p.name}${p.vendor ? ` (${p.vendor})` : ''} on ${net}: ${tvlTxt} held in stablecoins across `
-        + `${p.contracts.length} contract${p.contracts.length === 1 ? '' : 's'}. ${p.desc || ''}`.trim(),
+        + `${held} ${unit}${held === 1 ? '' : 's'}. ${p.desc || ''}`.trim(),
       CANONICAL: `https://stabledesk.xyz/protocol/${p.id}`,
       OG_TITLE: `${p.name} on ${net} · Stabledesk`,
       OG_DESC: `${cat} · ${tvlTxt} held in stablecoins`,

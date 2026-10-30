@@ -1486,8 +1486,17 @@ function dbDerived({ frozen = false } = {}) {
       // input to that conversion, so it is published too.
       blockMs: avgBlockMs,
       minWindowDays: NOISE_FILTER.windowDays,
-      excludedVolume24h: Math.max(0, summary.rvolume - summary.avolume),
-      excludedShare: summary.rvolume ? Math.max(0, 1 - summary.avolume / summary.rvolume) : 0,
+      // What the filter took out of real volume, per currency; the two headline fields are the base
+      // currency's. They were computed on the all-token totals until 30 October 2026, so euros and
+      // pounds were added to dollars — 74.3% "of 24h real volume" on mainnet where the dollar share was 69.0%.
+      ...(() => {
+        const excluded = {};
+        for (const [d, g] of Object.entries(volByDenomination)) {
+          excluded[d] = { volume: Math.max(0, g.rvolume - g.avolume), share: g.rvolume ? Math.max(0, 1 - g.avolume / g.rvolume) : 0 };
+        }
+        const b = excluded[BASE_DENOMINATION];
+        return { excludedVolume24h: b ? b.volume : 0, excludedShare: b ? b.share : 0, excludedDenomination: BASE_DENOMINATION, excludedByDenomination: excluded };
+      })(),
       top: noisyRows.slice(0, 8).map((r) => ({
         ...r,
         label: lbl(r.address),
@@ -1511,8 +1520,15 @@ function dbDerived({ frozen = false } = {}) {
       netIssuance24h: HAS_GATEWAY ? summary.bmint - summary.bburn : null,
       volume24h: HAS_GATEWAY ? summary.bvolume : null,
       transfers24h: HAS_GATEWAY ? summary.btransfers : null,
-      // What share of measured real volume is Gateway moving its own liquidity around.
-      volumeShare: HAS_GATEWAY && summary.rvolume ? summary.bvolume / summary.rvolume : null,
+      // What share of measured real volume is Gateway moving its own liquidity around — in the base
+      // currency, on both sides of the division: Gateway moves USDC, and dividing by the real volume of
+      // every token put euros and pounds in the denominator (0.166 on mainnet on 29 October 2026, for 0.205).
+      volumeShare: HAS_GATEWAY ? (() => {
+        let bvol = 0;
+        for (const [sym, t] of Object.entries(summary.byToken || {})) if (denominationOf(sym) === BASE_DENOMINATION) bvol += t.bvolume || 0;
+        const rvol = volByDenomination[BASE_DENOMINATION]?.rvolume || 0;
+        return rvol ? bvol / rvol : null;
+      })() : null,
     },
     // Circle CCTP: USDC (and EURC) burned on one chain and minted on another. A mint here is a
     // dollar arriving, a burn is one leaving — per token, with the chain on the other side.

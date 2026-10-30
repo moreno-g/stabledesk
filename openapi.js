@@ -83,8 +83,9 @@ function build() {
         'volume, TVL, flows and network fee economics, read straight from the chain.',
         '',
         'Three volume measures are published side by side rather than one blended number:',
-        '`volume` (every Transfer event), `rvolume` (**real** — one largest transfer per transaction',
-        'per token, so routing hops and contract internals are not counted twice) and `avolume`',
+        '`volume` (every Transfer event, mints and burns included), `rvolume` (**real** — one largest',
+        'transfer per transaction per token, so routing hops and contract internals are not counted',
+        'twice; mints and burns are left out, published as `mint` and `burn`) and `avolume`',
         '(**adjusted** — real, minus infrastructure addresses talking to infrastructure). Publishing',
         'all three is what makes each filtering step auditable instead of asserted.',
         '',
@@ -229,10 +230,13 @@ function build() {
         get: {
           tags: ['Stablecoins'], operationId: 'getStablecoinHistory',
           summary: 'Volume / mint / burn time series',
-          description: 'Bucketed series. `windowEnd` states which instant the range ends at — on a frozen chain that is the last indexed minute, not now.',
+          description: 'Bucketed series. `windowEnd` states which instant the range ends at — on a frozen chain that is the last indexed minute, not now. '
+            + 'Every series is in one currency, named in `denomination`, with the tokens it adds up in `tokens`.',
           parameters: [
             {
               name: 'token', in: 'query', required: false,
+              description: 'One token, or `ALL`: every tracked token denominated in the base currency (the one gas is paid in, USD on Arc). '
+                + '`ALL` never adds other currencies in; until 30 Oct 2026 it summed every token at face value. See /methodology.',
               schema: { type: 'string', enum: ['ALL', ...TOKENS], default: 'ALL' },
             },
             {
@@ -359,7 +363,8 @@ function build() {
       '/v1/addresses/top': {
         get: {
           tags: ['Addresses'], operationId: 'getTopAddresses',
-          summary: 'Top addresses by volume',
+          summary: 'Top addresses by volume moved over 7 days',
+          description: 'Ranked in the base denomination over 7 UTC days ending on the day of the newest indexed minute, from per-day counts; other currencies are listed per address, unranked. `windowDays` and `moved` state the span actually covered.',
           parameters: [limitParam(100, 20)],
           responses: { 200: ok('Ranked addresses.', schema('TopAddresses')), ...COMMON },
         },
@@ -675,7 +680,7 @@ function build() {
 
         TokenSummary: {
           type: 'object',
-          description: 'The three volume measures, side by side. `volume` counts every Transfer event; `rvolume` is real (one largest transfer per transaction per token); `avolume` is adjusted (real, minus infrastructure-to-infrastructure). The top-level totals are face values added across every tracked token WITH NO currency conversion — dollars, euros and pesos in one sum. Kept for consumers already reading them; `byDenomination` inside this object carries the per-currency figures, and `byToken` the per-asset ones.',
+          description: 'The three volume measures, side by side. `volume` counts every Transfer event, mints and burns included; `rvolume` is real (one largest transfer per transaction per token, mints and burns left out — they are `mint` and `burn`); `avolume` is adjusted (real, minus infrastructure-to-infrastructure). The top-level totals are face values added across every tracked token WITH NO currency conversion — dollars, euros and pesos in one sum. Kept for consumers already reading them; `byDenomination` inside this object carries the per-currency figures, and `byToken` the per-asset ones.',
           properties: {
             volume: { type: 'number' }, transfers: { type: 'integer' },
             rvolume: { type: 'number' }, rtransfers: { type: 'integer' },
@@ -795,6 +800,8 @@ function build() {
           type: 'object',
           properties: {
             token: { type: 'string' },
+            denomination: { type: ['string', 'null'], description: 'The currency every figure in the series is in (ISO code). Null for a token whose denomination is undeclared.' },
+            tokens: { type: 'array', items: { type: 'string' }, description: 'The tokens added up: the one asked for, or with `token=ALL` every tracked token in `denomination`.' },
             group: { type: 'integer', description: 'Bucket size in seconds.' },
             windowEnd: { type: 'integer', description: 'The instant the range ends at (ms) — the newest measured minute, which is chain time. Label the series with this rather than assuming it runs to the moment of the call.' },
             source: {
@@ -867,7 +874,7 @@ function build() {
             tvl: { type: 'number', description: 'Stablecoin balances held by this protocol\'s contracts.' },
             tvlByToken: { type: 'object', additionalProperties: { type: 'number' } },
             tvlByDenomination: { type: 'object', additionalProperties: { type: 'number' }, description: 'The protocol\'s TVL per currency. Protocols are ranked by the base denomination; `tvl` adds currencies at face value and is kept for existing consumers.' },
-            windowVolume: { type: 'number', description: 'Volume moved by the protocol\'s contracts over the last 7 UTC days, every currency added at face value. Kept for existing consumers; use windowVolumeByDenomination.' },
+            windowVolume: { type: 'number', description: 'Volume moved by the protocol\'s contracts over 7 UTC days ending on the day of the newest indexed minute (`moved.to`), every currency added at face value. Kept for existing consumers; use windowVolumeByDenomination.' },
             windowVolumeByDenomination: { type: 'object', additionalProperties: { type: 'number' }, description: 'The same volume per currency. While daily counting (started 27 October 2026) is younger than 7 days, it covers the span given by `moved.since` on the response.' },
             windowTransfers: { type: 'integer', description: 'Transfers in or out of the protocol\'s contracts over the same span.' },
             contracts: { type: 'array', items: { type: 'string' }, description: 'Listed contracts. Contracts attributed by a rule are counted in `derivedContracts`.' },
@@ -1007,8 +1014,8 @@ function build() {
                   label: { type: ['string', 'null'] },
                   tvl: { type: 'number' },
                   byToken: { type: 'object', additionalProperties: { type: 'number' } },
-                  windowVolume: { type: 'number', description: 'Last 7 UTC days, every currency at face value.' },
-                  windowVolumeByDenomination: { type: 'object', additionalProperties: { type: 'number' }, description: 'Last 7 UTC days, per currency.' },
+                  windowVolume: { type: 'number', description: 'The 7 UTC days of `moved`, every currency at face value.' },
+                  windowVolumeByDenomination: { type: 'object', additionalProperties: { type: 'number' }, description: 'The 7 UTC days of `moved`, per currency.' },
                   windowTransfers: { type: 'integer' },
                   lastBlock: { type: ['integer', 'null'] },
                 },
@@ -1109,7 +1116,46 @@ function build() {
 
         Rankings: {
           type: 'object',
-          properties: { digest: { type: 'string', description: 'Ready-to-post text summary of the day\'s movements.' } },
+          properties: {
+            digest: { type: 'string', description: 'Ready-to-post text summary of the day\'s movements.' },
+            chain: {
+              type: 'object',
+              description: 'Chain-wide figures in the base denomination (`denomination`). Corrected on 30 Oct 2026: `volume24h` was raw volume, and `adjustedVolume24h` added every currency.',
+              properties: {
+                denomination: { type: ['string', 'null'] },
+                tvl: { type: 'number' },
+                volume24h: num('Real volume over 24h, in `denomination` — the measure the terminal\'s "24h volume" shows.'),
+                adjustedVolume24h: num('Adjusted volume over 24h, in `denomination`.'),
+                rawVolume24h: num('Raw volume over 24h (every Transfer event, mints and burns included), in `denomination`.'),
+                transfers24h: { type: 'integer', description: 'Every Transfer event over 24h, every token counted.' },
+              },
+              additionalProperties: true,
+            },
+            moved: {
+              type: 'object',
+              description: 'The window `byVolume` covers: 7 UTC days ending on the day of the newest indexed minute (`to`), or since `since` while `complete` is false.',
+              properties: { since: { type: 'integer' }, to: { type: 'integer' }, complete: { type: 'boolean' }, days: { type: 'integer' } },
+            },
+            movers: {
+              type: 'array',
+              description: 'TVL change against the day before, in the base denomination, under `moversRule`: at least `floor` and `minPct`; a level the day before under `floor` carries `isNew` and no percentage. A protocol without a stored level on one of the two days is not compared: zero levels are not stored.',
+              items: { type: 'object', additionalProperties: true },
+            },
+            moversCompared: { type: 'integer', description: 'Protocols with a stored level on both days: the ones compared. With both days read, an empty `movers` means none of these moved enough; a protocol emptied to zero or funded from zero is not among them.' },
+            moversRead: {
+              type: 'object',
+              description: 'Whether each day\'s TVL levels exist at all. Yesterday unread means no baseline yet; today unread means the first scan of the day has not run.',
+              properties: { yesterday: { type: 'boolean' }, today: { type: 'boolean' } },
+            },
+            moversRule: {
+              type: 'object',
+              properties: {
+                floor: { type: 'number', description: 'Smallest change listed, in `denomination`; also the smallest base a percentage is taken of.' },
+                minPct: { type: 'number', description: 'Smallest relative change listed, 0–1, for a base at or above `floor`.' },
+                denomination: { type: ['string', 'null'] },
+              },
+            },
+          },
           additionalProperties: true,
         },
 
@@ -1125,16 +1171,32 @@ function build() {
 
         TopAddresses: {
           type: 'object',
+          description: 'Addresses ranked by what they moved, in and out, over 7 UTC days — the day of the newest indexed minute and the six before it — in the base denomination. '
+            + 'Until 30 Oct 2026 this ranked a running total since each address was first seen, with every token added, under `windowDays: 7`.',
           properties: {
+            denomination: { type: ['string', 'null'], description: 'The currency `volume` is in and the ranking is made in.' },
+            windowDays: { type: 'integer', description: 'UTC days the ranking covers, from `moved.since` to the day of `moved.to`: 7, or fewer while daily counting (begun during 27 Oct 2026) is younger than the window.' },
+            moved: {
+              type: 'object',
+              properties: {
+                since: { type: 'integer', description: 'ms. Start of the window.' },
+                to: { type: 'integer', description: 'ms. End of the window: the newest indexed minute, which is now while the chain is live and earlier while it is frozen.' },
+                complete: { type: 'boolean', description: 'False until daily counting covers the window\'s first day whole: while the window starts where counting began rather than 7 days back, and on the day it reaches back exactly 7.' },
+                days: { type: 'integer', description: 'The window the ranking aims at, in UTC days.' },
+              },
+            },
+            computedAt: { type: 'integer', description: 'ms. The ranking reads every row of the window, so it is recomputed every few minutes rather than per request.' },
             top: {
               type: 'array',
               items: {
                 type: 'object',
                 properties: {
                   address: { type: 'string' },
-                  transfers: { type: 'integer' },
-                  volume: { type: 'number' },
+                  volume: { type: 'number', description: 'Moved in and out over the window, in `denomination`.' },
+                  volumeByDenomination: { type: 'object', additionalProperties: { type: 'number' }, description: 'The same per currency, never summed across them.' },
+                  transfers: { type: 'integer', description: 'Transfers in or out over the window, every token counted.' },
                   label: { type: ['string', 'null'], description: 'Known-entity name, or null when unidentified.' },
+                  contract: { type: 'boolean', description: 'True when the address is known to hold bytecode.' },
                 },
               },
             },
@@ -1185,8 +1247,14 @@ function build() {
                 blockMs: { type: ['number', 'null'], description: 'Measured average block time, used to convert a block span into days.' },
               },
             },
-            excludedVolume24h: num('Real volume dropped from adjusted, over 24h.'),
-            excludedShare: num('That volume as a share of real volume, 0–1.'),
+            excludedVolume24h: num('Real volume dropped from adjusted over 24h, in `excludedDenomination`. Until 30 Oct 2026 every currency was added in.'),
+            excludedShare: num('That volume as a share of real volume in the same currency, 0–1.'),
+            excludedDenomination: { type: ['string', 'null'], description: 'The currency of the two fields above: the base denomination, the one gas is paid in.' },
+            excludedByDenomination: {
+              type: ['object', 'null'],
+              description: 'The same pair for every currency, never summed across them.',
+              additionalProperties: { type: 'object', properties: { volume: { type: 'number' }, share: { type: 'number' } } },
+            },
             addresses: {
               type: 'array',
               items: {
@@ -1362,9 +1430,10 @@ Tracked assets: ${tokens}.
 Three things worth knowing before quoting any figure from this API:
 
 - **Three volume measures are published side by side**, never blended into one: raw (every Transfer
-  event), real (one largest transfer per transaction per token, so routing hops and contract
-  internals are not double-counted) and adjusted (real, minus infrastructure talking to
-  infrastructure). Quoting "volume" without saying which one is quoting an ambiguous number.
+  event, mints and burns included), real (one largest transfer per transaction per token, so routing
+  hops and contract internals are not double-counted; mints and burns are left out and published as
+  issuance) and adjusted (real, minus infrastructure talking to infrastructure). Quoting "volume"
+  without saying which one is quoting an ambiguous number.
 - **Absent beats stale.** A figure that could not be measured is \`null\`, never a carried-over
   previous value. Supply reads \`null\`, not \`0\`, when the chain has never been reachable.
 - **Windows re-anchor when the chain freezes.** The rolling 24h windows end at \`windowEnd\`, which
