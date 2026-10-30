@@ -113,8 +113,9 @@ const CORS = {
 };
 
 function json(res, body, code = 200, headers = {}) {
+  const s = JSON.stringify(body);   // before writeHead, as in server.js
   res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-robots-tag': 'noindex', ...CORS, ...headers });
-  res.end(JSON.stringify(body));
+  res.end(s);
 }
 export const BODY_MAX = 1e5;
 
@@ -133,7 +134,15 @@ export function readBody(req) {
       d += c;
       if (d.length > BODY_MAX) { req.pause(); finish({ __tooLarge: true }); }
     });
-    req.on('end', () => { try { finish(JSON.parse(d || '{}')); } catch { finish({}); } });
+    // Valid JSON is not necessarily an object. Callers read fields off the result, and the body `null`
+    // made `body.__tooLarge` throw — which, from a public route needing no key, stopped the process.
+    // Null, an array or a scalar is treated like unparseable input: an empty body.
+    req.on('end', () => {
+      try {
+        const v = JSON.parse(d || '{}');
+        finish(v !== null && typeof v === 'object' && !Array.isArray(v) ? v : {});
+      } catch { finish({}); }
+    });
     req.on('aborted', () => finish({}));
     req.on('error', () => finish({}));
   });
@@ -180,7 +189,8 @@ export async function handleV1(req, res, u) {
     const body = await readBody(req);
     if (body.__tooLarge) return json(res, { error: 'body_too_large', hint: `Request body must be under ${BODY_MAX} bytes.` }, 413);
     const key = 'sbd_' + randomBytes(16).toString('hex');
-    const rec = db.createKey(key, String(body.label || '').slice(0, 60), 'free');
+    // A label is text or nothing: String() throws on an object with no usable toString.
+    const rec = db.createKey(key, typeof body.label === 'string' ? body.label.slice(0, 60) : '', 'free');
     notifyKeyCreated({ ...rec, key }, db.keyTotal());
     return json(res, { key, tier: rec.tier, rpm: TIERS.free.rpm, docs: '/docs', note: 'Send this as the X-API-Key header on /v1 requests.' }, 201);
   }
@@ -525,14 +535,25 @@ export async function handleV1(req, res, u) {
     if (whErr === 'unresolvable_host') return json(res, { error: 'webhook_unresolvable', hint: 'The webhook hostname does not resolve. A rule pointing at it could never fire.' }, 400, H);
     if (whErr) return json(res, { error: 'webhook_blocked', hint: 'Webhook must be a public https URL — no localhost, private, or link-local address, including via DNS.' }, 400, H);
 
-    const token = body.token ? String(body.token).toUpperCase() : null;
-    if (token && !TOKEN_SYMBOLS.has(token)) return json(res, { error: 'bad_token', hint: `token must be one of: ${TOKEN_LIST}.` }, 400, H);
+    // Text fields must be text, and minAmount a number or a numeric string, or the request is refused.
+    // String() and Number() took arrays for values (["usdc"] read as "usdc", [5] as 5) and threw on an
+    // object with no usable toString — an exception inside the handler. "1e999" parsed to Infinity: a
+    // rule that never fires.
+    const notText = (v) => v != null && typeof v !== 'string';
+    const tokenHint = `token must be one of: ${TOKEN_LIST}.`;
+    if (notText(body.token)) return json(res, { error: 'bad_token', hint: tokenHint }, 400, H);
+    const token = body.token ? body.token.toUpperCase() : null;
+    if (token && !TOKEN_SYMBOLS.has(token)) return json(res, { error: 'bad_token', hint: tokenHint }, 400, H);
 
-    const address = body.address ? String(body.address).toLowerCase() : null;
+    if (notText(body.address)) return json(res, { error: 'bad_address' }, 400, H);
+    const address = body.address ? body.address.toLowerCase() : null;
     if (address && !ADDR_RE.test(address)) return json(res, { error: 'bad_address' }, 400, H);
 
+    if (body.minAmount != null && typeof body.minAmount !== 'number' && typeof body.minAmount !== 'string') {
+      return json(res, { error: 'bad_min_amount' }, 400, H);
+    }
     const minAmount = body.minAmount != null ? Number(body.minAmount) : 0;
-    if (Number.isNaN(minAmount) || minAmount < 0) return json(res, { error: 'bad_min_amount' }, 400, H);
+    if (!Number.isFinite(minAmount) || minAmount < 0) return json(res, { error: 'bad_min_amount' }, 400, H);
 
     const id = db.createAlert({ key, address, token, minAmount, webhook: body.webhook });
     return json(res, { id, message: 'Alert created. Fires (max 1×/min) when a matching transfer is indexed.' }, 201, H);

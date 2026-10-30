@@ -23,7 +23,19 @@ import { existsSync, readFileSync } from 'node:fs';
 process.env.DB_PATH = join(tmpdir(), `stabledesk-test-${process.pid}-${Date.now()}.db`);
 
 import { validateWebhook } from '../validate.js';
-import { ADDR_RE, RANGES, TIERS, TOKEN_SYMBOLS } from '../constants.js';
+import { ADDR_RE, RANGES, TIERS, TOKEN_SYMBOLS, SEARCH_SCAN_MAX } from '../constants.js';
+
+// Preloaded with --import into the subprocesses some tests start, so that the real server and
+// indexer can run there without touching a network: every fetch is refused, and a server that
+// listens without naming a host is bound to loopback rather than to every interface.
+const OFFLINE = 'data:text/javascript,' + encodeURIComponent(`
+  import net from 'node:net';
+  globalThis.fetch = async () => { throw new Error('offline: tests make no network calls'); };
+  const listen = net.Server.prototype.listen;
+  net.Server.prototype.listen = function (port, ...rest) {
+    if (typeof port === 'number' && typeof rest[0] !== 'string') rest.unshift('127.0.0.1');
+    return listen.call(this, port, ...rest);
+  };`);
 
 // ---- webhook SSRF allow-list ----
 test('validateWebhook rejects non-https', () => {
@@ -46,6 +58,12 @@ test('validateWebhook blocks embedded credentials', () => {
 });
 test('validateWebhook allows a public https URL', () => {
   assert.equal(validateWebhook('https://discord.com/api/webhooks/1/abc'), null);
+});
+test('validateWebhook accepts only a string', () => {
+  // String() made an array into a URL that passed every check, and SQLite then refused it at the insert.
+  for (const v of [['https://1.1.1.1/x'], { href: 'https://1.1.1.1/x' }, 42, null, undefined]) {
+    assert.equal(validateWebhook(v), 'invalid_url', JSON.stringify(v));
+  }
 });
 
 // ---- constants / regex ----
@@ -1211,6 +1229,73 @@ test('search resolves protocols, tokens and address prefixes', async () => {
   assert.equal(search(unknown).addresses[0].address, unknown);
 });
 
+test('an address prefix is a range on the key, not a scan of every address', async (t) => {
+  const db = await import('../db.js');
+  const { search } = await import('../search.js');
+  const { DatabaseSync } = await import('node:sqlite');
+
+  // Every address planted below is removed afterwards, pass or fail: the database is shared by the
+  // whole file. A second connection, as other tests here use, because db.js has no delete for them.
+  const planted = [];
+  t.after(() => {
+    const raw = new DatabaseSync(process.env.DB_PATH);
+    try {
+      const del = raw.prepare('DELETE FROM addr_stats WHERE address = ?');
+      raw.exec('BEGIN');
+      for (const address of planted) del.run(address);
+      raw.exec('COMMIT');
+    } finally {
+      raw.close();
+    }
+  });
+  const plant = (rows) => { planted.push(...rows.keys()); db.applyBatch(new Map(), rows, []); };
+
+  // Four addresses under the prefix (two of them tied on volume), and one on either side of it that a
+  // wrong bound would let in.
+  const a = (p, fill) => p + fill.repeat(42 - p.length);
+  const low = a('0xfeed', '0'), tie = a('0xfeed', '1'), mid = a('0xfeed', 'a'), high = a('0xfeed', 'f');
+  const before = a('0xfeec', 'f'), after = a('0xfeee', '0');
+  plant(new Map([
+    [low, { transfers: 3, volume: 30, lastBlock: 900 }],
+    [tie, { transfers: 2, volume: 30, lastBlock: 900 }],
+    [mid, { transfers: 5, volume: 50, lastBlock: 900 }],
+    [high, { transfers: 1, volume: 10, lastBlock: 900 }],
+    [before, { transfers: 9, volume: 99, lastBlock: 900 }],
+    [after, { transfers: 9, volume: 99, lastBlock: 900 }],
+  ]));
+
+  const found = (prefix, limit) => db.searchAddresses(prefix, limit).map((r) => r.address);
+  assert.deepEqual(found('0xfeed'), [mid, low, tie, high], 'every address with the prefix, by volume then address, and none either side');
+  assert.deepEqual(found('0xFEED', 2), [mid, low], 'case does not matter, and the limit holds');
+  assert.deepEqual(found(high), [high], 'a whole address is its own prefix');
+  assert.deepEqual(found('0xfeedbeef'), []);
+  assert.ok(search('0xfeed').addresses.some((r) => r.address === mid), 'reachable from the search box');
+
+  // The work per request is bounded as well. A transfer of 0 creates an address row, so the rows under
+  // a prefix can be planted; past SEARCH_SCAN_MAX of them only the first slice, in address order, is
+  // ranked. Planted here: one more than that, the last of which moved the most.
+  const crowd = new Map();
+  const nth = (i) => '0xcafe' + i.toString(16).padStart(36, '0');
+  for (let i = 0; i <= SEARCH_SCAN_MAX; i++) crowd.set(nth(i), { transfers: 1, volume: 0, lastBlock: 900 });
+  const last = nth(SEARCH_SCAN_MAX);
+  crowd.get(last).volume = 1;
+  plant(crowd);
+  assert.equal(found('0xcafe', 1)[0], nth(0), 'the scan stopped at SEARCH_SCAN_MAX rows: the first slice, all at volume 0, by address');
+  assert.equal(found(last.slice(0, 40), 1)[0], last, 'a longer prefix still reaches the one past it');
+
+  // The cost, not only the answer. LIKE 'p%' walked the whole table in volume order whenever the
+  // prefix matched nothing — about 0.3 s of synchronous work per request on mainnet. The plan is read
+  // with the arguments production binds, so a different query cannot pass by failing to bind.
+  const probe = new DatabaseSync(process.env.DB_PATH);
+  try {
+    const plan = probe.prepare('EXPLAIN QUERY PLAN ' + db.SEARCH_SQL).all(...db.searchArgs('0xfeed')).map((r) => r.detail).join(' / ');
+    assert.match(plan, /SEARCH addr_stats USING .*\(address>\? AND address<\?\)/, plan);
+    assert.doesNotMatch(plan, /SCAN addr_stats/, plan);
+  } finally {
+    probe.close();
+  }
+});
+
 // ---- daily rankings ----
 test('rankings digest reports missing baselines instead of inventing 0%', async () => {
   const { daily, digest } = await import('../rankings.js');
@@ -1708,6 +1793,56 @@ test('window end follows chain time, never a wall clock the data has not reached
   assert.equal(windowEndSec(now, null), now);
 });
 
+test('velocity divides one day of volume by supply, however much history is held', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { rmSync } = await import('node:fs');
+
+  // The snapshot the site serves, built from a seeded database in a subprocess: start() ties the
+  // indexer's state and timers to its process, and this file's database is shared by every test.
+  // USDC moves 1,000 a minute in real volume over `hours` of history, against a supply of 1.44M.
+  const usdcAfter = (hours) => {
+    const dbPath = join(tmpdir(), `stabledesk-test-velocity-${process.pid}-${hours}h.db`);
+    const script = `
+      const db = await import('./db.js');
+      const idx = await import('./indexer.js');
+      const end = Math.floor(Date.now() / 60000) * 60, buckets = new Map();
+      for (let m = end - ${hours} * 3600; m <= end; m += 60) {
+        buckets.set(m + '|USDC', { minute: m, token: 'USDC', volume: 1500, cnt: 3, mint: 0, burn: 0, rvolume: 1000, rcnt: 1, avolume: 800, acnt: 1 });
+      }
+      db.applyBatch(buckets, new Map(), []);
+      db.setMetaValue('supplies', JSON.stringify({ at: Date.now(), s: { USDC: 1440000 } }));
+      await idx.start();
+      idx.stop();
+      process.stdout.write('\\n' + JSON.stringify(idx.live.snapshot.supply.USDC) + '\\n', () => process.exit(0));`;
+    try {
+      // A timeout, because a synchronous wait blocks the event loop and no test timeout could fire.
+      const out = execFileSync(process.execPath, ['--import', OFFLINE, '--input-type=module', '-e', script], {
+        cwd: join(import.meta.dirname, '..'),
+        env: { ...process.env, DB_PATH: dbPath, ARC_NETWORK: '', TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '' },
+        stdio: 'pipe',
+        timeout: 30000,
+      });
+      return JSON.parse(String(out).trim().split('\n').at(-1));
+    } finally {
+      for (const ext of ['', '-wal', '-shm']) rmSync(dbPath + ext, { force: true });
+    }
+  };
+  // The seeded rate turns the supply over exactly once a day. The only slack is the extra minute the
+  // window's two inclusive ends let in, scaled up with it while less than a day is held.
+  const onceADay = (r, hours) => Math.abs(r.velocity - 1) <= 60 / Math.min(86400, hours * 3600) + 1e-9;
+
+  // Two days held. The 24h volume used to be divided by the whole span the per-minute aggregates held
+  // — up to the seven days they keep — so velocity read half of this here, and a seventh on mainnet.
+  const held = usdcAfter(48);
+  assert.equal(held.supply, 1440000);
+  assert.ok(onceADay(held, 48), `velocity ${held.velocity}, expected 1`);
+
+  // Six hours held: scaled to a day, as fees are, rather than published as a quarter of one. This case
+  // passed before the correction too; it guards the extrapolation, not the fix.
+  const young = usdcAfter(6);
+  assert.ok(onceADay(young, 6), `velocity ${young.velocity}, expected 1`);
+});
+
 // ---- per-IP limits cannot be lifted with a header ----
 test('the client address is read from the trusted end of the forwarding chain', async () => {
   const { clientIp, TRUSTED_PROXY_HOPS } = await import('../api.js');
@@ -1791,6 +1926,159 @@ test('an oversize request body is refused instead of hanging the request', async
   bad.emit('data', 'not json');
   bad.emit('end');
   assert.deepEqual(await junk, {}, 'unparseable JSON is an empty body, not a crash');
+});
+
+test('a body that parses to null, an array or a scalar is an empty body, not a crash', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { readBody } = await import('../api.js');
+
+  // Valid JSON, and not an object. `null` was the one that mattered: the handler read
+  // `body.__tooLarge` off it and threw, from POST /v1/keys, which needs no key.
+  for (const raw of ['null', '[]', '["https://example.com/x"]', '5', '"text"', 'true']) {
+    const req = new EventEmitter();
+    req.pause = () => {};
+    const parsed = readBody(req);
+    req.emit('data', raw);
+    req.emit('end');
+    assert.deepEqual(await parsed, {}, raw);
+  }
+});
+
+// ---- one request cannot take the process down (server.js) ----
+// The HTTP server shares its process with the indexer and every poller, so a request that kills it
+// stops every live figure until the platform restarts it. Tested on the real server.js, in a
+// subprocess with its own database and port, with fetch refused (see OFFLINE).
+test('a malformed or failing request is answered with an error, and the server keeps serving', async () => {
+  const { spawn } = await import('node:child_process');
+  const { once } = await import('node:events');
+  const { rmSync } = await import('node:fs');
+  const { DatabaseSync } = await import('node:sqlite');
+  const net = await import('node:net');
+
+  const port = await new Promise((resolve) => {
+    const probe = net.createServer().listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+  const dbPath = join(tmpdir(), `stabledesk-test-server-${process.pid}-${Date.now()}.db`);
+  const child = spawn(process.execPath, ['--import', OFFLINE, 'server.js'], {
+    cwd: join(import.meta.dirname, '..'),
+    env: {
+      ...process.env, PORT: String(port), DB_PATH: dbPath, ARC_NETWORK: '', ADMIN_TOKEN: '',
+      TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '',
+      TVL_ENABLED: 'false', ENTITIES_ENABLED: 'false', WATCH_ENABLED: 'false', WHALEWATCH_ENABLED: 'false', BILLING_ENABLED: 'false',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const closed = once(child, 'close');   // exited, and its output read to the end
+  let out = '';
+  child.stdout.on('data', (c) => { out += c; });
+  child.stderr.on('data', (c) => { out += c; });
+
+  // One request over a raw socket, so the target reaches the server exactly as written. Resolves to
+  // the status code, or null when the connection died without a response.
+  const send = (line, body = '') => new Promise((resolve) => {
+    let reply = '';
+    const s = net.connect(port, '127.0.0.1', () => {
+      const len = body ? `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n` : '';
+      s.write(`${line}\r\nHost: localhost\r\nConnection: close\r\n${len}\r\n${body}`);
+    });
+    s.setTimeout(10000, () => s.destroy());
+    s.on('data', (c) => { reply += c; });
+    s.on('error', () => {});
+    s.on('close', () => resolve(Number(reply.match(/^HTTP\/1\.1 (\d{3})/)?.[1]) || null));
+  });
+
+  try {
+    for (let i = 0; i < 200 && !out.includes('Stabledesk →'); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(out.includes('Stabledesk →'), `the server did not start:\n${out}`);
+
+    // Targets Node's parser accepts and URL refuses. Each one used to exit the process.
+    assert.equal(await send('GET /// HTTP/1.1'), 400);
+    assert.equal(await send('GET //[/ HTTP/1.1'), 400);
+    // Valid JSON that is not an object, on the public route that reads a body, and a field String()
+    // cannot convert.
+    assert.equal(await send('POST /v1/keys HTTP/1.1', 'null'), 201);
+    assert.equal(await send('POST /v1/keys HTTP/1.1', '{"label":{"toString":1}}'), 201);
+
+    // And the barrier itself, for the failure nobody has found yet: with the database locked by
+    // another connection, creating a key throws inside the handler. That has to cost one 500 — and
+    // the log must not carry the URL, which can hold a key or a token.
+    const lock = new DatabaseSync(dbPath);
+    lock.exec('PRAGMA busy_timeout = 5000');
+    lock.exec('BEGIN IMMEDIATE');
+    try {
+      assert.equal(await send('POST /v1/keys?token=sbd_canary_not_for_logs HTTP/1.1', '{"label":"locked"}'), 500);
+    } finally {
+      lock.exec('ROLLBACK');
+      lock.close();
+    }
+    for (let i = 0; i < 40 && !out.includes('[http]'); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.match(out, /\[http\] POST/, 'the failure is logged');
+    assert.ok(!out.includes('sbd_canary_not_for_logs'), 'the URL is not');
+
+    assert.equal(child.exitCode, null, `the server exited:\n${out}`);
+    assert.equal(await send('GET /api/health HTTP/1.1'), 200, 'still serving afterwards');
+  } finally {
+    child.kill('SIGTERM');
+    const stuck = setTimeout(() => child.kill('SIGKILL'), 5000);
+    await closed;
+    clearTimeout(stuck);
+    for (const ext of ['', '-wal', '-shm']) rmSync(dbPath + ext, { force: true });
+  }
+  // Everything the server wrote, including whatever it logged after the response had gone out.
+  assert.ok(!out.includes('sbd_canary_not_for_logs'), 'the URL is not logged, then or later');
+});
+
+// ---- alert fields are typed (api.js) ----
+test('an alert field of the wrong type is refused with a 400, not thrown', async () => {
+  const { EventEmitter } = await import('node:events');
+  const db = await import('../db.js');
+  const { handleV1 } = await import('../api.js');
+  const { live } = await import('../indexer.js');
+
+  const key = 'sbd_alert_field_types';
+  db.createKey(key, 'alert field types', 'free');
+  const post = (body) => new Promise((resolve, reject) => {
+    const req = Object.assign(new EventEmitter(), { method: 'POST', headers: { 'x-api-key': key }, socket: { remoteAddress: '127.0.0.1' }, pause() {} });
+    const res = { writeHead(code) { this.code = code; }, end(s) { resolve({ code: this.code, ...JSON.parse(s) }); } };
+    handleV1(req, res, new URL('http://localhost/v1/alerts')).catch(reject);
+    req.emit('data', JSON.stringify(body));
+    req.emit('end');
+  });
+
+  // The alert routes sit behind the snapshot check; what is tested here is what comes after it.
+  const saved = live.snapshot;
+  live.snapshot = { ...saved, ok: true };
+  try {
+    // A public IP literal: a valid webhook, checked without a DNS lookup.
+    const webhook = 'https://1.1.1.1/hook';
+    const address = '0x' + 'ab'.repeat(20);
+    assert.equal((await post({ webhook: [webhook] })).error, 'webhook_required');
+    assert.equal((await post({ webhook, token: { toString: 1 } })).error, 'bad_token');
+    assert.equal((await post({ webhook, token: ['usdc'] })).error, 'bad_token');
+    assert.equal((await post({ webhook, address: [address] })).error, 'bad_address');
+    assert.equal((await post({ webhook, minAmount: { valueOf: null, toString: null } })).error, 'bad_min_amount');
+    assert.equal((await post({ webhook, minAmount: [5] })).error, 'bad_min_amount');
+    assert.equal((await post({ webhook, minAmount: '1e999' })).error, 'bad_min_amount', 'Infinity is a rule that never fires');
+
+    // The documented shapes still make an alert, stored as before: the example in /docs (symbol in
+    // capitals, a number), an address in any case, and minAmount as a numeric string, as it always was
+    // accepted. Each one is removed at once — a free key holds one alert, and nothing later may fire it.
+    for (const [body, stored] of [
+      [{ webhook, token: 'USDC', address: '0x' + 'AB'.repeat(20), minAmount: 100000 }, { token: 'USDC', address, min_amount: 100000 }],
+      [{ webhook, token: 'usdc', address, minAmount: '5' }, { token: 'USDC', address, min_amount: 5 }],
+    ]) {
+      const made = await post(body);
+      assert.equal(made.code, 201, JSON.stringify(made));
+      const row = db.alertsByKey(key).find((r) => r.id === made.id);
+      assert.deepEqual({ token: row.token, address: row.address, min_amount: row.min_amount }, stored);
+      assert.ok(db.deleteAlert(made.id, key));
+    }
+  } finally {
+    live.snapshot = saved;
+  }
 });
 
 // ---- TVL coverage is decided by relevance, and says when it is truncated ----

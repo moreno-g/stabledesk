@@ -36,8 +36,11 @@ const BLOCKED_HOSTS = new Set([
  * see validateWebhookHost below, which is what the API actually calls.
  */
 export function validateWebhook(urlStr) {
+  // Only a string is a URL. String() made one out of an array, which passed every check here and was
+  // then refused by SQLite at the insert — an exception inside the request handler.
+  if (typeof urlStr !== 'string') return 'invalid_url';
   let u;
-  try { u = new URL(String(urlStr)); } catch { return 'invalid_url'; }
+  try { u = new URL(urlStr); } catch { return 'invalid_url'; }
   if (u.protocol !== 'https:') return 'https_required';
   if (u.username || u.password) return 'credentials_not_allowed';
   const host = u.hostname.toLowerCase();
@@ -66,7 +69,7 @@ export function validateWebhook(urlStr) {
 export async function validateWebhookHost(urlStr, resolver = lookup) {
   const syntactic = validateWebhook(urlStr);
   if (syntactic) return syntactic;
-  const host = new URL(String(urlStr)).hostname.toLowerCase();
+  const host = new URL(urlStr).hostname.toLowerCase();
   if (isIP(host)) return null;               // already checked as a literal above
   let addrs;
   try {

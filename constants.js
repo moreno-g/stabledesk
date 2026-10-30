@@ -248,6 +248,11 @@ export const IDENTITY_PER_PASS = 24;
 export const RANKING_TOP_N = 5;
 export const RANKING_MIN_MOVE_PCT = 0.02;
 
+// Address search reads at most this many addresses under a prefix, in address order, before ranking
+// them by volume (see searchAddresses in db.js). Exact while a prefix covers fewer; published on
+// /v1/search, since past it only that first slice is ranked.
+export const SEARCH_SCAN_MAX = 10000;
+
 // Crypto billing (Pro tier) — paid in native USDC on Base, since Arc is still testnet
 // (its USDC has no real value). Verified live against Base mainnet: chainId 8453,
 // USDC contract responds symbol()="USDC", decimals()=6.
