@@ -1359,6 +1359,11 @@ function dbDerived({ frozen = false } = {}) {
   const asOf = windowEndSec(nowSec, cov.b, frozen);
   const summary = db.getSummary(asOf - 86400);
   const covSec = cov.a ? Math.max(60, asOf - cov.a) : 0;
+  // The span the 24h figures were actually summed over: a day, or all of the history while less than a
+  // day is held. Velocity used to divide the 24h volume by covSec — everything the minute table holds,
+  // kept for seven days — so once a week of history had built up it was published seven times too low,
+  // for every token. Fees already used this window; both now read it from here.
+  const summarySec = Math.min(86400, covSec || 86400);
 
   // Supply is read with `totalSupply()` calls, so it is unknown — not zero — whenever the chain
   // has never been reachable in this process and nothing was persisted from a previous one. Zero
@@ -1407,7 +1412,7 @@ function dbDerived({ frozen = false } = {}) {
   for (const sym of new Set(Object.values(TOKENS).map((m) => m.symbol))) {
     const sup = known ? supplies[sym] ?? null : null;
     const rvol = summary.byToken[sym]?.rvolume || 0;
-    const perDay = covSec ? (rvol / covSec) * 86400 : 0;
+    const perDay = (rvol / summarySec) * 86400;
     supply[sym] = {
       supply: sup,
       denomination: denominationOf(sym),
@@ -1423,7 +1428,7 @@ function dbDerived({ frozen = false } = {}) {
         const g = volByDenomination[denominationOf(sym)];
         return g && g.rvolume ? rvol / g.rvolume : 0;
       })(),
-      velocity: sup ? perDay / sup : null, // real transfers/day ÷ supply
+      velocity: sup ? perDay / sup : null, // real volume per day ÷ supply
       rvolume24h: rvol,
       avolume24h: summary.byToken[sym]?.avolume || 0,
     };
@@ -1439,7 +1444,7 @@ function dbDerived({ frozen = false } = {}) {
   // Fee economics. Both the sampled fees and the volume they're divided by are measured over
   // the same effective window — the shorter of 24h and however much history we hold — so a
   // young index can't pair a full day of fees with an hour of volume.
-  const feeWindowSec = Math.min(86400, covSec || 86400);
+  const feeWindowSec = summarySec;
   const blockSec = Math.max(0.2, avgBlockMs / 1000);
   const fees = feeMetrics(
     db.feeStats(asOf - feeWindowSec),

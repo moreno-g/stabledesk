@@ -10,7 +10,7 @@
 // marketplace: agents discover inputs and outputs from it instead of parsing /docs.
 
 import { CHAIN } from './chains.js';
-import { RANGES, TIERS, TOKEN_SYMBOLS, SITE_ORIGIN, SIZE_BRACKETS } from './constants.js';
+import { RANGES, TIERS, TOKEN_SYMBOLS, SITE_ORIGIN, SIZE_BRACKETS, SEARCH_SCAN_MAX } from './constants.js';
 import { CATEGORIES } from './protocols.js';
 
 const TOKENS = [...TOKEN_SYMBOLS];
@@ -19,11 +19,12 @@ const RANGE_KEYS = Object.keys(RANGES);
 const schema = (name) => ({ $ref: `#/components/schemas/${name}` });
 const response = (name) => ({ $ref: `#/components/responses/${name}` });
 
-// Every authenticated route can fail these three ways, and repeating them inline twenty times
+// Every authenticated route can fail these four ways, and repeating them inline twenty times
 // would bury the one or two failures that are actually specific to a given endpoint.
 const COMMON = {
   401: response('Unauthorized'),
   429: response('RateLimited'),
+  500: response('Internal'),
   503: response('Indexing'),
 };
 
@@ -345,6 +346,7 @@ function build() {
         get: {
           tags: ['Ecosystem'], operationId: 'search',
           summary: 'Search protocols, tokens and addresses',
+          description: `An address prefix reads at most ${SEARCH_SCAN_MAX.toLocaleString('en-US')} indexed addresses under it, in address order, and ranks those by volume. The ranking is exact while the prefix covers fewer; past that, only that first slice is ranked. Registry contracts matching the prefix are always listed first.`,
           parameters: [
             { name: 'q', in: 'query', required: true, description: 'Query, minimum 2 characters.', schema: { type: 'string', minLength: 2 } },
             limitParam(25, 10),
@@ -504,6 +506,10 @@ function build() {
         Indexing: {
           description: 'The index is still warming up and has nothing honest to serve yet (`indexing`). Retry shortly.',
           headers: RATE_HEADERS,
+          content: { 'application/json': { schema: schema('Error') } },
+        },
+        Internal: {
+          description: 'An unexpected failure while handling this request (`internal_error`). Only this request failed; the service keeps running, so it can be retried.',
           content: { 'application/json': { schema: schema('Error') } },
         },
         FeesUnavailable: {
@@ -742,7 +748,7 @@ function build() {
             denomination: { type: ['string', 'null'], description: 'The currency this token is denominated in (ISO code), declared rather than inferred. Null when undeclared.' },
             dominance: num('Share of the supply denominated in the same currency, 0–1 — not of a cross-currency sum.'),
             volShare: num('Share of the real volume moved in the same currency, 0–1 — not of a cross-currency sum.'),
-            velocity: num('Real transfers per day ÷ supply.'),
+            velocity: num('Real transfer volume per day ÷ supply: the last 24 hours, or the history held scaled to a day while it is shorter. See /methodology for the 30 Oct 2026 correction.'),
             rvolume24h: { type: 'number' },
             avolume24h: { type: 'number' },
           },

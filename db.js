@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { SIZE_BRACKETS } from './constants.js';
+import { SIZE_BRACKETS, SEARCH_SCAN_MAX } from './constants.js';
 import { CHAIN } from './chains.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -946,10 +946,32 @@ export function addressRecent(a, limit = 20) { const x = a.toLowerCase(); return
 // as far as its window; the biggest thing an address ever did is the part worth keeping.
 export const addressLargest = (a, limit = 8) => adstmt.largest.all(String(a).toLowerCase(), String(a).toLowerCase(), limit);
 
-// Prefix search for the global search box. Bound as a parameter (not interpolated), and the caller
-// validates the prefix is hex first, so the LIKE pattern can't carry a wildcard.
-const searchStmt = db.prepare('SELECT address, transfers, volume FROM addr_stats WHERE address LIKE ? ORDER BY volume DESC LIMIT ?');
-export const searchAddresses = (prefix, limit = 10) => searchStmt.all(prefix.toLowerCase() + '%', limit);
+// Prefix search for the global search box. Bound as parameters (not interpolated), and the caller
+// validates the prefix is hex first.
+//
+// A range on the primary key, not `LIKE 'p%'`. SQLite cannot turn that LIKE into an index range here
+// (LIKE ignores case, the key's collation does not), so it walked addr_stats in volume order until it
+// had `limit` matches — and a prefix matching nothing read every row: about 0.3 s of synchronous work
+// per request on mainnet, from a public route, enough for one client under the rate limit to keep the
+// event loop busy. Addresses are stored lowercase (topicAddr) and 'g' sorts after every hex digit, so
+// [p, p + 'g') holds exactly the addresses starting with p.
+//
+// The range alone moves the cost to the number of addresses under the prefix, and that number is for
+// sale: a transfer of 0 to an address creates its row, kept for a week. 300k rows planted under one
+// prefix, in no particular order, brought a search back to the order of the old scan. So at most
+// SEARCH_SCAN_MAX rows are read (about 10 ms at worst), in address order, then ranked — exact while a
+// prefix covers fewer addresses than that, which every two-digit prefix does until the table passes
+// about 2.5M addresses; past it, only that first slice is ranked, as /v1/search states. Equal volumes
+// are ordered by address, so the same query always returns the same rows.
+export const SEARCH_SQL = `SELECT address, transfers, volume FROM (
+    SELECT address, transfers, volume FROM addr_stats WHERE address >= ? AND address < ? LIMIT ?)
+  ORDER BY volume DESC, address LIMIT ?`;
+export const searchArgs = (prefix, limit = 10) => {
+  const p = prefix.toLowerCase();
+  return [p, p + 'g', SEARCH_SCAN_MAX, limit];
+};
+const searchStmt = db.prepare(SEARCH_SQL);
+export const searchAddresses = (prefix, limit = 10) => searchStmt.all(...searchArgs(prefix, limit));
 
 // ---- per-token detail (drill-down) ----
 // One counting expression per published bracket, built once from SIZE_BRACKETS so the SQL and the

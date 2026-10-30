@@ -373,7 +373,7 @@
       <tr><td>Net issuance</td><td>Mint − Burn over the period: net new supply minted on-chain.</td></tr>
       <tr><td>Supply</td><td>ERC-20 <code>totalSupply()</code> read live from each token contract.</td></tr>
       <tr><td>Dominance</td><td>A token's supply ÷ total tracked stablecoin supply.</td></tr>
-      <tr><td>Velocity</td><td>Real transfer volume per day ÷ supply — how often the supply turns over.</td></tr>
+      <tr><td>Velocity</td><td>Real transfer volume per day ÷ supply — how often the supply turns over. <strong>Corrected on 30&nbsp;October&nbsp;2026:</strong> the last 24 hours of real volume were divided by all the history the per-minute aggregates hold — a rolling seven days — so every velocity published since the mainnet launch on 16&nbsp;September was too low, about seven times once a week of history had built up, for every token. On Arc mainnet on 29&nbsp;October, USDC showed about 0.03× where its supply was turning over about 0.22× a day. It is now divided by the 24 hours it was summed over, or by the history held while that is shorter.</td></tr>
       <tr><td>Active addresses</td><td>Distinct addresses that sent or received in the trailing window (e.g. 1h).</td></tr>
       <tr><td>Size distribution</td><td>Histogram of transfer amounts bucketed by magnitude, over the retained transfer window (published with the counts, since a row cap makes its span depend on throughput).</td></tr>
       <tr><td>Avg fee / tx</td><td>Total fees ÷ transaction count over sampled blocks, in USDC. Measured from receipts, not estimated from a gas assumption.</td></tr>

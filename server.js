@@ -42,8 +42,11 @@ const SEC = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referr
 const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cloud.umami.is; connect-src 'self' https://cloud.umami.is https://gateway.umami.is; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 function json(res, body, code = 200) {
+  // Serialized before writeHead: from that call on, headersSent is true, and a body that then failed to
+  // serialize could no longer be answered with a 500 — only by dropping the connection.
+  const s = JSON.stringify(body);
   res.writeHead(code, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-store', 'x-robots-tag': 'noindex', ...SEC });
-  res.end(JSON.stringify(body));
+  res.end(s);
 }
 
 // Static assets are shipped with the app and never change at runtime: cache them in memory
@@ -294,8 +297,12 @@ async function maybeSendDigest(now = new Date()) {
   catch (e) { console.error('[digest] send failed — will retry on the next hourly check:', e.message); return false; }
 }
 
-const server = http.createServer(async (req, res) => {
-  const u = new URL(req.url, 'http://localhost');
+async function handle(req, res) {
+  // Node's parser accepts request targets that URL refuses — `///` and `//[/` both reach this line.
+  // That is a malformed request, answered as one, not a fault of ours.
+  let u;
+  try { u = new URL(req.url, 'http://localhost'); }
+  catch { res.writeHead(400, SEC); return res.end('bad request'); }
   const path = u.pathname;
 
   // Count the machine-readable surfaces (see usage.js). Hooked on 'finish' rather than inline so
@@ -611,6 +618,19 @@ const server = http.createServer(async (req, res) => {
   }
   if (path === '/' || path === '/index.html') return serveFile(req, res, 'index.html');
   return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404); // unknown → real 404
+}
+
+// This process also runs the indexer and every poller, so an exception escaping one request is not
+// one failed request: it is every live figure gone until the platform restarts us. Reproduced: a
+// `null` JSON body on POST /v1/keys, or the target `///`, threw inside the async handler, nothing
+// caught the rejection, and Node exits on an unhandled one. The guards inside the handler come first;
+// this is what holds when one is missing. The URL is not logged: it can carry ?key= or ?token=.
+const server = http.createServer((req, res) => {
+  handle(req, res).catch((e) => {
+    console.error('[http]', req.method, e?.stack || e);
+    if (res.headersSent) return res.destroy();
+    try { json(res, { error: 'internal_error' }, 500); } catch { res.destroy(); }
+  });
 });
 
 server.listen(PORT, () => {
