@@ -46,7 +46,8 @@ export function movedWindow(now = Date.now()) {
   // Never past the newest indexed day: a database created today replays yesterday's blocks, and counts
   // them, while its counting start says today — a window from today to yesterday would cover nothing.
   const sinceDay = s ? Math.min(endDay, Math.max(startDay, Math.floor(s / 86400000))) : startDay;
-  return { sinceDay, endDay, since: sinceDay * 86400000, to, complete: !s || s <= startDay * 86400000, days: MOVED_DAYS };
+  // `began`: when counting began, by our clock — which after that clamp is later than `since`.
+  return { sinceDay, endDay, since: sinceDay * 86400000, to, began: s, complete: !s || s <= startDay * 86400000, days: MOVED_DAYS };
 }
 // { windowVolume (face value, every currency added — kept for existing consumers),
 //   windowVolumeByDenomination, windowTransfers } for a set of addresses.
@@ -58,7 +59,7 @@ function moved(addrs, w = movedWindow()) {
     windowTransfers: m.transfers,
   };
 }
-const movedMeta = (w = movedWindow()) => ({ since: w.since, to: w.to, complete: w.complete, days: w.days });
+const movedMeta = (w = movedWindow()) => ({ since: w.since, to: w.to, began: w.began, complete: w.complete, days: w.days });
 
 // The addresses that moved the most over the same window, ranked in the base denomination; their other
 // currencies ride along on each row, unranked. /v1/addresses/top used to rank addr_stats under
@@ -481,12 +482,7 @@ export async function refresh() {
     if (byRule) invalidateAggregate();
 
     // Persist today's level so tomorrow has something to diff against.
-    const agg = aggregate();
-    db.recordTvlSnapshot(today(), [
-      ...Object.entries(agg.totals.byDenomination).map(([d, g]) => ({ protocol: historyKey('*', d), tvl: g.tvl })),
-      ...agg.protocols.flatMap((p) => Object.entries(p.tvlByDenomination)
-        .filter(([, v]) => v > 0).map(([d, v]) => ({ protocol: historyKey(p.id, d), tvl: v }))),
-    ]);
+    persistLevels(aggregate());
 
     lastRun = {
       at: Date.now(), scanned: targets.length, contractsFound, error: null,
@@ -502,6 +498,17 @@ export async function refresh() {
     lastRun = { ...lastRun, at: Date.now(), error: String(e.message || e) };
     console.error('[tvl]', e.message || e);
   }
+}
+
+// Today's levels as the last scan saw them: per currency, for the chain and for every protocol holding
+// something in it. Zero levels are not stored, and the day's rows are replaced rather than updated, so a
+// protocol emptied since an earlier scan of the day has no row instead of that scan's figure.
+export function persistLevels(agg, day = today()) {
+  db.recordTvlSnapshot(day, [
+    ...Object.entries(agg.totals.byDenomination).map(([d, g]) => ({ protocol: historyKey('*', d), tvl: g.tvl })),
+    ...agg.protocols.flatMap((p) => Object.entries(p.tvlByDenomination)
+      .filter(([, v]) => v > 0).map(([d, v]) => ({ protocol: historyKey(p.id, d), tvl: v }))),
+  ], { replace: true });
 }
 
 // Memoised aggregate. The underlying balances only change when refresh() runs, which is every five

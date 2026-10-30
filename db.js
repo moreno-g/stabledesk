@@ -1195,6 +1195,7 @@ const tvstmt = {
   histSeries: db.prepare('SELECT day, tvl FROM tvl_history WHERE protocol = ? AND day >= ? ORDER BY day'),
   histOn: db.prepare('SELECT tvl FROM tvl_history WHERE protocol = ? AND day = ?'),
   histPrune: db.prepare('DELETE FROM tvl_history WHERE day < ?'),
+  histClearDay: db.prepare('DELETE FROM tvl_history WHERE day = ?'),
 };
 
 export function upsertBalances(rows) {
@@ -1357,9 +1358,13 @@ export const watchedAddresses = () => tvstmt.watched.all().map((r) => r.a).filte
 export const uncheckedAddresses = (limit = 40) => tvstmt.unchecked.all(limit).map((r) => r.address);
 
 // Written once per scan; the same day is overwritten rather than added to, because TVL is a level.
-export function recordTvlSnapshot(day, entries) {
+// With `replace` the day's rows are cleared first, so the stored day is exactly the last scan. Zero levels
+// are not stored, and without the clear a level that fell to zero after an earlier scan of the day kept
+// that scan's figure: the digest then compared a protocol emptied that afternoon as if it had not moved.
+export function recordTvlSnapshot(day, entries, { replace = false } = {}) {
   db.exec('BEGIN');
   try {
+    if (replace) tvstmt.histClearDay.run(day);
     for (const e of entries) tvstmt.histUp.run(day, e.protocol, e.tvl);
     db.exec('COMMIT');
   } catch (e) {

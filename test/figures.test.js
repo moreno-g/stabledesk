@@ -182,6 +182,48 @@ test('the digest prints real and adjusted volume in one currency, names its wind
   assert.match(digest({ ...quiet, moversCompared: 0, moversRead: { yesterday: false, today: true } }), /^24h movers: no baseline yet\.$/m);
 });
 
+// The digest's levels as the TVL scan writes them (tvl.persistLevels), on a fresh database each time.
+test('each day keeps its last scan\'s levels, and the digest says which empty list it prints', async () => {
+  const run = (script) => inSubprocess(`
+    const db = await import('./db.js'); const tvl = await import('./tvl.js');
+    const { PROTOCOLS } = await import('./protocols.js'); const { daily, digest } = await import('./rankings.js');
+    const day = Math.floor(Date.now() / 86400000) * 86400;
+    const listed = PROTOCOLS.filter((p) => !p.wallets && p.contracts.length), [P, Q] = listed;
+    const agg = (chain, levels) => ({ totals: { byDenomination: { USD: { tvl: chain } } },
+      protocols: Object.entries(levels).map(([id, v]) => ({ id, tvlByDenomination: v ? { USD: v } : {} })) });
+    const line = () => digest(daily()).split('\\n').find((l) => l.startsWith('24h movers'));
+    ${script}`);
+
+  // Yesterday scanned, today not yet: that is not "no baseline". Only today scanned: it is.
+  const unread = await run(`
+    tvl.persistLevels(agg(7e6, { [P.id]: 5e6, [Q.id]: 2e6 }), day - 86400);
+    console.log(JSON.stringify({ read: daily().moversRead, line: line() }));`);
+  assert.deepEqual(unread, { read: { yesterday: true, today: false }, line: '24h movers: today\'s TVL not read yet.' });
+  const fresh = await run(`
+    tvl.persistLevels(agg(7e6, { [P.id]: 5e6, [Q.id]: 2e6 }), day);
+    console.log(JSON.stringify({ read: daily().moversRead, line: line() }));`);
+  assert.deepEqual(fresh, { read: { yesterday: false, today: true }, line: '24h movers: no baseline yet.' });
+
+  // P emptied between two scans of today. The day keeps the last scan, so P has no level today and is
+  // not compared — rather than compared at this morning's 5M, as if it had not moved.
+  const drained = await run(`
+    tvl.persistLevels(agg(7e6, { [P.id]: 5e6, [Q.id]: 2e6 }), day - 86400);
+    tvl.persistLevels(agg(7e6, { [P.id]: 5e6, [Q.id]: 2e6 }), day);
+    tvl.persistLevels(agg(2e6, { [P.id]: 0, [Q.id]: 2e6 }), day);
+    console.log(JSON.stringify({ p: db.tvlOn(tvl.historyKey(P.id), day), compared: daily().moversCompared, line: line() }));`);
+  assert.equal(drained.p, null, 'the morning level is not kept');
+  assert.equal(drained.compared, 1);
+  assert.equal(drained.line, '24h movers: the one protocol with a level on both days did not move 100 USD and 2% or more.');
+
+  // The TVL line counts every protocol holding dollars, not the five the digest ranks.
+  const seven = await run(`
+    db.upsertBalances(listed.slice(0, 7).map((p) => ({ address: p.contracts[0], token: 'USDC', balance: 1e6 })));
+    const r = daily();
+    console.log(JSON.stringify({ ranked: r.byTvl.length, holding: r.protocolsHolding, head: digest(r).split('\\n')[2] }));`);
+  assert.deepEqual([seven.ranked, seven.holding], [5, 7]);
+  assert.match(seven.head, /^TVL 7\.00M USD across 7 protocols /);
+});
+
 // ---- 2 · one currency per figure ----
 test('the default series is one currency: ALL adds up the base denomination\'s tokens, never euros', async () => {
   const db = await import('../db.js');
@@ -302,6 +344,8 @@ test('top addresses are ranked over 7 days, in one currency, from per-day counts
   const ahead = await v1('/v1/addresses/top?limit=100');
   assert.deepEqual([ahead.body.windowDays, ahead.body.moved.since, ahead.body.moved.complete], [1, today * 86400000, false]);
   assert.ok(ahead.body.moved.since <= ahead.body.moved.to);
+  assert.equal(ahead.body.moved.began, (today + 1) * 86400000 + 3600000);
+  assert.ok(ahead.body.note.includes(`daily counting began on ${iso(today + 1)}, after the newest indexed day`), ahead.body.note);
   db.setMetaValue('addr_token_daily_since', String((today - 30) * 86400000));
 
   // Ranking reads every row of the window, so it is not redone on every call: a new address shows up

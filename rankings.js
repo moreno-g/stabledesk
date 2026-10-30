@@ -40,8 +40,8 @@ export function daily() {
   // is a share of nothing; each protocol's other currencies ride along, unranked.
   const base = BASE_DENOMINATION;
   const chainBase = agg.totals.byDenomination?.[base]?.tvl || 0;
-  const byTvl = live
-    .filter((p) => (p.tvlByDenomination?.[base] || 0) > 0)
+  const holding = live.filter((p) => (p.tvlByDenomination?.[base] || 0) > 0);
+  const byTvl = holding
     .slice(0, RANKING_TOP_N)
     .map((p, i) => ({
       rank: i + 1, id: p.id, name: p.name, category: p.category, denomination: base,
@@ -87,6 +87,9 @@ export function daily() {
       transfers24h: summary.transfers,
     },
     protocolsRanked: byTvl.length,
+    // Every protocol holding something in the base currency: what "across N protocols" counts. The ranked
+    // list stops at RANKING_TOP_N, and printing its length there contradicted the movers line below.
+    protocolsHolding: holding.length,
     byTvl,
     byVolume,
     // The span "moved" covers: the last 7 UTC days, or since daily counting began while that is shorter.
@@ -112,7 +115,8 @@ export function digest(r = daily()) {
   // Every figure names its currency: the digest is copied into posts, where an unlabelled number
   // gets read as dollars whatever it adds up.
   const cur = r.chain.denomination ? ` ${r.chain.denomination}` : '';
-  L.push(`TVL ${compact(r.chain.tvl)}${cur} across ${r.protocolsRanked} protocol${r.protocolsRanked === 1 ? '' : 's'}`
+  const held = r.protocolsHolding ?? r.protocolsRanked;
+  L.push(`TVL ${compact(r.chain.tvl)}${cur} across ${held} protocol${held === 1 ? '' : 's'}`
     + ` · 24h volume ${compact(r.chain.volume24h)}${cur} real, ${compact(r.chain.adjustedVolume24h)}${cur} adjusted`);
 
   if (r.byTvl.length) {
@@ -128,11 +132,14 @@ export function digest(r = daily()) {
   } else {
     // Said about what was compared, never about the whole registry: a protocol emptied to zero, or funded
     // from zero, has no stored level on one of the two days and is not in the comparison.
+    // The floor is printed whole: rounded by compact(), a move just under it could read as one above it.
     const rule = r.moversRule, read = r.moversRead || {}, n = r.moversCompared || 0;
+    const bar = rule && `${new Intl.NumberFormat('en-US').format(rule.floor)}${cur} and ${+(rule.minPct * 100).toFixed(1)}% or more`;
     L.push('');
     L.push(read.yesterday === false || (read.yesterday == null && !n) ? '24h movers: no baseline yet.'
       : read.today === false ? '24h movers: today\'s TVL not read yet.'
-      : n && rule ? `24h movers: none of the ${n} protocol${n === 1 ? '' : 's'} with a level on both days moved ${compact(rule.floor)}${cur} and ${+(rule.minPct * 100).toFixed(1)}% or more.`
+      : n === 1 && rule ? `24h movers: the one protocol with a level on both days did not move ${bar}.`
+      : n && rule ? `24h movers: none of the ${n} protocols with a level on both days moved ${bar}.`
       : '24h movers: no protocol held a level on both days.');
   }
 

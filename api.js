@@ -466,11 +466,13 @@ export async function handleV1(req, res, u) {
     return json(res, {
       denomination: t.denomination,
       windowDays: t.windowDays,
-      moved: { since: t.since, to: t.to, complete: t.complete, days: t.days },
+      moved: { since: t.since, to: t.to, began: t.began, complete: t.complete, days: t.days },
       computedAt: t.computedAt,
       note: `Ranked by ${t.denomination} stablecoin volume moved in and out (received + sent) over the UTC days ${day(t.since)} to ${day(t.to)},`
         + ' the last one ending at the newest indexed minute'
-        + `${t.complete ? '' : `; daily counting began during ${day(t.since)}, so this is less than ${t.days} full days`}.`
+        + `${t.complete ? '' : t.began != null && day(t.began) !== day(t.since)
+          ? `; daily counting began on ${day(t.began)}, after the newest indexed day, so only that day is ranked`
+          : `; daily counting began during ${day(t.since)}, so this is less than ${t.days} full days`}.`
         + ' Other currencies are listed per address, unranked; transfers count every token. Recomputed every few minutes (computedAt).',
       top: t.top,
     }, 200, H);

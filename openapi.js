@@ -1134,17 +1134,18 @@ function build() {
             moved: {
               type: 'object',
               description: 'The window `byVolume` covers: 7 UTC days ending on the day of the newest indexed minute (`to`), or since `since` while `complete` is false.',
-              properties: { since: { type: 'integer' }, to: { type: 'integer' }, complete: { type: 'boolean' }, days: { type: 'integer' } },
+              properties: { since: { type: 'integer' }, to: { type: 'integer' }, began: { type: ['integer', 'null'] }, complete: { type: 'boolean' }, days: { type: 'integer' } },
             },
             movers: {
               type: 'array',
               description: 'TVL change against the day before, in the base denomination, under `moversRule`: at least `floor` and `minPct`; a level the day before under `floor` carries `isNew` and no percentage. A protocol without a stored level on one of the two days is not compared: zero levels are not stored.',
               items: { type: 'object', additionalProperties: true },
             },
-            moversCompared: { type: 'integer', description: 'Protocols with a stored level on both days: the ones compared. With both days read, an empty `movers` means none of these moved enough; a protocol emptied to zero or funded from zero is not among them.' },
+            moversCompared: { type: 'integer', description: 'Protocols with a stored level on both days: the ones compared. With both days read, an empty `movers` means none of these moved enough; a protocol emptied to zero or funded from zero is not among them. Each day\'s stored levels are its last scan\'s, so a protocol emptied during the day has no level that day.' },
+            protocolsHolding: { type: 'integer', description: 'Protocols holding something in `chain.denomination` — the count the digest gives with the TVL. `byTvl` lists the first few of them.' },
             moversRead: {
               type: 'object',
-              description: 'Whether each day\'s TVL levels exist at all. Yesterday unread means no baseline yet; today unread means the first scan of the day has not run.',
+              description: 'Whether any TVL level was stored for each day. `yesterday` false: no scan succeeded that day, or the record began today — no baseline. `today` false: no scan has succeeded yet today — before the first scan after 00:00 UTC, or while the chain cannot be read.',
               properties: { yesterday: { type: 'boolean' }, today: { type: 'boolean' } },
             },
             moversRule: {
@@ -1181,6 +1182,7 @@ function build() {
               properties: {
                 since: { type: 'integer', description: 'ms. Start of the window.' },
                 to: { type: 'integer', description: 'ms. End of the window: the newest indexed minute, which is now while the chain is live and earlier while it is frozen.' },
+                began: { type: ['integer', 'null'], description: 'ms. When daily counting began, by the server clock. On a database newer than the minutes it has indexed (a cold start replaying the day before), this is later than `since`, and only the newest indexed day is ranked.' },
                 complete: { type: 'boolean', description: 'False until daily counting covers the window\'s first day whole: while the window starts where counting began rather than 7 days back, and on the day it reaches back exactly 7.' },
                 days: { type: 'integer', description: 'The window the ranking aims at, in UTC days.' },
               },
