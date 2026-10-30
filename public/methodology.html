@@ -419,9 +419,18 @@
     chain is. So the span is measured and published rather than assumed. It was previously capped at 1,200 rows, which at the ~954k
     transfers a day Arc testnet was doing in July 2026 is <strong>114 seconds</strong> — every one of those surfaces was describing the last two
     minutes while being labelled as something broader.</p>
-    <p style="margin-bottom:0"><strong>Largest transfers — top 100 per day per token, kept 180 days.</strong> Recorded separately for the
+    <p><strong>Largest transfers — top 100 per day per token, kept 180 days.</strong> Recorded separately for the
     same reason: "the largest transfer" read out of a row-capped table only ever means "the largest of the last few minutes".
     <code>/v1/transfers/largest</code> takes an explicit <code>days</code> and states the window it answered over.</p>
+    <p style="margin-bottom:0"><strong>Which clock the retentions use.</strong> The windows' clock: each retention is counted back from
+    the newest indexed minute, never from later than now, because that minute is where the windows reading these tables end. On a
+    healthy chain the two are seconds apart. TVL history, kept 180 days, is the exception: a balance is recorded on the day it is read,
+    so it follows the wall clock. <strong>Corrected on 30&nbsp;October&nbsp;2026:</strong> the retentions followed the wall clock. Through
+    a halt — the RPC answering, the head not moving — every prune cut further into data that no new block replaced: the individual
+    transfers were gone after a day, the per-day counts behind the 7-day windows lost their first days from the third, and after a
+    week the per-minute aggregates were gone, so every 24-hour figure read 0. On Arc mainnet no published figure was affected: the
+    only halt in its availability record (<code>/v1/chain/uptime</code>), kept since 16&nbsp;September, lasted 14 seconds, on
+    19&nbsp;October.</p>
   </div>
 
   <h2>Caveats</h2>

@@ -1465,10 +1465,21 @@ export function putWatchSubjects(rows) {
 }
 export const dropWatchSubject = (id) => wstmt.del.run(id);
 
+// `nowSec` is the wall clock. The tables cut below, TVL history apart, are keyed by chain time — a
+// block's timestamp — and the windows over them end at the newest indexed minute rather than at now
+// (windowEndSec in indexer.js). So they are cut back from that minute, and never from later than now.
+// Cut from the wall clock, a halted chain — the RPC answering, the head standing still, the ticks still
+// running — lost a little more of what the windows read with every prune, while nothing replaced it:
+// the raw transfers after a day, the first days of the per-day address counts from the third, and after
+// a week the whole minute table, at which point every 24-hour figure read 0. On a healthy chain the two
+// clocks are seconds apart. TVL history stays on the wall clock: a balance is recorded on the day it
+// is read.
 export function prune(nowSec, latestBlock, blockMs) {
   tvstmt.histPrune.run(nowSec - 180 * 86400);
+  const newest = getCoverage().b;
+  const at = newest ? Math.min(nowSec, newest) : nowSec;
   const weekBlocks = Math.round((7 * 86400 * 1000) / Math.max(200, blockMs));
-  const cutoff = nowSec - 7 * 86400;
+  const cutoff = at - 7 * 86400;
 
   // Roll up, then delete, in one transaction. Separately they are two statements that can be
   // interrupted between: a crash after the delete would lose the minutes for good, and a crash after
@@ -1486,14 +1497,15 @@ export function prune(nowSec, latestBlock, blockMs) {
     throw e;
   }
 
+  // By block, back from the head: a halted head does not move either.
   stmt.pruneAddrs.run(latestBlock - weekBlocks);
-  stmt.pruneAddrToks.run(Math.floor(Date.now() / 86400000) - 8);   // a week plus the day in progress
+  stmt.pruneAddrToks.run(Math.floor(at / 86400) - 8);   // a week plus the day in progress
   stmt.pruneFees.run(cutoff);
   stmt.pruneBuckets2.run(cutoff);   // same cutoff: mean and median must cover the same window
   // The raw transfer window, by time. The row cap in applyBatch bounds it between prunes.
-  stmt.trimRecentTs.run(nowSec - RECENT_WINDOW_SEC);
+  stmt.trimRecentTs.run(at - RECENT_WINDOW_SEC);
   stmt.trimTop.run(TOP_PER_DAY);
-  stmt.pruneTop.run(nowSec - TOP_KEEP_DAYS * 86400);
+  stmt.pruneTop.run(at - TOP_KEEP_DAYS * 86400);
 }
 
 // ---- usage counters (see usage.js) ----
