@@ -21,6 +21,7 @@ import { CATEGORIES, PROTOCOLS, protocolById } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
+import { handleMcp, MCP_RPM } from './mcp.js';
 import { normalizePath, dayOf, countable, keyPrefix, buildDigest, QUIET_DAYS_BEFORE_HEARTBEAT } from './usage.js';
 import { sendTelegram, configured as tgConfigured } from './telegram.js';
 import { specJson, llmsTxt } from './openapi.js';
@@ -103,7 +104,9 @@ function applyNetwork(html) {
     .replaceAll('{{TOKENS_JSON}}', JSON.stringify(symbols))
     .replaceAll('{{TOKENS_PLUS}}', symbols.join('+'))
     .replaceAll('{{TOKENS_SLASH}}', symbols.join(' / '))
-    .replaceAll('{{TOKENS}}', symbols.join(', '));
+    .replaceAll('{{TOKENS}}', symbols.join(', '))
+    // The /mcp limit is configurable, so /docs reads it rather than restating a number that drifts.
+    .replaceAll('{{MCP_RPM}}', String(MCP_RPM));
   return CHAIN.isTestnet ? out : out.replace(/<!--testnet-only-->[\s\S]*?<!--\/testnet-only-->/g, '');
 }
 
@@ -311,6 +314,9 @@ async function handle(req, res) {
   // requesting routes that do not exist.
   const label = normalizePath(path);
   if (label) res.on('finish', () => { if (countable(res.statusCode)) db.recordHit(label, dayOf()); });
+
+  // MCP endpoint for AI assistants: the /v1 figures as read-only tools, no key (see mcp.js)
+  if (path === '/mcp') return handleMcp(req, res);
 
   // public data API (keys + tiers + rate limiting)
   if (path.startsWith('/v1')) return handleV1(req, res, u);

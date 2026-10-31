@@ -1381,6 +1381,7 @@ reports its sample size.
 - [Developer docs](${SITE_ORIGIN}/docs): endpoints, authentication, tiers and examples
 - [Get a free API key](${SITE_ORIGIN}/docs): \`POST /v1/keys\`, then send \`X-API-Key\` — ${TIERS.free.rpm} req/min free, ${TIERS.pro.rpm} req/min Pro
 - [Status](${SITE_ORIGIN}/v1/status): chain liveness and index health, no key required
+- [MCP server](${SITE_ORIGIN}/mcp): the same figures as read-only tools for AI assistants — Streamable HTTP, no key; add it as a custom connector by this URL
 
 ## Method
 

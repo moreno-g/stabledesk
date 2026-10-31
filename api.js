@@ -49,9 +49,10 @@ export function notifyKeyCreated(rec, total) {
   sendTelegram(text).catch((e) => console.error('[api] key notification failed:', e.message));
 }
 
-// fixed-window in-memory rate limiter, per key per minute
+// fixed-window in-memory rate limiter, per key per minute (also per client address for /mcp, under an
+// "mcp:" prefix, so one sweep below keeps both bounded)
 const rl = new Map();
-function rateLimit(key, rpm) {
+export function rateLimit(key, rpm) {
   const win = Math.floor(Date.now() / 60000);
   let e = rl.get(key);
   if (!e || e.win !== win) { e = { win, count: 0 }; rl.set(key, e); }
@@ -148,7 +149,11 @@ export function readBody(req) {
   });
 }
 
-export async function handleV1(req, res, u) {
+// `internal` is mcp.js reading the same figures in-process, so the MCP endpoint never has a second
+// implementation of any number. It is a function argument — nothing in a request can set it — and it
+// reaches the read-only routes only: billing and alerts belong to a key, and an internal read has none.
+const KEYED_ROUTES = /^\/v1\/(billing|alerts)(\/|$)/;
+export async function handleV1(req, res, u, { internal = false } = {}) {
   const path = u.pathname;
   const method = req.method;
 
@@ -196,22 +201,29 @@ export async function handleV1(req, res, u) {
   }
 
   // --- authenticated ---
-  const key = req.headers['x-api-key'] || u.searchParams.get('key');
-  if (!key) return json(res, { error: 'missing_api_key', hint: 'Send an X-API-Key header. Get a free key with POST /v1/keys.' }, 401);
-  const rec = db.getKey(key);
-  if (!rec) return json(res, { error: 'invalid_api_key' }, 401);
+  let key = null, rec = null, tier = TIERS.free, H = {};
+  if (internal) {
+    if (method !== 'GET' || KEYED_ROUTES.test(path)) {
+      return json(res, { error: 'not_found', hint: 'Internal reads cover the read-only routes only.' }, 404);
+    }
+  } else {
+    key = req.headers['x-api-key'] || u.searchParams.get('key');
+    if (!key) return json(res, { error: 'missing_api_key', hint: 'Send an X-API-Key header. Get a free key with POST /v1/keys.' }, 401);
+    rec = db.getKey(key);
+    if (!rec) return json(res, { error: 'invalid_api_key' }, 401);
 
-  // A lapsed Pro subscription reverts to free right here, on next use — no cron needed.
-  if (rec.tier === 'pro' && rec.expires_at && rec.expires_at < Date.now()) {
-    db.downgradeKey(key);
-    rec.tier = 'free'; rec.expires_at = null;
+    // A lapsed Pro subscription reverts to free right here, on next use — no cron needed.
+    if (rec.tier === 'pro' && rec.expires_at && rec.expires_at < Date.now()) {
+      db.downgradeKey(key);
+      rec.tier = 'free'; rec.expires_at = null;
+    }
+
+    tier = TIERS[rec.tier] || TIERS.free;
+    const lim = rateLimit(key, tier.rpm);
+    H = { 'x-ratelimit-limit': String(tier.rpm), 'x-ratelimit-remaining': String(lim.remaining) };
+    if (!lim.ok) return json(res, { error: 'rate_limited', tier: rec.tier, limit_per_min: tier.rpm }, 429, { ...H, 'retry-after': '60' });
+    db.bumpKey(key);
   }
-
-  const tier = TIERS[rec.tier] || TIERS.free;
-  const lim = rateLimit(key, tier.rpm);
-  const H = { 'x-ratelimit-limit': String(tier.rpm), 'x-ratelimit-remaining': String(lim.remaining) };
-  if (!lim.ok) return json(res, { error: 'rate_limited', tier: rec.tier, limit_per_min: tier.rpm }, 429, { ...H, 'retry-after': '60' });
-  db.bumpKey(key);
 
   // Deliberately answered before the snapshot check below. The availability record is a fold over
   // SQLite that needs no live snapshot, and the moment a consumer most wants it is precisely the
