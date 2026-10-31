@@ -2623,3 +2623,264 @@ test('quiet: "4 checks" and "12,000 blocks" are different claims and both are sa
   // and never seen moving is still distinguished from not lately
   assert.match(out, /never once seen moving/);
 });
+
+// ---- MCP endpoint (mcp.js, /mcp) ----
+// An assistant reading these tools will repeat what they return, so the protocol rules are pinned the
+// way the API's are: two eras of the specification, read-only tools the directory can classify, and
+// errors precise enough for a model to correct itself.
+test('MCP: a legacy client gets the initialize handshake, at a version it asked for', async () => {
+  const { handleMessage, LEGACY } = await import('../mcp.js');
+  for (const v of LEGACY) {
+    const r = await handleMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: v, capabilities: {}, clientInfo: { name: 't', version: '0' } } });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.result.protocolVersion, v, 'a supported version is echoed');
+  }
+  const old = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2024-11-05' } });
+  assert.equal(old.body.result.protocolVersion, LEGACY[0], 'otherwise the newest legacy version, and the client decides');
+  assert.deepEqual(old.body.result.capabilities, { tools: { listChanged: false } });
+  assert.equal(old.body.result.serverInfo.name, 'stabledesk');
+  assert.match(old.body.result.instructions, /methodology/);
+  assert.match(old.body.result.instructions, /raw overstates/, 'the one convention an assistant must know before quoting volume');
+
+  assert.deepEqual(await handleMessage({ jsonrpc: '2.0', method: 'notifications/initialized' }), { status: 202, body: null });
+  assert.deepEqual((await handleMessage({ jsonrpc: '2.0', id: 3, method: 'ping' })).body.result, {});
+});
+
+test('MCP: every tool is read-only, titled and annotated the way Claude\'s directory reviews them', async () => {
+  const { handleMessage } = await import('../mcp.js');
+  const tools = (await handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).body.result.tools;
+  assert.ok(tools.length >= 10);
+  const names = new Set();
+  for (const t of tools) {
+    assert.match(t.name, /^[a-z_]{1,64}$/, 'the directory caps names at 64 characters');
+    assert.ok(!names.has(t.name), `${t.name} listed twice`); names.add(t.name);
+    assert.ok(t.title && t.annotations.title === t.title, `${t.name}: a title, in both places the spec reads one`);
+    assert.equal(t.annotations.readOnlyHint, true, `${t.name} must be read-only`);
+    assert.equal(t.annotations.destructiveHint, false);
+    assert.equal(t.inputSchema.type, 'object');
+    assert.ok(t.description.length > 40, `${t.name}: a description that says what it returns`);
+  }
+  // No address-level tool: counterparties' profiles stay out of a prompt's reach (see mcp.js).
+  assert.ok(![...names].some((n) => /address/.test(n)));
+});
+
+test('MCP 2026-07-28: no handshake, metadata on every request, and headers that must agree', async () => {
+  const { handleMessage, MODERN, SUPPORTED } = await import('../mcp.js');
+  const meta = { 'io.modelcontextprotocol/protocolVersion': MODERN, 'io.modelcontextprotocol/clientCapabilities': {} };
+  const H = (method, extra = {}) => ({ 'mcp-protocol-version': MODERN, 'mcp-method': method, ...extra });
+  const req = (method, params = {}, m = meta) => ({ jsonrpc: '2.0', id: 7, method, params: { ...params, _meta: m } });
+
+  const d = await handleMessage(req('server/discover'), H('server/discover'));
+  assert.equal(d.status, 200);
+  assert.equal(d.body.result.resultType, 'complete');
+  assert.deepEqual(d.body.result.supportedVersions, SUPPORTED);
+  assert.equal(d.body.result.cacheScope, 'public');
+  assert.ok(d.body.result.ttlMs > 0);
+  assert.equal(d.body.result._meta['io.modelcontextprotocol/serverInfo'].name, 'stabledesk');
+
+  const l = await handleMessage(req('tools/list'), H('tools/list'));
+  assert.equal(l.body.result.resultType, 'complete');
+  assert.ok(l.body.result.ttlMs > 0 && l.body.result.cacheScope === 'public' && l.body.result.tools.length > 0);
+
+  // A tool error is still a complete result in this revision. (An argument error, so this test needs
+  // no database: the suite closes the shared one before it gets here.)
+  const c = await handleMessage(req('tools/call', { name: 'stablecoin_history', arguments: { range: '2w' } }), H('tools/call', { 'mcp-name': 'stablecoin_history' }));
+  assert.equal(c.body.result.resultType, 'complete');
+  assert.equal(c.body.result.isError, true);
+
+  const fails = async (msg, headers, status, code) => {
+    const r = await handleMessage(msg, headers);
+    assert.equal(r.status, status, JSON.stringify(r.body));
+    assert.equal(r.body.error.code, code, JSON.stringify(r.body));
+    assert.ok(r.body.error.message.length > 20, 'an error says what to fix');
+  };
+  await fails(req('tools/list'), { 'mcp-method': 'tools/list' }, 400, -32020);                                  // header missing
+  await fails(req('tools/list', {}, { 'io.modelcontextprotocol/protocolVersion': MODERN }), H('tools/list'), 400, -32602); // no client capabilities
+  await fails(req('tools/list'), H('tools/list', { 'mcp-protocol-version': '2025-06-18' }), 400, -32020);       // header and body disagree
+  await fails(req('tools/list'), H('tools/call'), 400, -32020);                                                 // Mcp-Method mismatch
+  await fails(req('tools/call', { name: 'arc_status' }), H('tools/call', { 'mcp-name': 'cctp_flows' }), 400, -32020);
+  await fails(req('ping'), H('ping'), 404, -32601);                                                              // removed in this revision
+  await fails(req('resources/list'), H('resources/list'), 404, -32601);
+
+  const u = await handleMessage({ jsonrpc: '2.0', id: 8, method: 'tools/list' }, { 'mcp-protocol-version': '2099-01-01' });
+  assert.equal(u.status, 400);
+  assert.equal(u.body.error.code, -32022);
+  assert.deepEqual(u.body.error.data, { supported: SUPPORTED, requested: '2099-01-01' });
+});
+
+test('MCP: errors an assistant can act on', async () => {
+  const { handleMessage } = await import('../mcp.js');
+  assert.equal((await handleMessage([{ jsonrpc: '2.0', id: 1, method: 'ping' }])).body.error.code, -32600, 'one message per request');
+  assert.equal((await handleMessage({ id: 1, method: 'ping' })).body.error.code, -32600);
+
+  const unknown = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'drain_wallet' } });
+  assert.equal(unknown.body.error.code, -32602);
+  assert.match(unknown.body.error.message, /tools\/list/);
+
+  const call = async (name, args) => (await handleMessage({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name, arguments: args } })).body.result;
+  // A value outside what a tool accepts is a tool error the model reads, naming what it does accept.
+  const r1 = await call('stablecoin_history', { range: '2w' });
+  assert.equal(r1.isError, true);
+  assert.match(r1.content[0].text, /1h, 24h, 7d, 30d, 90d, 1y, all/);
+  assert.match((await call('largest_transfers', { limit: 500 })).content[0].text, /1 to 50/);
+  assert.match((await call('largest_transfers', { days: '7' })).content[0].text, /integer/);
+  assert.equal((await call('protocol_detail', { id: 'Not An Id!' })).isError, true);
+  assert.equal((await call('stablecoin_detail', {})).isError, true);
+});
+
+test('MCP: tools read /v1 in-process, and only its read-only routes', async () => {
+  const { callTool, readV1 } = await import('../mcp.js');
+  // Nothing indexed in this process, so the figures are warming up — and the tool says so in the
+  // API's own words rather than returning an empty object.
+  const s = await callTool('stablecoin_supply');
+  assert.equal(s.isError, true);
+  assert.match(s.content[0].text, /warming up/i);
+
+  // The in-process read reaches the read-only routes and nothing that belongs to a key.
+  assert.equal((await readV1('/v1/alerts')).code, 404);
+  assert.equal((await readV1('/v1/billing/order')).code, 404);
+  // And only mcp.js can ask for it: the HTTP server calls handleV1 with three arguments, never four.
+  const server = readFileSync(join(import.meta.dirname, '..', 'server.js'), 'utf8');
+  assert.ok(!/internal/.test(server.match(/handleV1\([^)]*\)/g).join(' ')));
+});
+
+test('MCP: a present Origin must be one a real client sends', async () => {
+  const { originAllowed } = await import('../mcp.js');
+  assert.equal(originAllowed(undefined), true, 'server-to-server calls send none');
+  assert.equal(originAllowed('https://claude.ai'), true);
+  assert.equal(originAllowed('http://localhost:6274'), true, 'a local inspector');
+  assert.equal(originAllowed('null'), false, 'sandboxed and file pages');
+  assert.equal(originAllowed('http://example.com'), false);
+  assert.equal(originAllowed('file:///tmp/x.html'), false);
+});
+
+test('/mcp over HTTP: handshake, a tool call, and the statuses a client relies on', async () => {
+  const { spawn } = await import('node:child_process');
+  const { once } = await import('node:events');
+  const { rmSync } = await import('node:fs');
+  const http = await import('node:http');
+  const net = await import('node:net');
+
+  const port = await new Promise((resolve) => {
+    const probe = net.createServer().listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+  const dbPath = join(tmpdir(), `stabledesk-test-mcp-${process.pid}-${Date.now()}.db`);
+  const child = spawn(process.execPath, ['--import', OFFLINE, 'server.js'], {
+    cwd: join(import.meta.dirname, '..'),
+    env: {
+      ...process.env, PORT: String(port), DB_PATH: dbPath, ARC_NETWORK: '', ADMIN_TOKEN: '',
+      TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '',
+      TVL_ENABLED: 'false', ENTITIES_ENABLED: 'false', WATCH_ENABLED: 'false', WHALEWATCH_ENABLED: 'false', BILLING_ENABLED: 'false',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const closed = once(child, 'close');
+  let out = '';
+  child.stdout.on('data', (c) => { out += c; });
+  child.stderr.on('data', (c) => { out += c; });
+
+  const call = (method, path, { headers = {}, body } = {}) => new Promise((resolve, reject) => {
+    const r = http.request({ host: '127.0.0.1', port, path, method, headers: { accept: 'application/json, text/event-stream', ...(body != null ? { 'content-type': 'application/json' } : {}), ...headers } }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { text += c; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text, json: (() => { try { return JSON.parse(text); } catch { return null; } })() }));
+    });
+    r.on('error', reject);
+    if (body != null) r.write(typeof body === 'string' ? body : JSON.stringify(body));
+    r.end();
+  });
+
+  try {
+    for (let i = 0; i < 200 && !out.includes('Stabledesk →'); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(out.includes('Stabledesk →'), `the server did not start:\n${out}`);
+
+    const pre = await call('OPTIONS', '/mcp');
+    assert.equal(pre.status, 204);
+    assert.match(pre.headers['access-control-allow-headers'], /mcp-protocol-version/);
+
+    assert.equal((await call('GET', '/mcp')).status, 405, 'no server-to-client stream is offered');
+    const bad = await call('POST', '/mcp', { body: '{not json' });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.json.error.code, -32700);
+    assert.equal((await call('POST', '/mcp', { headers: { origin: 'null' }, body: { jsonrpc: '2.0', id: 1, method: 'ping' } })).status, 403);
+
+    const init = await call('POST', '/mcp', { body: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } } } });
+    assert.equal(init.status, 200);
+    assert.match(init.headers['content-type'], /application\/json/);
+    assert.equal(init.json.result.serverInfo.name, 'stabledesk');
+
+    const note = await call('POST', '/mcp', { headers: { 'mcp-protocol-version': '2025-06-18' }, body: { jsonrpc: '2.0', method: 'notifications/initialized' } });
+    assert.equal(note.status, 202);
+    assert.equal(note.text, '');
+
+    const tool = await call('POST', '/mcp', { headers: { 'mcp-protocol-version': '2025-06-18' }, body: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'arc_status', arguments: {} } } });
+    assert.equal(tool.status, 200);
+    const sc = tool.json.result.structuredContent;
+    assert.equal(sc.network, 'Arc testnet', 'derived from the profile this server runs');
+    assert.equal(sc.data.network, 'testnet', 'and the figures are /v1/status itself');
+    assert.match(sc.reproduce, /\/v1\/status$/, 'with the public request that returns the same figures');
+    assert.match(sc.method, /\/methodology$/);
+    assert.deepEqual(JSON.parse(tool.json.result.content[0].text), sc, 'the text block is the same object, serialised');
+
+    assert.match((await call('GET', '/llms.txt')).text, /\/mcp\)/, 'agents reading llms.txt find the endpoint');
+    const docs = (await call('GET', '/docs')).text;
+    assert.match(docs, /stabledesk\.xyz\/mcp/);
+    assert.ok(!docs.includes('{{MCP_RPM}}'), 'the limit on /docs is read from the code, not restated');
+  } finally {
+    child.kill('SIGTERM');
+    const stuck = setTimeout(() => child.kill('SIGKILL'), 5000);
+    await closed;
+    clearTimeout(stuck);
+    for (const ext of ['', '-wal', '-shm']) rmSync(dbPath + ext, { force: true });
+  }
+});
+
+test('MCP: a series is sent as columns and rows, with every value unchanged', async () => {
+  const { compactSeries } = await import('../mcp.js');
+  const data = { token: 'USDC', series: [{ t: 1, volume: 10.5, mint: 2 }, { t: 2, volume: 11, burn: 3 }] };
+  const c = compactSeries(data);
+  assert.deepEqual(c.series.columns, ['t', 'volume', 'mint', 'burn']);
+  assert.deepEqual(c.series.rows, [[1, 10.5, 2, null], [2, 11, null, 3]], 'a field a bucket lacks is null, never 0');
+  assert.equal(c.token, 'USDC', 'everything else passes through');
+  // Rebuilding the objects gives the /v1 answer back, value for value.
+  const back = c.series.rows.map((r) => Object.fromEntries(c.series.columns.map((k, i) => [k, r[i]]).filter(([, v]) => v !== null)));
+  assert.deepEqual(back, data.series);
+  assert.equal(compactSeries({ series: [] }).series.length, 0, 'an empty series is left alone');
+  assert.deepEqual(compactSeries({ ok: true }), { ok: true });
+});
+
+// ---- privacy page (/privacy) ----
+// The page makes claims about what the code stores. The ones a schema or a source file can
+// contradict are checked against it, so the page cannot quietly become false.
+test('the privacy page is served, linked from every footer, and its storage claims hold', () => {
+  const root = join(import.meta.dirname, '..');
+  const read = (...p) => readFileSync(join(root, ...p), 'utf8');
+  const page = read('public', 'privacy.html');
+  const server = read('server.js');
+  assert.match(server, /path === '\/privacy'/, 'routed');
+  assert.match(server, /url\('\/privacy'/, 'listed in the sitemap');
+  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities']) {
+    assert.match(read('public', `${f}.html`), /href="\/privacy"/, `${f}.html links the privacy page from its footer`);
+  }
+  assert.match(page, /mailto:/, 'a way to reach the operator');
+  assert.match(page, /Last updated \d{1,2} [A-Z][a-z]+ \d{4}/, 'dated');
+
+  // "No IP address written to disk": none of the tables about usage, keys, alerts or orders has a
+  // column that could hold one, or a user agent, or an email address.
+  const db = read('db.js');
+  for (const t of ['hits', 'key_daily', 'api_keys', 'alerts', 'orders']) {
+    const ddl = db.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${t} \\(([\\s\\S]*?)\\);`))?.[1];
+    assert.ok(ddl, `${t}: schema found`);
+    assert.doesNotMatch(ddl, /\b(ip|ip_addr|remote_addr|user_agent|ua|email)\b/i, `${t} has no column for an IP, a user agent or an email`);
+  }
+
+  // "Sets no cookies": nothing in the server writes one, and no page script does.
+  for (const f of ['server.js', 'api.js']) assert.doesNotMatch(read(f), /set-cookie/i, `${f} sets no cookie`);
+  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy']) {
+    assert.doesNotMatch(read('public', `${f}.html`), /document\.cookie/, `${f}.html writes no cookie`);
+  }
+});

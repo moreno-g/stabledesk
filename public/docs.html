@@ -166,6 +166,12 @@
   <p>The full API is described in <a href="/openapi.json"><code>/openapi.json</code></a> (OpenAPI 3.1) — every endpoint, parameter, response shape and error code, generated from the running configuration so it can't drift from what the API actually serves. Point a client generator, an IDE or an agent at it rather than reading this page.</p>
   <p><a href="/llms.txt"><code>/llms.txt</code></a> is the short version for language models: what this measures, where the data comes from, and the two or three conventions you need before quoting a number from it.</p>
 
+  <h2>Use it from an AI assistant (MCP)</h2>
+  <p>The same figures are served as read-only tools at <code>https://stabledesk.xyz/mcp</code> — Model Context Protocol over Streamable HTTP, <strong>no key</strong>. Every answer carries its network, its window and the <code>/v1</code> request that reproduces it, so an assistant can cite a figure rather than sum Transfer events itself.</p>
+  <p><strong>Claude</strong> (claude.ai or the desktop app): Settings → Connectors → <em>Add custom connector</em>, and paste the URL. <strong>Claude Code</strong>: <code>claude mcp add --transport http stabledesk https://stabledesk.xyz/mcp</code>. Any other MCP client takes the URL the same way.</p>
+  <p>Tools: <code>arc_status</code>, <code>stablecoin_supply</code>, <code>stablecoin_detail</code>, <code>stablecoin_history</code>, <code>cctp_flows</code>, <code>ecosystem_tvl</code>, <code>protocol_detail</code>, <code>tvl_history</code>, <code>network_fees</code>, <code>largest_transfers</code>, <code>chain_uptime</code>. Address lookups are deliberately not among them. Try: <em>“How much USDC really moved on Arc yesterday, and how much of the supply change came through CCTP?”</em> · <em>“Which protocols hold the most stablecoins on Arc, and how has total TVL moved this month?”</em> · <em>“What does it cost to move $1M on Arc right now?”</em></p>
+  <p>Limits: {{MCP_RPM}} requests per minute per client address. Read-only; nothing is written and no conversation content is stored — only a daily count per tool, like the <code>/v1</code> routes.</p>
+
   <h2>Tiers</h2>
   <table>
     <thead><tr><th>Tier</th><th>Rate limit</th><th>Alerts</th><th>Price</th></tr></thead>
@@ -196,6 +202,7 @@ curl -X DELETE https://stabledesk.xyz/v1/alerts/1 \
         <a href="/entities">Entities <span class="beta-dot">beta</span></a>
         <a href="https://x.com/getStabledesk">@getStabledesk</a>
         <a href="https://github.com/moreno-g/stabledesk">Source</a>
+        <a href="/privacy">Privacy</a>
       </nav>
     </div>
     <div class="sf-legal">Read-only · data from {{THE_NET}} public RPC · © 2026 Stabledesk · not investment advice.</div>

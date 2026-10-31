@@ -82,6 +82,11 @@ indexing forward and serves:
 - `GET /api/uptime?days=30` — the availability record: uptime over observed time, plus coverage
 - `GET /openapi.json` — OpenAPI 3.1 description of the whole `/v1` surface
 - `GET /llms.txt` — short index of the site and its data, for language models and agents
+- `POST /mcp` — the same figures as read-only tools for AI assistants (Model Context Protocol, Streamable
+  HTTP, no key). Each answer carries its network, its window and the `/v1` request that reproduces it;
+  the tools read `/v1` in-process, so there is no second implementation of any number. Serves both the
+  2026-07-28 revision (no handshake, `server/discover`) and the earlier ones (`initialize`). Address
+  lookups are deliberately not exposed.
 
 State (SQLite) is written to `arc.db` (gitignored). Delete it to re-index from scratch.
 
