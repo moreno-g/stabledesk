@@ -22,6 +22,7 @@ import { REPORTS, reportBySlug, reportBody, networkLabel, windowLabel, published
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
+import { handleMcp, MCP_RPM } from './mcp.js';
 import { normalizePath, dayOf, countable, keyPrefix, buildDigest, QUIET_DAYS_BEFORE_HEARTBEAT } from './usage.js';
 import { sendTelegram, configured as tgConfigured } from './telegram.js';
 import { specJson, llmsTxt } from './openapi.js';
@@ -104,7 +105,9 @@ function applyNetwork(html) {
     .replaceAll('{{TOKENS_JSON}}', JSON.stringify(symbols))
     .replaceAll('{{TOKENS_PLUS}}', symbols.join('+'))
     .replaceAll('{{TOKENS_SLASH}}', symbols.join(' / '))
-    .replaceAll('{{TOKENS}}', symbols.join(', '));
+    .replaceAll('{{TOKENS}}', symbols.join(', '))
+    // The /mcp limit is configurable, so /docs reads it rather than restating a number that drifts.
+    .replaceAll('{{MCP_RPM}}', String(MCP_RPM));
   return CHAIN.isTestnet ? out : out.replace(/<!--testnet-only-->[\s\S]*?<!--\/testnet-only-->/g, '');
 }
 
@@ -317,6 +320,9 @@ async function handle(req, res) {
   const label = normalizePath(path);
   if (label) res.on('finish', () => { if (countable(res.statusCode)) db.recordHit(label, dayOf()); });
 
+  // MCP endpoint for AI assistants: the /v1 figures as read-only tools, no key (see mcp.js)
+  if (path === '/mcp') return handleMcp(req, res);
+
   // public data API (keys + tiers + rate limiting)
   if (path.startsWith('/v1')) return handleV1(req, res, u);
 
@@ -520,6 +526,7 @@ async function handle(req, res) {
       url('/methodology', 'monthly', '0.6'),
       url('/reports', 'weekly', '0.7'),
       ...REPORTS.map((r) => url(`/reports/${r.slug}`, 'yearly', '0.6')),
+      url('/privacy', 'yearly', '0.3'),
       ...[...TOKEN_SYMBOLS].map((s) => url(`/token/${s.toLowerCase()}`, 'daily', '0.8')),
       ...PROTOCOLS.map((p) => url(`/protocol/${p.id}`, 'daily', '0.7')),
       '</urlset>', ''].join('\n');
@@ -569,6 +576,9 @@ async function handle(req, res) {
     return redirect(res, `/token/${[...TOKEN_SYMBOLS][0].toLowerCase()}`);
   }
   if (path === '/methodology' || path === '/methodology.html') return serveFile(req, res, 'methodology.html');
+  // What is stored about the people using the site, and for how long. Required by Claude's connector
+  // directory for /mcp, and true of every surface, so it is linked from every footer.
+  if (path === '/privacy' || path === '/privacy.html') return serveFile(req, res, 'privacy.html');
   if (path === '/status' || path === '/status.html') return serveFile(req, res, 'status.html');
   // Served even when derivation is off: the footer links to it from every page, and the page
   // itself reports "disabled" when /api/entities 404s. A dead link is worse than an honest one.
