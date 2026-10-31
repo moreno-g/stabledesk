@@ -171,13 +171,38 @@ value; use it to keep cadence between the other two, never as the main output.
   forecast, and it gives no financial advice.
 - Post about a competitor's numbers being wrong. Publish the method and let people compare.
 
+## Automatic publication
+
+Until 30 October 2026 every post was manual. That did not scale: a measurement site has a figure to
+publish every day, and a person retyping it is the slowest and least checkable step in the chain. So
+one format now publishes itself — **the daily post** — and the rules above are enforced by code
+instead of by a person reading before sending.
+
+What makes it publishable without a reader, all in `stabledesk-brief` (`posts.js`, tested):
+
+- **Only a closed UTC day**, read from `/v1/stablecoins/history`. A daily bucket can be fetched again
+  next year and give the same answer; a rolling "last 24h" cannot, and this file forbids publishing
+  a figure the API cannot reproduce on request.
+- **The network label comes from `/v1/status`.** No status, no post.
+- **Held, not published,** when the index is degraded or has not measured the whole day, when the
+  supply and the series were read at different instants, when a figure is missing, when supply moved
+  more than 50% in a day or real volume is over ten times the previous week's median, or when the text
+  fails the validator. A held post goes to Telegram with its reasons.
+- **Off unless `X_POSTING_ENABLED=true`**, like whale posts: no deploy can start publishing by itself.
+
+Everything else stays manual: the weekly report, any post that names a protocol, replies, and
+corrections. A new automatic format needs its own tested guard and a line in the table below.
+
+Before the first automatic post, the account gets X's *Automated* label, linked to @morenog_dev —
+which is the split *Replies* already describes: the brand account measures, the person answers.
+
 ## Channels
 
 | Channel | Gate |
 |---|---|
-| [@getStabledesk](https://x.com/getStabledesk) | Manual. This file is the gate. Data replies only — see *Replies* above. |
+| [@getStabledesk](https://x.com/getStabledesk) | The daily post: automatic, behind the guards above. Everything else manual, with this file as the gate. Data replies only — see *Replies* above. |
 | [@morenog_dev](https://x.com/morenog_dev) | Manual. Conversation and replies. Same network rule, no exception for being a person. |
-| `stabledesk-brief` | Drafts the figures to Telegram and stops there. It has no X client and is not to be given one. |
+| `stabledesk-brief` | Drafts the figures to Telegram, and publishes the daily post to X when every guard passes. Nothing else goes to X from it. |
 | Whale posts (Telegram) | `WHALEWATCH_ENABLED=true` — off by default, so a deploy can never start publishing as a side effect. |
 | README + `/methodology` | Ship-gated. Changed in the same commit as the behaviour they describe. |
 | Grant applications | Same rule as posts. The traction figure is the measured one or it is absent. |
