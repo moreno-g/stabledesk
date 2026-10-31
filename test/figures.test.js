@@ -262,6 +262,26 @@ test('the default series is one currency: ALL adds up the base denomination\'s t
   const of = (tokens) => db.getSeries(tokens, day, 86400, true).find((p) => p.t === day)?.rvolume || 0;
   assert.equal(of(all.tokens), of('USDC') + of('USYC') + of('USDT'));
   assert.ok(of('EURC') >= 3000, 'the euros are there, in their own series');
+
+  // An assistant asking the MCP tool is told the same, and gets the same line.
+  const { TOOLS, INSTRUCTIONS, callTool } = await import('../mcp.js');
+  const h = TOOLS.find((t) => t.def.name === 'stablecoin_history').def;
+  for (const text of [h.description, h.inputSchema.properties.token.description]) {
+    assert.match(text, /ALL[^.;]* every token denominated in USD, the base denomination/);
+    assert.doesNotMatch(text, /across currencies/, 'the tool said ALL added every currency');
+  }
+  assert.match(INSTRUCTIONS, /in the base denomination \([^)]*token ALL/);
+  const { live } = await import('../indexer.js');
+  const saved = live.snapshot;
+  live.snapshot = { ...saved, ok: true };
+  try {
+    const { denomination, series } = (await callTool('stablecoin_history', { range: '24h' })).structuredContent.data;
+    assert.equal(denomination, 'USD');
+    const row = series.rows.find((r) => r[series.columns.indexOf('t')] === M);
+    assert.equal(row[series.columns.indexOf('rvolume')], 330);
+  } finally {
+    live.snapshot = saved;
+  }
 });
 
 test('the filter\'s share and Gateway\'s share are taken in one currency', async () => {
