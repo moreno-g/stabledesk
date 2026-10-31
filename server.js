@@ -542,6 +542,12 @@ async function handle(req, res) {
   if (path === '/theme.js') return serveFile(req, res, 'theme.js', 'text/javascript; charset=utf-8');
   if (path === '/og.png') return serveFile(req, res, 'og.png', 'image/png');
   if (path === '/banner.png') return serveFile(req, res, 'banner.png', 'image/png');
+  // The logo as files, for whatever cannot read the inline SVG in each page: browsers asking for
+  // /favicon.ico by default, Claude and its connector directory (which show the server's favicon),
+  // link previews and home screens. Before these existed, /favicon.ico was the 404 page.
+  if (path === '/favicon.ico') return serveFile(req, res, 'favicon.ico', 'image/x-icon');
+  if (path === '/icon.png') return serveFile(req, res, 'icon.png', 'image/png');
+  if (path === '/apple-touch-icon.png') return serveFile(req, res, 'apple-touch-icon.png', 'image/png');
   if (path === '/docs' || path === '/docs.html') return serveFile(req, res, 'docs.html');
 
   // ---- one indexable page per token, on a path URL ----

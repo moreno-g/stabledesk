@@ -1944,6 +1944,42 @@ test('a body that parses to null, an array or a scalar is an empty body, not a c
   }
 });
 
+// ---- the logo as files (/favicon.ico, /icon.png, /apple-touch-icon.png) ----
+// Claude and its connector directory show the server's favicon, and /favicon.ico used to be the 404
+// page. Placed mid-file on purpose: features appended at the end keep colliding in merges.
+test('the logo is served as files: a real ICO and PNGs of the stated sizes, declared in every page', () => {
+  const root = join(import.meta.dirname, '..');
+  const file = (n) => readFileSync(join(root, 'public', n));
+  const server = readFileSync(join(root, 'server.js'), 'utf8');
+  for (const [route, name, type] of [['/favicon.ico', 'favicon.ico', 'image/x-icon'], ['/icon.png', 'icon.png', 'image/png'], ['/apple-touch-icon.png', 'apple-touch-icon.png', 'image/png']]) {
+    assert.ok(server.includes(`if (path === '${route}') return serveFile(req, res, '${name}', '${type}');`), `${route} is served as ${type}`);
+  }
+
+  const png = (buf) => ({ png: buf.readUInt32BE(0) === 0x89504e47, w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) });
+  // favicon.ico: an ICONDIR (reserved 0, type 1), each entry pointing at a PNG of the size it declares.
+  const ico = file('favicon.ico');
+  assert.equal(ico.readUInt16LE(0), 0);
+  assert.equal(ico.readUInt16LE(2), 1, 'type 1 is an icon');
+  const sizes = [];
+  for (let i = 0; i < ico.readUInt16LE(4); i++) {
+    const e = 6 + 16 * i, w = ico.readUInt8(e) || 256, len = ico.readUInt32LE(e + 8), off = ico.readUInt32LE(e + 12);
+    const img = png(ico.subarray(off, off + len));
+    assert.ok(img.png, `entry ${i} holds a PNG`);
+    assert.equal(img.w, w, `entry ${i} is ${w}px, as its directory entry says`);
+    sizes.push(w);
+  }
+  assert.ok(sizes.includes(16) && sizes.includes(32), `16 and 32 px are both there (got ${sizes})`);
+  assert.deepEqual(png(file('icon.png')), { png: true, w: 256, h: 256 });
+  assert.deepEqual(png(file('apple-touch-icon.png')), { png: true, w: 180, h: 180 });
+
+  // Declared beside the inline SVG in every page, so whatever reads the HTML finds a real URL.
+  for (const p of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy', '404']) {
+    const html = readFileSync(join(root, 'public', `${p}.html`), 'utf8');
+    assert.match(html, /<link rel="icon" href="\/favicon\.ico"/, `${p}.html declares /favicon.ico`);
+    assert.match(html, /<link rel="apple-touch-icon" href="\/apple-touch-icon\.png">/, `${p}.html declares the touch icon`);
+  }
+});
+
 // ---- one request cannot take the process down (server.js) ----
 // The HTTP server shares its process with the indexer and every poller, so a request that kills it
 // stops every live figure until the platform restarts it. Tested on the real server.js, in a
