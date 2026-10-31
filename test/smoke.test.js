@@ -2852,3 +2852,35 @@ test('MCP: a series is sent as columns and rows, with every value unchanged', as
   assert.equal(compactSeries({ series: [] }).series.length, 0, 'an empty series is left alone');
   assert.deepEqual(compactSeries({ ok: true }), { ok: true });
 });
+
+// ---- privacy page (/privacy) ----
+// The page makes claims about what the code stores. The ones a schema or a source file can
+// contradict are checked against it, so the page cannot quietly become false.
+test('the privacy page is served, linked from every footer, and its storage claims hold', () => {
+  const root = join(import.meta.dirname, '..');
+  const read = (...p) => readFileSync(join(root, ...p), 'utf8');
+  const page = read('public', 'privacy.html');
+  const server = read('server.js');
+  assert.match(server, /path === '\/privacy'/, 'routed');
+  assert.match(server, /url\('\/privacy'/, 'listed in the sitemap');
+  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities']) {
+    assert.match(read('public', `${f}.html`), /href="\/privacy"/, `${f}.html links the privacy page from its footer`);
+  }
+  assert.match(page, /mailto:/, 'a way to reach the operator');
+  assert.match(page, /Last updated \d{1,2} [A-Z][a-z]+ \d{4}/, 'dated');
+
+  // "No IP address written to disk": none of the tables about usage, keys, alerts or orders has a
+  // column that could hold one, or a user agent, or an email address.
+  const db = read('db.js');
+  for (const t of ['hits', 'key_daily', 'api_keys', 'alerts', 'orders']) {
+    const ddl = db.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${t} \\(([\\s\\S]*?)\\);`))?.[1];
+    assert.ok(ddl, `${t}: schema found`);
+    assert.doesNotMatch(ddl, /\b(ip|ip_addr|remote_addr|user_agent|ua|email)\b/i, `${t} has no column for an IP, a user agent or an email`);
+  }
+
+  // "Sets no cookies": nothing in the server writes one, and no page script does.
+  for (const f of ['server.js', 'api.js']) assert.doesNotMatch(read(f), /set-cookie/i, `${f} sets no cookie`);
+  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy']) {
+    assert.doesNotMatch(read('public', `${f}.html`), /document\.cookie/, `${f}.html writes no cookie`);
+  }
+});

@@ -519,6 +519,7 @@ async function handle(req, res) {
       url('/ecosystem', 'daily', '0.9'),
       url('/docs', 'weekly', '0.8'),
       url('/methodology', 'monthly', '0.6'),
+      url('/privacy', 'yearly', '0.3'),
       ...[...TOKEN_SYMBOLS].map((s) => url(`/token/${s.toLowerCase()}`, 'daily', '0.8')),
       ...PROTOCOLS.map((p) => url(`/protocol/${p.id}`, 'daily', '0.7')),
       '</urlset>', ''].join('\n');
@@ -568,6 +569,9 @@ async function handle(req, res) {
     return redirect(res, `/token/${[...TOKEN_SYMBOLS][0].toLowerCase()}`);
   }
   if (path === '/methodology' || path === '/methodology.html') return serveFile(req, res, 'methodology.html');
+  // What is stored about the people using the site, and for how long. Required by Claude's connector
+  // directory for /mcp, and true of every surface, so it is linked from every footer.
+  if (path === '/privacy' || path === '/privacy.html') return serveFile(req, res, 'privacy.html');
   if (path === '/status' || path === '/status.html') return serveFile(req, res, 'status.html');
   // Served even when derivation is off: the footer links to it from every page, and the page
   // itself reports "disabled" when /api/entities 404s. A dead link is worse than an honest one.
