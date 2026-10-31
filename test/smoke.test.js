@@ -2676,7 +2676,7 @@ test('MCP: a legacy client gets the initialize handshake, at a version it asked 
   assert.deepEqual(old.body.result.capabilities, { tools: { listChanged: false } });
   assert.equal(old.body.result.serverInfo.name, 'stabledesk');
   assert.match(old.body.result.instructions, /methodology/);
-  assert.match(old.body.result.instructions, /raw overstates/, 'the one convention an assistant must know before quoting volume');
+  assert.match(old.body.result.instructions, /raw \(every Transfer event the tracked stablecoin contracts emit, mints and burns included, so a payment routed through several contracts counts once per hop\)/, 'the one convention an assistant must know before quoting volume');
 
   assert.deepEqual(await handleMessage({ jsonrpc: '2.0', method: 'notifications/initialized' }), { status: 202, body: null });
   assert.deepEqual((await handleMessage({ jsonrpc: '2.0', id: 3, method: 'ping' })).body.result, {});
@@ -2698,6 +2698,21 @@ test('MCP: every tool is read-only, titled and annotated the way Claude\'s direc
   }
   // No address-level tool: counterparties' profiles stay out of a prompt's reach (see mcp.js).
   assert.ok(![...names].some((n) => /address/.test(n)));
+
+  // The directory's rule: tool descriptions carry no instruction about the model's behaviour and none
+  // about other tools. So no description, parameter included, names another tool, and no sentence
+  // opens with an order. The server's instructions are held to the same line.
+  const { INSTRUCTIONS } = await import('../mcp.js');
+  const order = /(^|[.:;!?]\s+)(call|use|read(?!-only)|ignore|always|never|prefer|try|make sure|do not|don't|you must|you should)\b/i;
+  for (const t of tools) {
+    const text = `${t.description} ${JSON.stringify(t.inputSchema)}`;
+    for (const other of names) {
+      if (other !== t.name) assert.ok(!text.includes(other), `${t.name} mentions another tool, ${other}`);
+    }
+    assert.doesNotMatch(t.description, order, `${t.name}: describes, does not instruct`);
+  }
+  for (const n of names) assert.ok(!INSTRUCTIONS.includes(n), `the server instructions mention the tool ${n}`);
+  assert.doesNotMatch(INSTRUCTIONS, order, 'the server instructions state facts, not orders');
 });
 
 test('MCP 2026-07-28: no handshake, metadata on every request, and headers that must agree', async () => {
@@ -2761,7 +2776,17 @@ test('MCP: errors an assistant can act on', async () => {
   assert.match((await call('largest_transfers', { limit: 500 })).content[0].text, /1 to 50/);
   assert.match((await call('largest_transfers', { days: '7' })).content[0].text, /integer/);
   assert.equal((await call('protocol_detail', { id: 'Not An Id!' })).isError, true);
+  assert.equal((await call('protocol_detail', { id: 'unnamed' })).isError, true, '/v1/protocols/unnamed is a list of unclaimed contracts, not a protocol');
   assert.equal((await call('stablecoin_detail', {})).isError, true);
+
+  // An argument error says what the accepted form is, without pointing at another tool: the same
+  // line the descriptions hold.
+  const { TOOLS } = await import('../mcp.js');
+  const names = TOOLS.map((t) => t.def.name);
+  for (const [name, args] of [['protocol_detail', { id: 'Not An Id!' }], ['tvl_history', { protocol: 'Bad!' }], ['stablecoin_detail', {}]]) {
+    const text = (await call(name, args)).content[0].text;
+    for (const other of names) if (other !== name) assert.ok(!text.includes(other), `${name}'s error names ${other}`);
+  }
 });
 
 test('MCP: tools read /v1 in-process, and only its read-only routes', async () => {
