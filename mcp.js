@@ -52,7 +52,7 @@ export const SERVER_INFO = {
 
 export const INSTRUCTIONS = [
   `Stabledesk measures stablecoins on ${NETWORK} (chain ${CHAIN.chainId}) from chain data, with every rule published at ${SITE_ORIGIN}/methodology.`,
-  'Volume comes in three measures — raw (every Transfer event), real (the largest transfer per transaction per token, so routing hops are not counted twice) and adjusted (real, minus transfers where both ends are infrastructure). Say which one you quote; raw overstates activity.',
+  'Volume comes in three measures — raw (every Transfer event, mints and burns included), real (the largest transfer per transaction per token, so routing hops are not counted twice; mints and burns are left out, published as mint and burn) and adjusted (real, minus transfers where both ends are infrastructure). Say which one you quote; raw overstates activity.',
   'A CCTP or Circle Gateway mint is USDC changing chains, not new issuance; organic issuance is what remains once both are removed.',
   'Quote figures with the network and the window they cover, and link the methodology. Amounts are face value in the currency stated (USD, EUR, GBP) and never summed across currencies.',
   'Read-only, informational figures — not investment advice.',
@@ -97,7 +97,7 @@ export const TOOLS = [
   tool('stablecoin_history', 'Volume, mint and burn over time',
     'A time series of volume (raw: volume, real: rvolume, adjusted: avolume), transfers, mint and burn, with the CCTP part (cmint/cburn) and the Gateway part (bmint/bburn). Bucket size follows the range: 1h → 1 minute, 24h → 15 minutes, 7d → 1 hour, 30d and longer → 1 UTC day. Daily buckets are closed days that can be fetched again and give the same answer. windowEnd states the instant the series ends at. series comes as { columns, rows }: the /v1 values, with the field names listed once; t is the bucket start in Unix seconds. The 30d default is the smallest answer; 7d is the largest.',
     {
-      token: { type: 'string', description: 'Token symbol, or ALL for every token.', enum: ['ALL', ...tokens()], default: 'ALL' },
+      token: { type: 'string', description: 'Token symbol, or ALL for every tracked token in the base currency (USD on Arc) — never other currencies added in. The response names the denomination and the tokens.', enum: ['ALL', ...tokens()], default: 'ALL' },
       range: { type: 'string', description: 'How far back the series reaches.', enum: ranges, default: '30d' },
     }, [],
     (a) => ['/v1/stablecoins/history', { token: a.token ?? 'ALL', range: a.range ?? '30d' }],
