@@ -1696,6 +1696,9 @@ test('minutes roll up into days before they are pruned, and long ranges read the
 
   db.applyBatch(bk(day + 600, 100, 1), new Map(), []);       // early in the day
   db.applyBatch(bk(day + 80000, 250, 3), new Map(), []);     // late in the same day
+  // The chain kept moving for a week after that day. prune() cuts back from the newest indexed minute
+  // and never from past it, so without a minute that late the cuts below would stay where the data ends.
+  db.applyBatch(new Map([['head', { minute: day + 8 * 86400, token: `${T}-HEAD`, volume: 0, cnt: 0, mint: 0, burn: 0 }]]), new Map(), []);
 
   // Prune with a cutoff *inside* that day: only the first half is old enough to roll up.
   db.prune(day + 40000 + 7 * 86400, 10_000_000, 500);
