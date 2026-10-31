@@ -471,7 +471,10 @@ const stmt = {
   pruneTop: db.prepare('DELETE FROM top_transfers WHERE day < ?'),
   top: db.prepare('SELECT address, transfers, volume FROM addr_stats ORDER BY volume DESC LIMIT ?'),
   activeSince: db.prepare('SELECT COUNT(*) AS c FROM addr_stats WHERE last_block >= ?'),
-  coverage: db.prepare('SELECT MIN(minute) AS a, MAX(minute) AS b FROM buckets'),
+  // Two scalar subqueries rather than MIN and MAX in one SELECT: SQLite answers a lone MIN or MAX from
+  // the index, but with both it reads every row — about 1 ms over a week of minutes, and this runs on
+  // every tick, every /api/history request and every 7-day window (tvl.js movedWindow).
+  coverage: db.prepare('SELECT (SELECT MIN(minute) FROM buckets) AS a, (SELECT MAX(minute) FROM buckets) AS b'),
   dailyCoverage: db.prepare('SELECT MIN(day) AS a, MAX(day) AS b, COUNT(DISTINCT day) AS days FROM buckets_daily'),
   pruneAddrs: db.prepare('DELETE FROM addr_stats WHERE last_block < ?'),
   pruneAddrToks: db.prepare('DELETE FROM addr_token_daily WHERE day < ?'),
@@ -585,14 +588,20 @@ export function applyBatch(buckets, addrs, recents, flows = null) {
   }
 }
 
-// Time series, grouped into buckets of `groupSec`, since unix second `since`.
-// Statements are cached per (filter, groupSec); groupSec is coerced to a positive
-// integer before interpolation so it can never carry untrusted SQL.
+// Time series, grouped into buckets of `groupSec`, since unix second `since`, over `token`: one
+// symbol, or a list of them — the routes pass seriesScope(…).tokens, the tokens of one denomination.
+// There is no "every token" any more: `ALL` used to drop the filter, which summed dollars, euros and
+// pounds into one line, and a literal 'ALL' now matches no row rather than every row.
+// Statements are cached per (token count, groupSec); groupSec is coerced to a positive integer before
+// interpolation and the tokens are bound, so neither can carry untrusted SQL.
+const tokenList = (token) => (Array.isArray(token) ? token : [token]);
+const placeholders = (n) => Array(n).fill('?').join(', ');
 const histStmts = new Map();
 export function getHistory(token, since, groupSec) {
-  const filter = token && token !== 'ALL';
+  const tokens = tokenList(token);
+  if (!tokens.length) return [];
   const g = Math.max(1, Math.floor(Number(groupSec) || 60));
-  const ck = (filter ? 'f' : 'a') + g;
+  const ck = tokens.length + ':' + g;
   let ps = histStmts.get(ck);
   if (!ps) {
     ps = db.prepare(`SELECT (minute / ${g}) * ${g} AS t,
@@ -600,11 +609,11 @@ export function getHistory(token, since, groupSec) {
         SUM(rvolume) AS rvolume, SUM(rcnt) AS rcnt, SUM(avolume) AS avolume, SUM(acnt) AS acnt,
         SUM(bmint) AS bmint, SUM(bburn) AS bburn, SUM(bvolume) AS bvolume, SUM(bcnt) AS bcnt,
         SUM(cmint) AS cmint, SUM(cburn) AS cburn
-      FROM buckets WHERE minute >= ? ${filter ? 'AND token = ?' : ''}
+      FROM buckets WHERE minute >= ? AND token IN (${placeholders(tokens.length)})
       GROUP BY t ORDER BY t`);
     histStmts.set(ck, ps);
   }
-  const rows = filter ? ps.all(since, token) : ps.all(since);
+  const rows = ps.all(since, ...tokens);
   return rows.map((r) => ({ t: r.t, volume: r.volume, cnt: r.cnt, mint: r.mint, burn: r.burn, rvolume: r.rvolume, rcnt: r.rcnt, avolume: r.avolume, acnt: r.acnt, bmint: r.bmint, bburn: r.bburn, bvolume: r.bvolume, bcnt: r.bcnt, cmint: r.cmint, cburn: r.cburn }));
 }
 
@@ -612,21 +621,24 @@ export function getHistory(token, since, groupSec) {
 // not yet rolled up, then groups both by day — otherwise every long range would end seven days ago,
 // which is the shape of bug that makes a chart look like an outage. The boundary day exists in both
 // tables (half rolled up, half still live), so the union has to be summed rather than concatenated.
+// `token` as for getHistory.
 const dailyStmts = new Map();
 export function getDailyHistory(token, sinceDay) {
-  const filter = token && token !== 'ALL';
-  const ck = filter ? 'f' : 'a';
+  const tokens = tokenList(token);
+  if (!tokens.length) return [];
+  const ck = tokens.length;
   let ps = dailyStmts.get(ck);
   if (!ps) {
     const cols = 'volume, cnt, mint, burn, rvolume, rcnt, avolume, acnt, bmint, bburn, bvolume, bcnt, cmint, cburn';
+    const inTokens = `token IN (${placeholders(tokens.length)})`;
     ps = db.prepare(`SELECT day AS t, ${cols.split(', ').map((c) => `SUM(${c}) AS ${c}`).join(', ')} FROM (
-        SELECT day, token, ${cols} FROM buckets_daily WHERE day >= ? ${filter ? 'AND token = ?' : ''}
+        SELECT day, token, ${cols} FROM buckets_daily WHERE day >= ? AND ${inTokens}
         UNION ALL
-        SELECT (minute / 86400) * 86400 AS day, token, ${cols} FROM buckets WHERE minute >= ? ${filter ? 'AND token = ?' : ''})
+        SELECT (minute / 86400) * 86400 AS day, token, ${cols} FROM buckets WHERE minute >= ? AND ${inTokens})
       GROUP BY t ORDER BY t`);
     dailyStmts.set(ck, ps);
   }
-  return filter ? ps.all(sinceDay, token, sinceDay, token) : ps.all(sinceDay, sinceDay);
+  return ps.all(sinceDay, ...tokens, sinceDay, ...tokens);
 }
 
 // Earliest block any address was first seen in — a lower bound on where indexing started, for
@@ -1183,6 +1195,7 @@ const tvstmt = {
   histSeries: db.prepare('SELECT day, tvl FROM tvl_history WHERE protocol = ? AND day >= ? ORDER BY day'),
   histOn: db.prepare('SELECT tvl FROM tvl_history WHERE protocol = ? AND day = ?'),
   histPrune: db.prepare('DELETE FROM tvl_history WHERE day < ?'),
+  histClearDay: db.prepare('DELETE FROM tvl_history WHERE day = ?'),
 };
 
 export function upsertBalances(rows) {
@@ -1345,9 +1358,13 @@ export const watchedAddresses = () => tvstmt.watched.all().map((r) => r.a).filte
 export const uncheckedAddresses = (limit = 40) => tvstmt.unchecked.all(limit).map((r) => r.address);
 
 // Written once per scan; the same day is overwritten rather than added to, because TVL is a level.
-export function recordTvlSnapshot(day, entries) {
+// With `replace` the day's rows are cleared first, so the stored day is exactly the last scan. Zero levels
+// are not stored, and without the clear a level that fell to zero after an earlier scan of the day kept
+// that scan's figure: the digest then compared a protocol emptied that afternoon as if it had not moved.
+export function recordTvlSnapshot(day, entries, { replace = false } = {}) {
   db.exec('BEGIN');
   try {
+    if (replace) tvstmt.histClearDay.run(day);
     for (const e of entries) tvstmt.histUp.run(day, e.protocol, e.tvl);
     db.exec('COMMIT');
   } catch (e) {
@@ -1394,6 +1411,31 @@ export function movedForAddresses(addrs, sinceDay) {
     for (const r of rows) { byToken[r.token] = (byToken[r.token] || 0) + (r.v || 0); transfers += r.n || 0; }
   }
   return { byToken, transfers };
+}
+
+// The addresses that moved the most in `tokens` — one denomination's, so euros are never ranked as
+// dollars — from `sinceDay` (UTC day number) on, in and out. Every row of the window has to be read,
+// so the caller caches the answer (tvl.js topMoved) rather than running this per request. NOT INDEXED,
+// because the planner otherwise walks the primary key for its address order and looks every row up in
+// the table: measured on 660k synthetic rows, 480 ms that way against 225 ms for a plain scan.
+export function topMovedSince(sinceDay, tokens, limit) {
+  if (!tokens.length) return [];
+  return db.prepare(`SELECT address, SUM(volume) AS volume FROM addr_token_daily NOT INDEXED
+    WHERE day >= ? AND token IN (${placeholders(tokens.length)})
+    GROUP BY address ORDER BY volume DESC, address LIMIT ?`).all(sinceDay, ...tokens, limit);
+}
+
+// Per address and token, what each of `addrs` moved from `sinceDay` on — the breakdown behind a
+// ranking, read by primary key.
+export function movedByAddressToken(addrs, sinceDay) {
+  const list = [...new Set((addrs || []).map((a) => String(a).toLowerCase()))];
+  const out = [];
+  for (let i = 0; i < list.length; i += 200) {
+    const part = list.slice(i, i + 200);
+    out.push(...db.prepare(`SELECT address, token, SUM(volume) AS volume, SUM(transfers) AS transfers FROM addr_token_daily
+      WHERE address IN (${part.map(() => '?').join(',')}) AND day >= ? GROUP BY address, token`).all(...part, sinceDay));
+  }
+  return out;
 }
 // When per-token daily counting began (ms).
 export const addrTokenSince = () => Number(getMetaValue('addr_token_daily_since')) || null;

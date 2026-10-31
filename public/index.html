@@ -385,7 +385,7 @@
           </div>
         </div>
       </div>
-      <p class="cap" id="chartCap">Real volume = one largest transfer per transaction, per token — routing hops &amp; contract internals filtered out.</p>
+      <p class="cap" id="chartCap">Real volume = one largest transfer per transaction, per token — routing hops &amp; contract internals filtered out; mints &amp; burns are issuance and not counted.</p>
       <div class="chartwrap">
         <div class="peak" id="chartPeak"></div>
         <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true"></svg>
@@ -434,7 +434,7 @@
     </div>
     <div class="card">
       <h2>Top addresses</h2>
-      <p class="cap">By transfer volume moved (in + out), across indexed history.</p>
+      <p class="cap" id="topCap">By volume moved (in + out) over the last 7 days, in the currency gas is paid in; other currencies are listed under, not added in.</p>
       <table><thead><tr><th>#</th><th>Address</th><th class="r">Transfers</th><th class="r">Volume</th></tr></thead>
         <tbody id="top"></tbody></table>
     </div>
@@ -678,10 +678,20 @@ function denomTile(label, by, base, pick, note){
       <td class="r amt">${compact(x.amount)}</td></tr>`).join('')
     : '<tr><td colspan="4" style="color:var(--ink-3);padding:14px 0">No transfers indexed yet.</td></tr>';
 
+  // Ranked over the "moved" window, in one currency; the caption says which, since when while the daily
+  // count is younger than the window, and up to which day once the chain is frozen. Other currencies are
+  // listed under each figure, never added to it.
+  const tw=d.topWindow, day=(ms)=>new Date(ms).toISOString().slice(0,10);
+  if(tw) $('#topCap').textContent=`By ${tw.denomination?tw.denomination+' ':''}volume moved (in + out) `
+    + (tw.complete ? (d.degraded ? `over the ${tw.days} UTC days to ${day(tw.to)}.` : `over the last ${tw.days} days (UTC).`)
+      : `since ${day(tw.since)}, ${tw.began!=null && day(tw.began)!==day(tw.since) ? `the newest indexed day (daily counting began ${day(tw.began)})` : 'when daily counting began'}${d.degraded ? `, to ${day(tw.to)}` : ''}.`)
+    + ' Other currencies are listed under, not added in; transfers count every token.';
+  const others=(x)=>Object.entries(x.volumeByDenomination||{}).filter(([k,v])=>k!==tw?.denomination&&v>0)
+    .map(([k,v])=>`<div style="font-size:10.5px;color:var(--ink-3);font-weight:500">+ ${compact(v)} ${esc(k)}</div>`).join('');
   $('#top').innerHTML = (d.top&&d.top.length)? d.top.map((x,i)=>`<tr class="${isWatched(x.address)?'watched':''}">
       <td class="rank">${i+1}</td>
       <td><button class="star ${isWatched(x.address)?'on':''}" onclick="toggleWatch('${x.address}')" title="Watch address">${isWatched(x.address)?'★':'☆'}</button> ${x.label? `<span class="lblchip">${esc(x.label)}</span>`:`<span class="addr">${short(x.address)}</span>`}${x.contract?'<span class="tag">contract</span>':''}</td>
-      <td class="r">${nf.format(x.transfers)}</td><td class="r amt">${compact(x.volume)}</td></tr>`).join('')
+      <td class="r">${nf.format(x.transfers)}</td><td class="r amt">${compact(x.volume)}${others(x)}</td></tr>`).join('')
     : '<tr><td colspan="4" style="color:var(--ink-3);padding:14px 0">Building rankings…</td></tr>';
 
   renderFees(d.fees);
@@ -776,8 +786,10 @@ function renderNoise(n){
       <span class="tag" title="Sent history held for this address. Under 30 days it is judged against the monthly limit whole.">${(x.spanDays??0)<1?'<1':(x.spanDays).toFixed(1)}d sent</span></td>
     <td class="r">${nf.format(x.sentTransfers??0)}</td>
     <td class="r amt">${compact(x.sentVolume??0)}</td></tr>`).join('');
+  // In one currency, named: the share used to be of every token's volume added together.
+  const cur=n.excludedDenomination?' '+n.excludedDenomination:'';
   foot.textContent=`${nf.format(n.flagged)} address${n.flagged===1?'':'es'} flagged · ${rate} · removes `
-    + `${compact(n.excludedVolume24h)} (${(n.excludedShare*100).toFixed(1)}%) of 24h real volume`;
+    + `${compact(n.excludedVolume24h)}${cur} (${(n.excludedShare*100).toFixed(1)}%) of 24h real${cur} volume`;
   // The rule changed on 28 Sept 2026 and the rolling window straddles it for a day; sent history is
   // also shorter than a month for a while. Both are said here rather than left to the methodology.
   const held = n.sentHistorySince ? (Date.now()-n.sentHistorySince)/86400000 : null;
@@ -892,6 +904,16 @@ function renderChart(payload){
     + `<path d="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
   renderYAxis($('#chartY'), 0, maxV, pad, compact);
   peak.innerHTML=`peak <b>${compact(maxV)}</b>`;
+  // "All" is every token of one currency — the response names it and its tokens — never every token,
+  // which drew euros and pounds into a dollar line.
+  if(payload.token==='ALL'){
+    const all=$('#tokenSeg [data-tok="ALL"]');
+    if(payload.denomination){
+      $('#chartTitle').textContent='Transfer volume · '+payload.denomination;
+      all.textContent='All '+payload.denomination;
+      all.title='Every tracked '+payload.denomination+' stablecoin: '+(payload.tokens||[]).join(', ');
+    }
+  }
   // Buckets are days once the series comes from the rollup, so the axis follows what the response
   // says answered it rather than a hardcoded list of range names.
   const byDay = payload.source==='daily' || chart.range==='7d';
@@ -912,8 +934,12 @@ function renderChart(payload){
   }
 }
 
+// Only the latest request is drawn. An earlier one answering late — the token or range the reader just
+// left — would land on top of the one they chose, and an ALL answer would re-title it in its currency.
+let chartSeq=0;
 async function loadChart(){
-  try{ const r=await fetch(`/api/history?token=${chart.token}&range=${chart.range}`,{cache:'no-store'}); renderChart(await r.json()); }
+  const seq=++chartSeq;
+  try{ const r=await fetch(`/api/history?token=${chart.token}&range=${chart.range}`,{cache:'no-store'}); const p=await r.json(); if(seq===chartSeq) renderChart(p); }
   catch(e){}
 }
 async function poll(){
@@ -950,8 +976,8 @@ async function renderWatch(){
 // toggles
 const CAPS={
   adj:'Adjusted volume = real volume, minus transfers where <em>both</em> ends are flagged senders (over 1,000 transfers or 10M sent in 30 days) — infrastructure talking to itself.',
-  real:'Real volume = one largest transfer per transaction, per token — routing hops &amp; contract internals filtered out.',
-  raw:'Raw volume = every Transfer event, unfiltered. Inflated by routing hops and bot activity.',
+  real:'Real volume = one largest transfer per transaction, per token — routing hops &amp; contract internals filtered out; mints &amp; burns are issuance and not counted.',
+  raw:'Raw volume = every Transfer event, unfiltered, mints &amp; burns included. Inflated by issuance, routing hops and bot activity.',
 };
 $('#metricSeg').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b)return;
   chart.metric=b.dataset.m; [...e.currentTarget.children].forEach(c=>c.classList.toggle('on',c===b));

@@ -29,9 +29,10 @@ Read-only. Zero dependencies — Node's native `fetch` and `node:sqlite`, nothin
 
 ## What it measures
 
-- **Three volume measures, all published** — raw (every `Transfer` event), **real** (one largest
-  transfer per transaction per token, so routing hops and contract internals don't count twice),
-  and **adjusted** (real, minus infrastructure talking to infrastructure). Showing all three means
+- **Three volume measures, all published** — raw (every `Transfer` event, mints and burns
+  included), **real** (one largest transfer per transaction per token, so routing hops and contract
+  internals don't count twice; mints and burns are left out and published as issuance), and
+  **adjusted** (real, minus infrastructure talking to infrastructure). Showing all three means
   every filtering step is auditable rather than asserted. An address counts as infrastructure the way
   Visa/Allium define it — it *sent* more than 1,000 transfers or $10M in 30 days — and every flagged
   address publishes what it sent and the window it was judged over.
@@ -70,10 +71,13 @@ indexing forward and serves:
 - `GET /` — the terminal
 - `GET /api/state` — live snapshot: network stats, 24h summary, top addresses, largest transfers
 - `GET /api/history?token=ALL|<symbol>&range=1h|24h|7d|30d|90d|1y|all` — time series (volume,
-  count, mint, burn). Past 7d the series comes from the per-day rollup; the response states which
-  table answered (`source`) and how far back the record reaches (`recordBegan`), so a long range
-  over a short record cannot pass for a long one
-- `GET /api/top?limit=N` — top addresses by volume
+  count, mint, burn) in one currency: `ALL` is every tracked token in the base denomination, never
+  every token, and the response names the `denomination` and the `tokens` it adds up. Past 7d the
+  series comes from the per-day rollup; the response states which table answered (`source`) and how
+  far back the record reaches (`recordBegan`), so a long range over a short record cannot pass for a
+  long one
+- `GET /api/top?limit=N` — top addresses by volume moved over 7 UTC days ending on the day of the newest indexed minute, in the base
+  denomination
 - `GET /api/health` — status: indexer health *and* chain liveness, reported separately
 - `GET /api/uptime?days=30` — the availability record: uptime over observed time, plus coverage
 - `GET /openapi.json` — OpenAPI 3.1 description of the whole `/v1` surface

@@ -23,7 +23,7 @@ import { readFileSync } from 'node:fs';
 import { handleV1, clientIp, rateLimit, BODY_MAX } from './api.js';
 import * as db from './db.js';
 import { dayOf } from './usage.js';
-import { RANGES, TOKEN_SYMBOLS, SITE_ORIGIN, denominationOf } from './constants.js';
+import { RANGES, TOKEN_SYMBOLS, SITE_ORIGIN, BASE_DENOMINATION, denominationOf } from './constants.js';
 import { CHAIN } from './chains.js';
 
 export const MODERN = '2026-07-28';
@@ -61,7 +61,7 @@ export const INSTRUCTIONS = [
   `Stabledesk measures stablecoins on ${NETWORK} (chain ${CHAIN.chainId}) from chain data; its measurement method is documented at ${SITE_ORIGIN}/methodology.`,
   'Volume comes in three measures: raw (every Transfer event the tracked stablecoin contracts emit, mints and burns included, so a payment routed through several contracts counts once per hop), real (the largest transfer per transaction per token, so routing hops are not counted twice; mints and burns are left out and reported as mint and burn) and adjusted (real, minus transfers where both ends are infrastructure).',
   'A mint that arrives through CCTP or Circle Gateway is a stablecoin changing chains, not new issuance; organic issuance is net issuance minus each cross-chain route measured on this network.',
-  `The tracked stablecoins are denominated in ${CURRENCIES}. Fields named byDenomination or ...ByDenomination are per currency, and figures stated to be in the base denomination (the TVL series, chainTvl, perMillionMoved) count that currency alone; any other total over several tokens adds face values across currencies without conversion.`,
+  `The tracked stablecoins are denominated in ${CURRENCIES}. Fields named byDenomination or ...ByDenomination are per currency, and figures stated to be in the base denomination (the TVL series, the stablecoin time series for token ALL, chainTvl, perMillionMoved) count that currency alone; any other total over several tokens adds face values across currencies without conversion.`,
   'Read-only, informational figures, not investment advice.',
 ].join(' ');
 
@@ -102,9 +102,9 @@ export const TOOLS = [
     (a) => (a.token == null ? `token is required: one of ${tokens().join(', ')}.` : oneOf('token', tokens(), a.token))),
 
   tool('stablecoin_history', 'Volume, mint and burn over time',
-    'A time series of volume (raw: volume, real: rvolume, adjusted: avolume), transfer counts (cnt, rcnt, acnt), mint and burn, with the CCTP part (cmint, cburn) and the Circle Gateway part (bmint, bburn, bvolume, bcnt). Buckets follow the range: 1h in 1-minute buckets, 24h in 15-minute buckets, 7d in hourly buckets, 30d and longer in UTC days. A bucket with no activity has no row; the bucket containing windowEnd is incomplete, and has a row only if it had activity. Token ALL adds every token at face value, across currencies. The range is counted back from windowEnd (Unix milliseconds), the newest minute holding an indexed transfer as of the last snapshot; buckets indexed after that snapshot can follow it, and range all starts at the beginning of the record. series is { columns, rows } with t the bucket start in Unix seconds, or [] when empty.',
+    `A time series of volume (raw: volume, real: rvolume, adjusted: avolume), transfer counts (cnt, rcnt, acnt), mint and burn, with the CCTP part (cmint, cburn) and the Circle Gateway part (bmint, bburn, bvolume, bcnt). Buckets follow the range: 1h in 1-minute buckets, 24h in 15-minute buckets, 7d in hourly buckets, 30d and longer in UTC days. A bucket with no activity has no row; the bucket containing windowEnd is incomplete, and has a row only if it had activity. Token ALL adds, at face value, every token denominated in ${BASE_DENOMINATION}, the base denomination; tokens in other currencies are left out. The response gives the currency (denomination) and the tokens added (tokens). The range is counted back from windowEnd (Unix milliseconds), the newest minute holding an indexed transfer as of the last snapshot; buckets indexed after that snapshot can follow it, and range all starts at the beginning of the record. series is { columns, rows } with t the bucket start in Unix seconds, or [] when empty.`,
     {
-      token: { type: 'string', description: 'Token symbol, or ALL for every token added at face value, across currencies.', enum: ['ALL', ...tokens()], default: 'ALL' },
+      token: { type: 'string', description: `Token symbol, or ALL for every token denominated in ${BASE_DENOMINATION}, the base denomination, added at face value.`, enum: ['ALL', ...tokens()], default: 'ALL' },
       range: { type: 'string', description: 'How far back the series is asked to reach; recordBegan in the response is where the record starts.', enum: ranges, default: '30d' },
     }, [],
     (a) => ['/v1/stablecoins/history', { token: a.token ?? 'ALL', range: a.range ?? '30d' }],

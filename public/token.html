@@ -65,6 +65,8 @@
   .kpi .lab{font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:600; margin-bottom:7px; white-space:nowrap}
   .kpi .val{font-family:var(--mono); font-size:20px; font-weight:600; letter-spacing:-.01em; font-variant-numeric:tabular-nums}
   .kpi .val.pos{color:var(--good)} .kpi .val.neg{color:var(--bad)}
+  .kpi .unit{display:block; font-family:var(--sans); font-size:11px; color:var(--ink-3); margin-top:3px; font-weight:500; letter-spacing:0}
+  .kpi .unit:empty{display:none}
   .grid{display:grid; grid-template-columns:1.5fr 1fr; gap:14px; margin-bottom:14px}
   .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:16px 17px}
   .cardhead{display:flex; align-items:center; gap:10px 14px; flex-wrap:wrap; margin-bottom:4px}
@@ -129,7 +131,8 @@
   </div>
 
   <!-- Rendered server-side so the figures exist in the markup a crawler receives, not only after
-       the client fetches /api/token. The client refreshes it with the same sentence. -->
+       the client fetches /api/token. The client does not rewrite it: when the figures are frozen,
+       the server writes the window they cover into the sentence instead of "the last 24 hours". -->
   <p class="ssr" id="ssrSummary">{{SSR}}</p>
 
   <div class="kpis" id="kpis"></div>
@@ -152,7 +155,7 @@
           </div>
         </div>
       </div>
-      <p class="cap" id="chartCap">Real volume = one largest transfer per transaction (routing/bot noise filtered).</p>
+      <p class="cap" id="chartCap">Real volume = one largest transfer per transaction (routing hops filtered); mints &amp; burns are issuance and not counted.</p>
       <div class="chartwrap">
         <div class="peak" id="chartPeak"></div>
         <svg id="chart" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true"></svg>
@@ -247,12 +250,38 @@ document.getElementById('canon').href='https://stabledesk.xyz'+tokenUrl(token);
 // token switcher
 $('#tokSwitch').innerHTML=TOK.map(t=>`<a href="${tokenUrl(t)}" class="${t===token?'on':''}">${t}</a>`).join('');
 
-const CAP={real:'Real volume = one largest transfer per transaction (routing/bot noise filtered).',
-  raw:'Raw volume = every Transfer event, including routing hops & bot noise.',
+const CAP={real:'Real volume = one largest transfer per transaction (routing hops filtered); mints & burns are issuance and not counted.',
+  raw:'Raw volume = every Transfer event, mints & burns, routing hops & bot noise included.',
   net:'Net issuance = mint − burn per bucket (new supply created on-chain).',
   cnt:'Transfer count per bucket.'};
 
-function renderKpis(d){
+// Durations stay readable past a minute: when the chain halts, the age of the data is the headline,
+// and "259378s ago" is not something anyone reads. Same as the terminal.
+function dur(ms){
+  const s=Math.max(0,Math.round(ms/1000));
+  if(s<60) return s+'s';
+  if(s<3600) return Math.round(s/60)+' min';
+  if(s<86400) return (s/3600).toFixed(s<7200?1:0)+' h';
+  return (s/86400).toFixed(s<172800?1:0)+' d';
+}
+// Live or frozen, said the way the terminal says it. This page used to show a green "live" whenever
+// the snapshot was valid — which it stays, by design, while the chain cannot be read — so figures days
+// old read as live, under "24h" labels. Pure, so test/figures.test.js runs it on its own.
+function freshness(d, now){
+  const ago=(ts)=>{ const s=Math.max(0,Math.round((now-ts)/1000)); return s<2?'just now':dur(now-ts)+' ago'; };
+  const c=d.chain||{};
+  const lab=c.state==='halted'?'chain halted':c.state==='unauthorized'?'rpc rejected':c.state==='unreachable'?'chain unreachable':null;
+  if(!d.ok) return { dot:'dot down', text:lab||'indexing…', meta:'', win:'24h' };
+  const frozen=!!(d.degraded||d.stale);
+  return {
+    dot: frozen?'dot stale':'dot',
+    text: lab||(frozen?'catching up':'live'),
+    meta: frozen&&d.dataAt ? 'figures as of '+ago(d.dataAt) : d.updatedAt ? 'upd. '+ago(d.updatedAt) : '',
+    // Frozen, the 24h window ends at the last indexed minute, not now.
+    win: frozen&&d.windowEnd ? '24h to '+ago(d.windowEnd) : '24h',
+  };
+}
+function renderKpis(d, win){
   const sup=d.supply||{}, sm=d.summary24h||{};
   const vel=sup.velocity?(sup.velocity<0.001?'<0.001×':(sup.velocity<1?sup.velocity.toFixed(3):sup.velocity.toFixed(1))+'×'):'—';
   const net=d.netIssuance24h;
@@ -260,15 +289,17 @@ function renderKpis(d){
   const netStr=net==null?'—':(net>0?'+':'')+compact(net);
   const sgn=(n)=>n==null||isNaN(n)?'—':(n>0?'+':'')+compact(n);
   const cls=(n)=>n>0?'pos':(n<0?'neg':'');
+  // Frozen, the window goes beside the figure, as on the terminal: "24h to 3 d ago" does not fit in a label.
+  const lab=(name)=>win==='24h'?name+' · 24h':name, unit=win==='24h'?'':win;
   const kpis=[
     ['Supply',compact(sup.supply),''],
-    ['24h real vol',compact(sup.rvolume24h),''],
+    [lab('Real vol'),compact(sup.rvolume24h),unit],
     ['Velocity',vel,''],
     ['Dominance',sup.dominance!=null?(sup.dominance*100).toFixed(1)+'%':'—',''],
-    ['Net issuance · 24h',netStr,'',netCls],
+    [lab('Net issuance'),netStr,unit,netCls],
     // The route split behind it. Only shown where CCTP is measured: a dash would read as "none".
-    ...(d.cctp?[['of which CCTP · 24h',sgn(d.cctp.net),'',cls(d.cctp.net)],
-      ['Created on Arc · 24h',net==null?'—':sgn(net-(d.cctp.net||0)-(d.gatewayNet24h||0)),'',cls(net==null?0:net-(d.cctp.net||0)-(d.gatewayNet24h||0))]]:[]),
+    ...(d.cctp?[[lab('of which CCTP'),sgn(d.cctp.net),unit,cls(d.cctp.net)],
+      [lab('Created on Arc'),net==null?'—':sgn(net-(d.cctp.net||0)-(d.gatewayNet24h||0)),unit,cls(net==null?0:net-(d.cctp.net||0)-(d.gatewayNet24h||0))]]:[]),
   ].map(([l,v,u,cls])=>`<div class="kpi"><div class="lab">${l}</div><div class="val ${cls||''}">${v}<span class="unit">${u}</span></div></div>`).join('');
   $('#kpis').innerHTML=kpis;
 }
@@ -303,10 +334,10 @@ function txRows(list){
 async function loadToken(){
   try{
     const d=await (await fetch('/api/token?token='+token,{cache:'no-store'})).json();
-    const dot=$('#statusDot'), txt=$('#statusText');
-    if(d.ok){ dot.className='dot'; txt.textContent='live'; } else { dot.className='dot down'; txt.textContent='indexing…'; }
-    $('#metaLine').textContent=d.updatedAt?('upd. '+Math.max(0,Math.round((Date.now()-d.updatedAt)/1000))+'s ago'):'';
-    renderKpis(d); renderDist(d.distribution);
+    const f=freshness(d, Date.now());
+    $('#statusDot').className=f.dot; $('#statusText').textContent=f.text;
+    $('#metaLine').textContent=f.meta;
+    renderKpis(d, f.win); renderDist(d.distribution);
     if(d.largestWindowDays) $('#ltWin').textContent=d.largestWindowDays;
     $('#largest').innerHTML=txRows(d.largest); $('#recent').innerHTML=txRows(d.recent);
   }catch(e){ $('#statusDot').className='dot down'; $('#statusText').textContent='network error'; }

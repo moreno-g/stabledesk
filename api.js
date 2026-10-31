@@ -12,7 +12,7 @@ import { search } from './search.js';
 import { CATEGORIES } from './protocols.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS, TVL_HISTORY_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
-import { BASE_DENOMINATION, RANGES, TIERS, clampLimit, alignToBucket, TOKEN_SYMBOLS, TOKEN_LIST, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
+import { BASE_DENOMINATION, RANGES, TIERS, clampLimit, alignToBucket, seriesScope, TOKEN_SYMBOLS, TOKEN_LIST, ADDR_RE, BILLING_ENABLED, BASE_CHAIN_ID, BASE_USDC, PAYMENT_RECEIVE_ADDRESS, PRO_PRICE_USD, ORDER_EXPIRY_MS } from './constants.js';
 import { validateWebhookHost } from './validate.js';
 import { CHAIN } from './chains.js';
 
@@ -290,8 +290,11 @@ export async function handleV1(req, res, u, { internal = false } = {}) {
       // address below: those are the limits it was actually judged against. `blockMs` is the only
       // input that turns a block span into days, so it is published rather than assumed.
       window: { perAddress: true, minDays: n.minWindowDays ?? 30, blockMs: n.blockMs ?? null },
+      // In the base currency, named in `excludedDenomination`; every currency in `excludedByDenomination`.
       excludedVolume24h: n.excludedVolume24h ?? null,
       excludedShare: n.excludedShare ?? null,
+      excludedDenomination: n.excludedDenomination ?? null,
+      excludedByDenomination: n.excludedByDenomination ?? null,
       addresses: n.top || [],
       note: 'An address that sent more than 1,000 transfers or $10M in 30 days is treated as infrastructure; history shorter than 30 days is held to the monthly limits whole. A transfer is excluded from adjusted volume only when both of its ends are flagged; see /methodology.',
       ...(n.atCap ? {
@@ -341,7 +344,8 @@ export async function handleV1(req, res, u, { internal = false } = {}) {
   }
 
   if (path === '/v1/stablecoins/history') {
-    const token = (u.searchParams.get('token') || 'ALL').toUpperCase();
+    // `ALL` is the base currency's tokens, never every token: see seriesScope.
+    const scope = seriesScope((u.searchParams.get('token') || 'ALL').toUpperCase());
     const r = RANGES[u.searchParams.get('range')] || RANGES['24h'];
     // Same anchoring as the internal endpoint: while the chain is frozen the range ends at the
     // last indexed minute, and `windowEnd` states which instant that is so a consumer is never
@@ -350,14 +354,14 @@ export async function handleV1(req, res, u, { internal = false } = {}) {
     // Aligned to the bucket grid, so every point returned is a complete interval inside the window.
     const since = r.span == null ? 0 : alignToBucket(endSec - r.span, r.group);
     return json(res, {
-      token, group: r.group, windowEnd: endSec * 1000,
+      token: scope.token, denomination: scope.denomination, tokens: scope.tokens, group: r.group, windowEnd: endSec * 1000,
       // Ranges past 7d are answered from the per-day rollup rather than the minute table. Stated,
       // with the instant the range asked for and where the record actually starts, so a long range is
       // never mistaken for more history than exists: `recordBegan > since` means it is truncated.
       source: r.daily ? 'daily' : 'minute',
       since,
       recordBegan: r.daily ? db.dailyRecordBegan() : (db.getCoverage().a ?? null),
-      series: db.getSeries(token, since, r.group, r.daily),
+      series: db.getSeries(scope.tokens, since, r.group, r.daily),
     }, 200, H);
   }
 
@@ -466,14 +470,24 @@ export async function handleV1(req, res, u, { internal = false } = {}) {
 
   if (path === '/v1/addresses/top') {
     const limit = clampLimit(u.searchParams.get('limit'), 100, 20);
-    // The ranking reads addr_stats, which prune() keeps to a rolling ~7 days — so this is the top of
-    // the week, not of all time, and an integrator reading it as an all-time ranking would build on
-    // a claim this API never made. /v1/transfers/largest already states its window for exactly this
-    // reason; this endpoint just never got the same treatment.
+    // Ranked from the per-day table, over the window the protocol pages use for "moved". It used to
+    // rank addr_stats under `windowDays: 7`, and addr_stats only forgets an address after a week without
+    // activity: for a busy one it held everything since it was first seen, every token added together.
+    // `windowDays` is now the number of UTC days actually covered, up to the newest indexed minute (`to`).
+    const t = tvl.topMoved(limit);
+    const day = (ms) => new Date(ms).toISOString().slice(0, 10);
     return json(res, {
-      windowDays: 7,
-      note: 'Ranked over a rolling ~7-day window (the address-activity retention), not all time.',
-      top: db.getTop(limit).map((x) => ({ ...x, label: getLabel(x.address)?.name || null })),
+      denomination: t.denomination,
+      windowDays: t.windowDays,
+      moved: { since: t.since, to: t.to, began: t.began, complete: t.complete, days: t.days },
+      computedAt: t.computedAt,
+      note: `Ranked by ${t.denomination} stablecoin volume moved in and out (received + sent) over the UTC days ${day(t.since)} to ${day(t.to)},`
+        + ' the last one ending at the newest indexed minute'
+        + `${t.complete ? '' : t.began != null && day(t.began) !== day(t.since)
+          ? `; daily counting began on ${day(t.began)}, after the newest indexed day, so only that day is ranked`
+          : `; daily counting began during ${day(t.since)}, so this is less than ${t.days} full days`}.`
+        + ' Other currencies are listed per address, unranked; transfers count every token. Recomputed every few minutes (computedAt).',
+      top: t.top,
     }, 200, H);
   }
 
