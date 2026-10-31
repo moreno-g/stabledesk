@@ -18,6 +18,7 @@ import * as chainuptime from './chainuptime.js';
 import * as whalewatch from './whalewatch.js';
 import { search } from './search.js';
 import { CATEGORIES, PROTOCOLS, protocolById } from './protocols.js';
+import { REPORTS, reportBySlug, reportBody, networkLabel, windowLabel, publishedLabel, indexBody, jsonLd } from './reports.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
@@ -149,7 +150,10 @@ const escAttr = (s) => String(s == null ? '' : s)
   .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
   .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 
-async function serveTemplated(req, res, name, key, vars) {
+// `raw` is markup the repo itself ships (a report body), inserted unescaped and after `vars`, so
+// nothing inside it can be read as a placeholder. Replacements are functions, not strings: a string
+// replacement gives "$&" and "$$" special meaning, and a report is full of dollar amounts.
+async function serveTemplated(req, res, name, key, vars, raw = {}) {
   const ck = name + '|' + key;
   let p = pageCache.get(ck);
   if (!p || p.expires < Date.now()) {
@@ -157,7 +161,8 @@ async function serveTemplated(req, res, name, key, vars) {
       // loadAsset has already applied the network profile, so {{NET}} etc. are resolved.
       const base = await loadAsset(name, 'text/html; charset=utf-8');
       let html = base.buf.toString('utf8');
-      for (const [k, v] of Object.entries(vars)) html = html.replaceAll('{{' + k + '}}', escAttr(v));
+      for (const [k, v] of Object.entries(vars)) html = html.replaceAll('{{' + k + '}}', () => escAttr(v));
+      for (const [k, v] of Object.entries(raw)) html = html.replaceAll('{{' + k + '}}', () => v);
       const buf = Buffer.from(html, 'utf8');
       p = {
         buf,
@@ -513,6 +518,8 @@ async function handle(req, res) {
       url('/ecosystem', 'daily', '0.9'),
       url('/docs', 'weekly', '0.8'),
       url('/methodology', 'monthly', '0.6'),
+      url('/reports', 'weekly', '0.7'),
+      ...REPORTS.map((r) => url(`/reports/${r.slug}`, 'yearly', '0.6')),
       ...[...TOKEN_SYMBOLS].map((s) => url(`/token/${s.toLowerCase()}`, 'daily', '0.8')),
       ...PROTOCOLS.map((p) => url(`/protocol/${p.id}`, 'daily', '0.7')),
       '</urlset>', ''].join('\n');
@@ -567,6 +574,50 @@ async function handle(req, res) {
   // itself reports "disabled" when /api/entities 404s. A dead link is worse than an honest one.
   if (path === '/entities' || path === '/entities.html') return serveFile(req, res, 'entities.html');
   if (path === '/ecosystem' || path === '/ecosystem.html') return serveFile(req, res, 'ecosystem.html');
+
+  // ---- weekly reports: dated and frozen, one indexable page each (see reports.js) ----
+  // The network on these pages is the one each report was measured on, not the active profile.
+  if (path === '/reports' || path === '/reports/') {
+    return serveTemplated(req, res, 'report.html', 'index', {
+      TITLE: 'Weekly reports — USDC on Arc, measured · Stabledesk',
+      DESCRIPTION: 'One dated report a week on stablecoins on Arc: supply checked on-chain, cross-chain flows, '
+        + 'and volume under three published measures. Every figure reproducible from the public API.',
+      CANONICAL: 'https://stabledesk.xyz/reports',
+      OG_TYPE: 'website',
+      OG_TITLE: 'Weekly reports · Stabledesk',
+      OG_DESC: 'Stablecoins on Arc, one dated week at a time — every figure reproducible.',
+      ROBOTS: 'index, follow',
+      H1: 'Weekly reports',
+    }, {
+      JSONLD: jsonLd(SITE_ORIGIN),
+      CRUMB: '<a href="/">← Terminal</a>',
+      SUB: 'One week of stablecoins on Arc per report: seven complete UTC days, the last seven before publication. '
+        + 'Figures are frozen when a report ships; definitions are on <a href="/methodology">/methodology</a>.',
+      BODY: indexBody(),
+    });
+  }
+  const reportMatch = /^\/reports\/(\d{4}-\d{2}-\d{2})$/.exec(path);
+  if (reportMatch) {
+    const r = reportBySlug(reportMatch[1]);
+    const body = r && await reportBody(r);
+    if (!body) return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404);
+    const net = networkLabel(r);
+    return serveTemplated(req, res, 'report.html', r.slug, {
+      TITLE: `${r.title} — ${windowLabel(r)} · Stabledesk`,
+      DESCRIPTION: r.summary,
+      CANONICAL: `https://stabledesk.xyz/reports/${r.slug}`,
+      OG_TYPE: 'article',
+      OG_TITLE: `${r.title} · ${net}, ${windowLabel(r)}`,
+      OG_DESC: r.summary,
+      ROBOTS: 'index, follow',
+      H1: r.title,
+    }, {
+      JSONLD: jsonLd(SITE_ORIGIN, r),
+      CRUMB: '<a href="/reports">← Reports</a>',
+      SUB: `<span class="badge">${net} · chain ${r.chainId}</span> Week of ${windowLabel(r)}, UTC · published ${publishedLabel(r)}`,
+      BODY: body,
+    });
+  }
 
   // ---- one indexable page per protocol ----
   const protoMatch = /^\/protocol\/([a-z0-9-]{1,40})$/.exec(path);

@@ -1391,6 +1391,7 @@ reports its sample size.
 
 - [Terminal](${SITE_ORIGIN}/): live supply, volume, fee economics and largest transfers
 - [Ecosystem](${SITE_ORIGIN}/ecosystem): every protocol with measured TVL, flow and status
+- [Weekly reports](${SITE_ORIGIN}/reports): one dated week per report — supply checked on-chain, cross-chain flows, volume under three measures
 - [Entities](${SITE_ORIGIN}/entities): derived attributes for the addresses carrying most flow
 - [Status](${SITE_ORIGIN}/status): chain and indexer health
 
