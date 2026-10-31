@@ -1973,7 +1973,7 @@ test('the logo is served as files: a real ICO and PNGs of the stated sizes, decl
   assert.deepEqual(png(file('apple-touch-icon.png')), { png: true, w: 180, h: 180 });
 
   // Declared beside the inline SVG in every page, so whatever reads the HTML finds a real URL.
-  for (const p of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy', '404']) {
+  for (const p of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy', '404', 'report']) {
     const html = readFileSync(join(root, 'public', `${p}.html`), 'utf8');
     assert.match(html, /<link rel="icon" href="\/favicon\.ico"/, `${p}.html declares /favicon.ico`);
     assert.match(html, /<link rel="apple-touch-icon" href="\/apple-touch-icon\.png">/, `${p}.html declares the touch icon`);
@@ -2899,7 +2899,7 @@ test('the privacy page is served, linked from every footer, and its storage clai
   const server = read('server.js');
   assert.match(server, /path === '\/privacy'/, 'routed');
   assert.match(server, /url\('\/privacy'/, 'listed in the sitemap');
-  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities']) {
+  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'report']) {
     assert.match(read('public', `${f}.html`), /href="\/privacy"/, `${f}.html links the privacy page from its footer`);
   }
   assert.match(page, /mailto:/, 'a way to reach the operator');
@@ -2916,7 +2916,125 @@ test('the privacy page is served, linked from every footer, and its storage clai
 
   // "Sets no cookies": nothing in the server writes one, and no page script does.
   for (const f of ['server.js', 'api.js']) assert.doesNotMatch(read(f), /set-cookie/i, `${f} sets no cookie`);
-  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy']) {
+  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy', 'report']) {
     assert.doesNotMatch(read('public', `${f}.html`), /document\.cookie/, `${f}.html writes no cookie`);
+  }
+});
+
+// ---- weekly reports (reports.js, /reports) ----
+// A report is a dated record, not a live page: its figures are frozen in its file and its network is
+// the one it was measured on. These pin what makes it checkable — a fixed seven-day window that had
+// ended before publication, a network label derived from a known chain id and written next to the
+// figures, and a body that actually ships in the image.
+test('every weekly report is a complete seven-day UTC window on a known network, and its body ships', async () => {
+  const { REPORTS, networkLabel, windowLabel, jsonLd } = await import('../reports.js');
+  assert.ok(REPORTS.length > 0);
+  const ISO = /^\d{4}-\d{2}-\d{2}$/;
+  const slugs = new Set();
+  let previous = null;
+  for (const r of REPORTS) {
+    for (const k of ['from', 'to', 'published']) assert.match(r[k], ISO, `${r.slug}.${k}`);
+    assert.equal(r.slug, r.to, 'the slug is the last day of the window');
+    assert.equal(Date.parse(r.to) - Date.parse(r.from), 6 * 86400e3, `${r.slug}: seven days, both ends inclusive`);
+    assert.ok(r.published > r.to, `${r.slug}: published after the window closed, never during it`);
+    assert.ok(!slugs.has(r.slug), `${r.slug} listed twice`); slugs.add(r.slug);
+    if (previous) assert.ok(r.to < previous, 'newest first');
+    previous = r.to;
+
+    const net = networkLabel(r);
+    assert.ok(net, `${r.slug}: chain id ${r.chainId} has no network label`);
+    const body = readFileSync(join(import.meta.dirname, '..', 'reports', `${r.slug}.html`), 'utf8');
+    // The body is served as written. A placeholder in it would reach readers as "{{NET}}" — or, worse,
+    // be resolved against whichever profile the server happens to run.
+    assert.ok(!body.includes('{{'), `${r.slug}: the body is frozen, it carries no placeholders`);
+    assert.ok(!body.includes('testnet-only'), `${r.slug}: no network directives in a frozen body`);
+    assert.ok(body.includes(net), `${r.slug}: the network label is written next to the figures`);
+  }
+
+  // Every page links the reports from its footer, including pages added after them.
+  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy', 'report']) {
+    assert.match(readFileSync(join(import.meta.dirname, '..', 'public', `${f}.html`), 'utf8'), /href="\/reports"/, `${f}.html links /reports from its footer`);
+  }
+
+  // The image copies *.js and public/ only; a report body anywhere else has to be named.
+  assert.match(readFileSync(join(import.meta.dirname, '..', 'Dockerfile'), 'utf8'), /^COPY reports \.\/reports$/m);
+
+  assert.equal(windowLabel({ from: '2026-10-23', to: '2026-10-29' }), '23–29 Oct 2026');
+  assert.equal(windowLabel({ from: '2026-09-28', to: '2026-10-04' }), '28 Sept – 4 Oct 2026');
+  assert.equal(windowLabel({ from: '2026-12-28', to: '2027-01-03' }), '28 Dec 2026 – 3 Jan 2027');
+
+  // JSON-LD sits inside <script>, where HTML escaping does not apply: "<" must not survive raw.
+  const ld = jsonLd('https://stabledesk.xyz', { ...REPORTS[0], title: '</script><script>alert(1)</script>' });
+  assert.ok(!ld.includes('</script'), 'a value cannot close the script element');
+  assert.equal(JSON.parse(ld)['@graph'][1].headline, '</script><script>alert(1)</script>', 'and the JSON still says what it said');
+});
+
+test('/reports serves each report under its own network, with dollar amounts intact', async () => {
+  const { spawn } = await import('node:child_process');
+  const { once } = await import('node:events');
+  const { rmSync } = await import('node:fs');
+  const http = await import('node:http');
+  const net = await import('node:net');
+  const { REPORTS } = await import('../reports.js');
+
+  const port = await new Promise((resolve) => {
+    const probe = net.createServer().listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+  const dbPath = join(tmpdir(), `stabledesk-test-reports-${process.pid}-${Date.now()}.db`);
+  // ARC_NETWORK is empty, so this server runs the testnet profile while serving a mainnet report.
+  const child = spawn(process.execPath, ['--import', OFFLINE, 'server.js'], {
+    cwd: join(import.meta.dirname, '..'),
+    env: {
+      ...process.env, PORT: String(port), DB_PATH: dbPath, ARC_NETWORK: '', ADMIN_TOKEN: '',
+      TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '',
+      TVL_ENABLED: 'false', ENTITIES_ENABLED: 'false', WATCH_ENABLED: 'false', WHALEWATCH_ENABLED: 'false', BILLING_ENABLED: 'false',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const closed = once(child, 'close');
+  let out = '';
+  child.stdout.on('data', (c) => { out += c; });
+  child.stderr.on('data', (c) => { out += c; });
+
+  const get = (path) => new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    }).on('error', reject);
+  });
+
+  try {
+    for (let i = 0; i < 200 && !out.includes('Stabledesk →'); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(out.includes('Stabledesk →'), `the server did not start:\n${out}`);
+
+    const r = REPORTS.find((x) => x.slug === '2026-10-29');
+    const index = await get('/reports');
+    assert.equal(index.status, 200);
+    assert.ok(index.body.includes(`href="/reports/${r.slug}"`), 'the index links every report');
+
+    const page = await get(`/reports/${r.slug}`);
+    assert.equal(page.status, 200);
+    assert.ok(!page.body.includes('{{'), 'every placeholder is resolved');
+    assert.match(page.body, /Arc mainnet · chain 5042/, 'labelled with the network it was measured on, not the server\'s');
+    assert.ok(!/Arc testnet/.test(page.body), 'and nothing on it borrows the active testnet profile');
+    // String replacement gives "$&" and "$$" meaning; the title and body are full of dollar amounts.
+    assert.ok(page.body.includes('closed above $1B for the first time'), 'dollar amounts reach the page as written');
+    assert.ok(page.body.includes('1,009.8M'));
+    assert.match(page.body, /<link rel="canonical" href="https:\/\/stabledesk\.xyz\/reports\/2026-10-29">/);
+
+    assert.equal((await get('/reports/2026-10-30')).status, 404, 'an unlisted week is a real 404');
+    assert.equal((await get('/reports/../server.js')).status, 404);
+    assert.ok((await get('/sitemap.xml')).body.includes(`/reports/${r.slug}</loc>`), 'listed for crawlers');
+  } finally {
+    child.kill('SIGTERM');
+    const stuck = setTimeout(() => child.kill('SIGKILL'), 5000);
+    await closed;
+    clearTimeout(stuck);
+    for (const ext of ['', '-wal', '-shm']) rmSync(dbPath + ext, { force: true });
   }
 });

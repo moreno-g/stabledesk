@@ -1,0 +1,61 @@
+  <p class="lead">USDC on Arc mainnet closed above $1B for the first time on 27 October: <strong>1,009.8M</strong> at the last block of the day (UTC). On 30 September it was 458.9M. It has more than doubled in four weeks.</p>
+
+  <h2>Supply</h2>
+  <div class="card">
+    <p>Over the week, supply went from 820.5M to 1,073.2M: <strong>+252.7M</strong>. No day since launch on 15–16 September had closed above $1B; the highest close before was 979.8M, on 26 October.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>End of day (UTC)</th><th class="num">USDC supply</th><th class="num">Block</th></tr></thead>
+      <tbody>
+        <tr><td>30 Sept</td><td class="num">458.9M</td><td class="num">23,620,687</td></tr>
+        <tr><td>22 Oct</td><td class="num">820.5M</td><td class="num">27,365,027</td></tr>
+        <tr><td>27 Oct</td><td class="num">1,009.8M</td><td class="num">28,217,163</td></tr>
+        <tr><td>28 Oct</td><td class="num">1,092.6M</td><td class="num">28,387,592</td></tr>
+        <tr><td>29 Oct</td><td class="num">1,073.2M</td><td class="num">28,558,018</td></tr>
+      </tbody>
+    </table></div>
+    <p>Each figure is <code>totalSupply()</code> on the USDC contract <code>0x3600000000000000000000000000000000000000</code>, read at the stated block: the last block before midnight UTC. The series rebuilt from <code>/v1</code> — current supply minus every later net mint — matches the chain within 0.1M at every point checked.</p>
+  </div>
+
+  <h2>What moved it</h2>
+  <div class="card">
+    <div class="tbl"><table>
+      <thead><tr><th>Route, 23–29 Oct</th><th class="num">In</th><th class="num">Out</th><th class="num">Net</th></tr></thead>
+      <tbody>
+        <tr><td>CCTP</td><td class="num">528.8M</td><td class="num">110.7M</td><td class="num">+418.1M</td></tr>
+        <tr><td>Circle Gateway</td><td class="num">2.3M</td><td class="num">354.4M</td><td class="num">−352.1M</td></tr>
+        <tr><td>Organic issuance</td><td class="num">926.5M</td><td class="num">739.8M</td><td class="num">+186.7M</td></tr>
+        <tr><td>Total</td><td class="num"></td><td class="num"></td><td class="num"><strong>+252.7M</strong></td></tr>
+      </tbody>
+    </table></div>
+    <p>A CCTP or Gateway mint is not issuance: the same dollars changed chains. The two cross-chain routes pulled in opposite directions and netted <strong>+66.0M</strong>. Organic issuance — USDC created or destroyed on Arc itself, once both routes are taken out — added <strong>+186.7M</strong>, 74% of the week's growth. How each route is attributed: <a href="/methodology">Bridged liquidity vs. issuance</a>.</p>
+  </div>
+
+  <h2>Volume: three measures, three directions</h2>
+  <div class="card">
+    <div class="tbl"><table>
+      <thead><tr><th>USDC</th><th class="num">16–22 Oct</th><th class="num">23–29 Oct</th><th class="num">Change</th></tr></thead>
+      <tbody>
+        <tr><td>Raw</td><td class="num">2,990.5M</td><td class="num">4,185.4M</td><td class="num">+40.0%</td></tr>
+        <tr><td>Real</td><td class="num">1,253.1M</td><td class="num">1,343.3M</td><td class="num">+7.2%</td></tr>
+        <tr><td>Adjusted</td><td class="num">548.1M</td><td class="num">335.8M</td><td class="num">−38.7%</td></tr>
+        <tr><td>Transfer events</td><td class="num">1,148,835</td><td class="num">919,257</td><td class="num">−20.0%</td></tr>
+      </tbody>
+    </table></div>
+    <p><strong>Raw</strong> counts every Transfer event. <strong>Real</strong> keeps the largest transfer per transaction, per token, so routing hops and contract internals are not counted twice. <strong>Adjusted</strong> is real volume minus transfers where both ends are infrastructure. Same chain, same week: raw volume rose by 40% while the number of transfers fell by 20%, and adjusted volume fell.</p>
+    <p>The infrastructure filter was not capped this week — 271 addresses qualified and all 271 were flagged, against a cap of 20,000 — so the fall in adjusted volume follows from the published rule, not from a limit. Definitions and thresholds: <a href="/methodology">methodology</a>.</p>
+  </div>
+
+  <h2>Reproduce</h2>
+  <div class="card">
+    <p>Flows and volumes, in daily UTC buckets (free key on <a href="/docs">/docs</a>):</p>
+    <p><code>GET /v1/stablecoins/history?token=USDC&amp;range=30d</code></p>
+    <p>Each bucket carries <code>volume</code>, <code>rvolume</code>, <code>avolume</code>, <code>mint</code> and <code>burn</code>; the CCTP and Gateway parts are <code>cmint</code>/<code>cburn</code> and <code>bmint</code>/<code>bburn</code>. Organic issuance is <code>mint − cmint − bmint</code> against <code>burn − cburn − bburn</code>. Supply needs no key: call <code>totalSupply()</code> on the USDC contract at the blocks above, on any Arc mainnet RPC.</p>
+  </div>
+
+  <h2>Limits</h2>
+  <div class="note">
+    Volumes and flows come from Stabledesk's index; supply is checked against the chain, flows and volumes are not re-read independently for this report.
+    CCTP by counterparty chain is not shown: <code>/v1/cctp</code> serves rolling 24h and 7d windows only, so a fixed week could not be reproduced later.
+    EURC, GBPA and USYC are not covered. Figures were read on 30 October 2026 at about 17:20 UTC; if the index is corrected later, the correction is dated on the methodology page and this report is not edited silently.
+    Not investment advice.
+  </div>

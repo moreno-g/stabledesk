@@ -11,6 +11,8 @@ ENV NODE_ENV=production \
 COPY package.json ./
 COPY *.js ./
 COPY public ./public
+# Weekly report bodies (reports.js) — without this line /reports/<slug> 404s in production.
+COPY reports ./reports
 
 RUN mkdir -p /app/data
 
