@@ -8,7 +8,7 @@ Public, MIT, `moreno-g/stabledesk` → [stabledesk.xyz](https://stabledesk.xyz)
 ## Commandes
 
 ```
-npm test     # node --test → test/smoke.test.js + test/weekly-report.test.js (120 tests, aucun réseau)
+npm test     # node --test → test/smoke.test.js + test/weekly-report.test.js + test/retention.test.js (127 tests, aucun réseau)
 npm start    # node server.js, port 4317
 node scripts/weekly-report.mjs   # brouillon du rapport hebdo, le jour de publication ; ne publie rien
 ```
