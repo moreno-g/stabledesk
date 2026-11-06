@@ -166,8 +166,8 @@
     to 5&nbsp;November. The set is recomputed every minute, so every address with more than about a month of sent history had its limits
     move by up to 14% from one minute to the next, and the flag set moved with them: <strong>229, 242 or 256</strong> addresses
     qualified on Arc mainnet between 08:50 and 10:10 UTC on 6&nbsp;November. Spans are now converted at the average block time between
-    the first block of sent history and the head, read off those two headers: 507.5&nbsp;ms that day, over 6.8 million blocks, where a
-    second of rounding is worth under 0.0002&nbsp;ms. The set now moves with what addresses send, not with the rounding. <code>blockMs</code>, published
+    the first block of sent history and the head, read off those two headers: 507.5&nbsp;ms that day, over the 6.8 million blocks since
+    27&nbsp;September rather than the week quoted above, and over that span a second of rounding is worth under 0.0002&nbsp;ms. The set now moves with what addresses send, not with the rounding. <code>blockMs</code>, published
     beside the set, was the newest sample, not necessarily the one the set had been computed at; it is now the value the set was computed at,
     and <code>blockMsMeasured</code> names the two blocks it was measured between, so it can be recomputed from their headers. Adjusted
     volume is classified against the set in force as each minute is indexed: minutes indexed before the correction keep the set of their
