@@ -9,3 +9,6 @@ arc-mainnet.db-shm
 
 # Claude Code — réglages personnels, pas partagés
 .claude/settings.local.json
+
+# Notes de brouillon du rapport hebdo (scripts/weekly-report.mjs) — à lire, pas à commiter
+reports/*.draft.md
