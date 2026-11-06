@@ -1,0 +1,109 @@
+# Fridays: draft the weekly report and open it as a draft pull request. It drafts and stops there.
+#
+# scripts/weekly-report.mjs reads the week's USDC series (the public MCP connector, or /v1 when the
+# STABLEDESK_API_KEY secret is set) and USDC's totalSupply() on Arc, checks one against the other, and
+# writes reports/<slug>.html with {{LEAD}} left for a person to write. This workflow commits that body
+# to a branch of its own and opens a draft PR whose description is the draft's notes: checks, candidates
+# for the title and the lead, records, the registry entry and the X thread. Nothing is merged,
+# published or posted: the report stays manual, as COMMS.md has it.
+#
+# Opening the PR needs "Allow GitHub Actions to create and approve pull requests" (Settings → Actions →
+# General → Workflow permissions). Without it the draft branch is still there, and the run fails with
+# the link that opens the PR by hand.
+#
+# On a pull request that changes the generator, the same draft is made as a dry run: live, for the
+# latest week, into a scratch folder, nothing pushed, the notes shown in the run's summary. The tests
+# replay a recording; this is the check that the live sources still answer the way it did.
+
+name: Weekly report draft
+
+on:
+  schedule:
+    # Fridays at 05:17 UTC: the week closed at midnight. Off the hour, where GitHub's scheduler is least late.
+    - cron: '17 5 * * 5'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Publication date, YYYY-MM-DD; empty for today (UTC). The week is the seven days before it.'
+        required: false
+        default: ''
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/weekly-report.yml'
+      - 'scripts/weekly*.mjs'
+
+jobs:
+  draft:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: weekly-report-draft
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+      - name: Draft the report and open it as a draft PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLEDESK_API_KEY: ${{ secrets.STABLEDESK_API_KEY }}
+          DATE: ${{ inputs.date }}
+          REPO: ${{ github.repository }}
+        run: |
+          published="${DATE:-$(date -u +%F)}"
+          if ! [[ "$published" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then echo "::error::not a date: $published"; exit 1; fi
+          slug="$(node -p 'new Date(Date.parse(process.argv[1]) - 864e5).toISOString().slice(0, 10)' "$published")"
+          branch="weekly-report/$slug"
+          # Run again, the job finds its own work and stops.
+          if [ -e "reports/$slug.html" ]; then echo "::notice::reports/$slug.html is already on main: nothing to draft."; exit 0; fi
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then echo "::notice::$branch exists: the draft is there."; exit 0; fi
+
+          # Exit 1: nothing drafted, and the log says why (most often: the index has not measured the
+          # whole of the last day yet; run it again by hand). Exit 2: drafted, but a check failed, and
+          # the body says which in a {{…}} that keeps the report from being listed as it is.
+          code=0
+          node scripts/weekly-report.mjs --date "$published" || code=$?
+          if [ "$code" = 1 ]; then exit 1; fi
+          npm test
+
+          git switch -c "$branch"
+          git add "reports/$slug.html"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Draft the weekly report for the week ending $slug"
+          git push -q origin "$branch"
+
+          notes="reports/$slug.draft.md"
+          cat "$notes" >> "$GITHUB_STEP_SUMMARY"
+          title="$(head -n 1 "$notes" | sed 's/^# //')"
+          if [ "$code" = 2 ]; then title="$title (supply check failed)"; fi
+          if ! gh pr create --draft --base main --head "$branch" --title "$title" --body-file "$notes"; then
+            echo "::error::The draft is on $branch, but the PR could not be opened. Allow GitHub Actions to create pull requests (Settings → Actions → General), or open it from https://github.com/$REPO/compare/main...$branch?expand=1"
+            exit 1
+          fi
+
+  dry-run:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+      - name: Draft the latest week, live, into a scratch folder
+        run: |
+          published="$(date -u +%F)"
+          slug="$(node -p 'new Date(Date.parse(process.argv[1]) - 864e5).toISOString().slice(0, 10)' "$published")"
+          code=0
+          node scripts/weekly-report.mjs --date "$published" --out "$RUNNER_TEMP/draft" || code=$?
+          if [ "$code" = 1 ]; then exit 1; fi
+          cat "$RUNNER_TEMP/draft/$slug.draft.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" = 2 ]; then echo "::warning::The supply check failed for the week ending $slug: see the summary."; fi

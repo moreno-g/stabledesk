@@ -6,3 +6,4 @@ arc.db-shm
 .claude
 .DS_Store
 scratchpad
+reports/*.draft.md

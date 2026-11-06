@@ -8,8 +8,9 @@ Public, MIT, `moreno-g/stabledesk` → [stabledesk.xyz](https://stabledesk.xyz)
 ## Commandes
 
 ```
-npm test     # node --test → test/smoke.test.js (102 tests, aucun réseau)
+npm test     # node --test → test/smoke.test.js + test/weekly-report.test.js (120 tests, aucun réseau)
 npm start    # node server.js, port 4317
+node scripts/weekly-report.mjs   # brouillon du rapport hebdo, le jour de publication ; ne publie rien
 ```
 
 Node **≥ 22.5.0** (obligatoire : `node:sqlite`). Zéro dépendance npm, ESM, `fetch` natif.
@@ -27,6 +28,7 @@ Node **≥ 22.5.0** (obligatoire : `node:sqlite`). Zéro dépendance npm, ESM, `
 | `mcp.js` | Endpoint MCP `/mcp` pour les assistants IA : outils en lecture seule, sans clé. **Lit `/v1` en interne** (`handleV1(..., { internal: true })`) : aucun chiffre n'y est recalculé. Sert MCP 2026-07-28 et les révisions antérieures (`initialize`). Pas d'outil par adresse, volontairement. |
 | `rankings.js` `tvl.js` `entities.js` `protocols.js` | Métriques et registres. `entities.js` est **expérimental**. |
 | `reports.js` + `reports/` | Rapports hebdo `/reports` : registre, fenêtre de 7 jours UTC, corps HTML figés (copiés dans l'image par le Dockerfile). |
+| `scripts/weekly-report.mjs` | Brouillon du rapport hebdo. Lit la série USDC (connecteur MCP sans clé, ou `/v1` si `STABLEDESK_API_KEY`) et `totalSupply()` à la clôture de chaque jour sur le RPC Arc, vérifie Δ supply = mint − burn. Écrit `reports/<slug>.html` (avec `{{LEAD}}`) et `reports/<slug>.draft.md` (ignoré par git) : candidats, records, entrée du registre, fil X. Calculs dans `scripts/weekly.mjs` (purs) et `scripts/weekly-chain.mjs` (RPC). Exemple rejouable hors réseau : `test/fixtures/weekly-2026-11-06/`. Lancé le vendredi à 05:17 UTC par `.github/workflows/weekly-report.yml`, qui pousse le brouillon sur `weekly-report/<slug>` et ouvre une PR en brouillon avec les notes en description (il faut « Allow GitHub Actions to create and approve pull requests ») ; sur une PR qui touche le générateur, le même workflow fait un essai à blanc en direct. |
 | `whalewatch.js` `chainalert.js` `chainuptime.js` `telegram.js` | Alertes et disponibilité. `whalewatch` est en réserve jusqu'au mainnet. |
 | `payments.js` | Facturation crypto : surveille l'USDC sur **Base mainnet**, pas sur Arc. |
 | `csv.js` `openapi.js` `validate.js` `constants.js` `search.js` `labels.js` `template.js` | Surface API et helpers. `template.js` remplit les pages (`{{KEY}}`) : remplacements par fonctions, à cause des `$`. |
@@ -41,6 +43,9 @@ Node **≥ 22.5.0** (obligatoire : `node:sqlite`). Zéro dépendance npm, ESM, `
   étape de filtrage soit auditable, pas asserted.
 - Les frais se lisent dans les receipts (le gas sur Arc est en USDC) : **pas de price feed, pas
   d'oracle**. Ne pas en introduire.
+- **Rapport hebdo : le générateur rédige, une personne choisit.** Le titre, le chapeau et le résumé ne sont pas
+  générés ; le brouillon liste les candidats avec leurs chiffres. Un chiffre du titre ou du résumé s'écrit comme
+  dans le corps, même décimale (test dans `test/weekly-report.test.js`). Rien n'est publié ni posté automatiquement.
 - Circle Gateway repositionne de la liquidité — ce n'est **pas** de l'émission. Voir le commentaire
   dans `chains.js`. Même règle pour **CCTP** (burn sur une chaîne, mint sur l'autre) : attribué par
   transaction, publié à part (`cmint`/`cburn`, `/v1/cctp`), retiré de l'émission organique.
