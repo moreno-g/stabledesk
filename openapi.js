@@ -1171,6 +1171,11 @@ function build() {
             sentHistorySince: num('ms. How far back sent history reaches. Under 30 days, fewer addresses reach the monthly limits than will once a month is held, so adjusted volume sits above where it settles.'),
             seeding: { type: 'boolean', description: 'True while sent history the RPC still serves is being re-read after the rule change.' },
             ruleSince: num('ms. When the sent / monthly rule took effect; minutes indexed before it were scored under the previous daily-rate rule and are not restated.'),
+            blockMsMeasured: {
+              type: ['object', 'null'],
+              description: 'The two blocks `window.blockMs` was measured between: the first block of sent history (or, where the RPC no longer serves that header, the oldest one read at boot) and the head when the set was last recomputed. Their timestamps give `blockMs` back. Null until a measure exists, while the set is converted at the live 15-header sample. Since 6 Nov 2026.',
+              properties: { fromBlock: { type: 'integer' }, toBlock: { type: 'integer' } },
+            },
             window: {
               type: 'object',
               description: [
@@ -1182,7 +1187,7 @@ function build() {
               properties: {
                 perAddress: { type: 'boolean', description: 'Always true. Present so a client written against the old chain-wide window fails loudly rather than reading undefined.' },
                 minDays: { type: 'number', description: 'Floor on an address\'s window: 30 days, the rule\'s own period. Sent history shorter than that is judged against the monthly limits whole.' },
-                blockMs: { type: ['number', 'null'], description: 'Measured average block time, used to convert a block span into days.' },
+                blockMs: { type: ['number', 'null'], description: 'Average block time between the two blocks in `blockMsMeasured`, used to convert a block span into days: the value the addresses below were judged at. Until 6 Nov 2026 the set was converted at a 15-header sample (428.6, 500 or 571.4 ms on Arc mainnet), and this field carried the newest sample, not necessarily the one the set had been computed at.' },
               },
             },
             excludedVolume24h: num('Real volume dropped from adjusted, over 24h.'),

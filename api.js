@@ -285,6 +285,8 @@ export async function handleV1(req, res, u, { internal = false } = {}) {
       sentHistorySince: n.sentHistorySince ?? null,
       seeding: !!n.seeding,
       ruleSince: n.ruleSince ?? null,
+      // The two blocks `window.blockMs` was measured between, so it can be redone from their headers.
+      blockMsMeasured: n.blockMsMeasured ?? null,
       // Each address is measured over its own observed span — first block seen to last — so there is
       // no single window to report here. `windowDays`, `maxTransfers` and `maxVolume` ride on each
       // address below: those are the limits it was actually judged against. `blockMs` is the only
