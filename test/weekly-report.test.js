@@ -380,6 +380,23 @@ test('drafted for each of the 39 weeks the recording covers, every draft holds t
   assert.ok(seen.mbShare.has('rise') && seen.mbShare.has(null), [...seen.mbShare].join());
 });
 
+test('the Friday workflow drafts and stops there: a draft PR from a branch of its own, never main, never a post', () => {
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'weekly-report.yml'), 'utf8');
+  assert.match(wf, /- cron: '\d{1,2} \d{1,2} \* \* 5'/, 'on Fridays, once the week has closed at midnight UTC');
+  assert.match(wf, /node scripts\/weekly-report\.mjs --date "\$published" \|\| code=\$\?/);
+  assert.match(wf, /branch="weekly-report\/\$slug"/);
+  assert.match(wf, /gh pr create --draft --base main --head "\$branch"/, 'opened as a draft, from its own branch');
+  assert.equal((wf.match(/git push/g) || []).length, 1);
+  assert.match(wf, /git push -q origin "\$branch"$/m, 'the one push is the draft branch');
+  assert.doesNotMatch(wf, /gh pr (merge|ready|review)|--admin|auto-?merge/i, 'nothing merges it or marks it ready');
+  assert.doesNotMatch(wf, /api\.(twitter|x)\.com|X_POSTING|TELEGRAM/i, 'nothing is posted');
+  // Pull requests that change the generator get a live dry run, which can write nothing.
+  const dry = wf.slice(wf.indexOf('\n  dry-run:'));
+  assert.match(dry, /permissions:\n\s+contents: read\n/);
+  assert.doesNotMatch(dry, /git push|gh pr|secrets\./);
+  assert.match(dry, /--out "\$RUNNER_TEMP\/draft"/);
+});
+
 test('a listed report carries no placeholder, and its title and summary quote only figures its body prints', () => {
   for (const r of REPORTS) {
     for (const k of ['title', 'summary']) assert.ok(!r[k].includes('{{'), `${r.slug}: the ${k} is still a placeholder`);

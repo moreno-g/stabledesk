@@ -12,6 +12,7 @@
 //   reports/<slug>.draft.md   checks, candidates, records, the registry entry, the X thread (gitignored)
 //
 // Nothing is published, committed or posted, and no API key is ever created.
+// On Fridays, .github/workflows/weekly-report.yml runs it and opens the draft as a draft pull request.
 //
 //   --date YYYY-MM-DD   publication date (default: today, UTC); the window is the seven days before it
 //   --out DIR           where to write the draft (default: reports/)
