@@ -21,7 +21,7 @@ import {
   renderNotes, reportWindow, rollingWeeks, sumWindow, supplyChecks, supplyReadDays, thread, unmatchedFigures, usd, usdSigned, weekFigures,
   xLength, X_LIMIT,
 } from '../scripts/weekly.mjs';
-import { chainReader, dayCloser, lastBlockBefore, makeRpc, replayFetch } from '../scripts/weekly-chain.mjs';
+import { chainReader, dayCloser, lastBlockBefore, makeRpc, replayFetch, retryingFetch } from '../scripts/weekly-chain.mjs';
 
 const ROOT = join(import.meta.dirname, '..');
 const FIXTURE = 'test/fixtures/weekly-2026-11-06';
@@ -33,6 +33,37 @@ const recorded = load('rpc.json').calls;
 const OFFLINE = 'data:text/javascript,' + encodeURIComponent(
   "globalThis.fetch = async () => { throw new Error('offline: tests make no network calls'); };");
 const cli = (args) => spawnSync(process.execPath, ['--import', OFFLINE, 'scripts/weekly-report.mjs', ...args], { cwd: ROOT, encoding: 'utf8' });
+
+// Preloaded instead to run the CLI's live path offline: the site and the RPC, played from the recording.
+// The site answers its first request with a 502, as it did during a redeploy on 6 November, and refuses
+// a tools/call that does not follow MCP 2026-07-28 to the letter.
+const SITE_AND_RPC = 'data:text/javascript,' + encodeURIComponent(`
+  import { readFileSync } from 'node:fs';
+  const dir = process.env.WEEKLY_FIXTURE;
+  const series = readFileSync(dir + '/series.json', 'utf8');
+  const calls = JSON.parse(readFileSync(dir + '/rpc.json', 'utf8')).calls;
+  const json = (body, status = 200) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  let mcp = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    url = String(url);
+    if (url === 'https://stabledesk.xyz/mcp') {
+      if (mcp++ === 0) return new Response('Bad Gateway', { status: 502 });
+      const h = Object.fromEntries(Object.entries(init.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
+      const b = JSON.parse(init.body);
+      const meta = b.params?._meta || {};
+      const ok = init.method === 'POST' && h['mcp-protocol-version'] === '2026-07-28' && h['mcp-method'] === 'tools/call'
+        && h['mcp-name'] === 'stablecoin_history' && b.jsonrpc === '2.0' && b.method === 'tools/call' && b.params.name === 'stablecoin_history'
+        && b.params.arguments?.token === 'USDC' && b.params.arguments?.range === 'all'
+        && meta['io.modelcontextprotocol/protocolVersion'] === '2026-07-28' && meta['io.modelcontextprotocol/clientCapabilities'] != null;
+      return ok ? json(series) : json({ jsonrpc: '2.0', id: b.id ?? null, error: { code: -32020, message: 'not MCP 2026-07-28' } }, 400);
+    }
+    if (url === 'https://rpc.mainnet.arc.io') {
+      const r = JSON.parse(init.body);
+      const k = r.method + ' ' + JSON.stringify(r.params);
+      return json(Object.hasOwn(calls, k) ? { jsonrpc: '2.0', id: r.id, result: calls[k] } : { jsonrpc: '2.0', id: r.id, error: { code: -32000, message: 'not recorded: ' + k } });
+    }
+    throw new Error('offline: ' + url);
+  };`);
 
 // The supply reads the CLI makes, answered from the recording. A call the recording does not hold
 // fails, so this also pins the search to the path it took on the real chain.
@@ -201,6 +232,47 @@ test('a rate-limited RPC is waited out and asked again; an error that is an answ
 
   const stuck = makeRpc('https://rpc.test', { fetch: async () => new Response('', { status: 429 }), sleep, retries: 3 });
   await assert.rejects(stuck('eth_blockNumber'), /gave up after 4 attempts \(HTTP 429\)/);
+});
+
+test('the site is asked again through a redeploy\'s 502s; any other answer comes back as it is', async () => {
+  const waits = [];
+  const sleep = async (ms) => { waits.push(ms); };
+  const answers = [
+    () => new Response('Bad Gateway', { status: 502 }),
+    () => { throw new TypeError('fetch failed'); },
+    () => new Response('', { status: 503, headers: { 'retry-after': '5' } }),
+    () => json({ ok: true }),
+  ];
+  let i = 0;
+  const http = retryingFetch(async () => answers[i++](), { sleep });
+  assert.equal((await http('https://stabledesk.xyz/mcp', { method: 'POST' })).status, 200);
+  assert.deepEqual(waits, [1000, 2000, 5000], 'doubling from a second, Retry-After when the server sends one');
+
+  // An answer is an answer: a 401 comes back at once, for the caller to report.
+  let asked = 0;
+  const refused = retryingFetch(async () => { asked++; return new Response('', { status: 401 }); }, { sleep });
+  assert.equal((await refused('https://stabledesk.xyz/v1/status')).status, 401);
+  assert.equal(asked, 1);
+  // A redeploy that never ends hands back its last answer; a network that never answers throws.
+  const down = retryingFetch(async () => new Response('', { status: 502 }), { sleep, retries: 2 });
+  assert.equal((await down('https://stabledesk.xyz/mcp')).status, 502);
+  const unplugged = retryingFetch(async () => { throw new TypeError('fetch failed'); }, { sleep, retries: 2 });
+  await assert.rejects(unplugged('https://stabledesk.xyz/mcp'), /gave up after 3 attempts \(TypeError: fetch failed\)/);
+});
+
+test('live, the CLI asks the connector as MCP 2026-07-28 requires, waits out a 502, and drafts the same report', () => {
+  const out = mkdtempSync(join(tmpdir(), 'stabledesk-weekly-'));
+  try {
+    const r = spawnSync(process.execPath, ['--import', SITE_AND_RPC, 'scripts/weekly-report.mjs', '--date', '2026-11-06', '--out', out], {
+      cwd: ROOT, encoding: 'utf8', env: { ...process.env, WEEKLY_FIXTURE: join(ROOT, FIXTURE), STABLEDESK_API_KEY: '' },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /https:\/\/stabledesk\.xyz\/mcp: HTTP 502, retrying in 1000 ms/);
+    assert.equal(readFileSync(join(out, '2026-11-05.html'), 'utf8'), readFileSync(join(ROOT, FIXTURE, '2026-11-05.html'), 'utf8'));
+    assert.match(readFileSync(join(out, '2026-11-05.draft.md'), 'utf8'), /Series read from the MCP connector at https:\/\/stabledesk\.xyz\/mcp \(stablecoin_history, token USDC, range all\), without a key\.$/m);
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
 });
 
 test('each daily change in supply is checked against the index, and a gap is put in front of the reader', () => {
