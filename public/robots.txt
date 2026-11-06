@@ -3,4 +3,8 @@ Allow: /
 Disallow: /api/
 Disallow: /v1/
 
+User-agent: Claude-User
+Allow: /v1/
+Allow: /api/
+
 Sitemap: https://stabledesk.xyz/sitemap.xml

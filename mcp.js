@@ -23,7 +23,7 @@ import { readFileSync } from 'node:fs';
 import { handleV1, clientIp, rateLimit, BODY_MAX } from './api.js';
 import * as db from './db.js';
 import { dayOf } from './usage.js';
-import { RANGES, TOKEN_SYMBOLS, SITE_ORIGIN } from './constants.js';
+import { RANGES, TOKEN_SYMBOLS, SITE_ORIGIN, denominationOf } from './constants.js';
 import { CHAIN } from './chains.js';
 
 export const MODERN = '2026-07-28';
@@ -50,12 +50,19 @@ export const SERVER_INFO = {
   websiteUrl: SITE_ORIGIN,
 };
 
+// The currencies the tracked tokens are denominated in, read from the profile like the network name.
+const CURRENCIES = [...new Set([...TOKEN_SYMBOLS].map(denominationOf).filter(Boolean))].join(', ');
+
+// Facts, not orders. Claude's directory asks that tool descriptions carry no instruction about the
+// model's behaviour or about other tools, and that they match what the tools return; the server's
+// instructions are held to the same line. Where a response carries a legacy total that adds
+// currencies, the text says so rather than claiming that nothing ever does.
 export const INSTRUCTIONS = [
-  `Stabledesk measures stablecoins on ${NETWORK} (chain ${CHAIN.chainId}) from chain data, with every rule published at ${SITE_ORIGIN}/methodology.`,
-  'Volume comes in three measures — raw (every Transfer event), real (the largest transfer per transaction per token, so routing hops are not counted twice) and adjusted (real, minus transfers where both ends are infrastructure). Say which one you quote; raw overstates activity.',
-  'A CCTP or Circle Gateway mint is USDC changing chains, not new issuance; organic issuance is what remains once both are removed.',
-  'Quote figures with the network and the window they cover, and link the methodology. Amounts are face value in the currency stated (USD, EUR, GBP) and never summed across currencies.',
-  'Read-only, informational figures — not investment advice.',
+  `Stabledesk measures stablecoins on ${NETWORK} (chain ${CHAIN.chainId}) from chain data; its measurement method is documented at ${SITE_ORIGIN}/methodology.`,
+  'Volume comes in three measures: raw (every Transfer event the tracked stablecoin contracts emit, mints and burns included, so a payment routed through several contracts counts once per hop), real (the largest transfer per transaction per token, so routing hops are not counted twice; mints and burns are left out and reported as mint and burn) and adjusted (real, minus transfers where both ends are infrastructure).',
+  'A mint that arrives through CCTP or Circle Gateway is a stablecoin changing chains, not new issuance; organic issuance is net issuance minus each cross-chain route measured on this network.',
+  `The tracked stablecoins are denominated in ${CURRENCIES}. Fields named byDenomination or ...ByDenomination are per currency, and figures stated to be in the base denomination (the TVL series, chainTvl, perMillionMoved) count that currency alone; any other total over several tokens adds face values across currencies without conversion.`,
+  'Read-only, informational figures, not investment advice.',
 ].join(' ');
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -81,59 +88,59 @@ const tool = (name, title, description, properties, required, toPath, check = ()
 
 export const TOOLS = [
   tool('arc_status', 'Index and chain status',
-    `Whether Stabledesk is live on ${NETWORK}: the network and chain id, chain liveness, how far the index is behind the head, and the instant every rolling window currently ends at. Call it first when a figure looks stale.`,
+    `Whether Stabledesk is live on ${NETWORK}: the network and chain id, chain liveness, how far the index is behind the head, and windowEnd (Unix milliseconds, null while the index boots): the newest minute holding an indexed stablecoin transfer, as of the last snapshot. It stays close to now while indexing keeps up and transfers keep arriving, and falls behind during a stretch with no transfer, while the index catches up, or after the chain stops.`,
     {}, [], () => ['/v1/status']),
 
   tool('stablecoin_supply', 'Stablecoin supply and 24h activity',
-    `Supply of every tracked stablecoin on ${NETWORK}, grouped by the currency it is denominated in, plus the last 24 hours: raw, real and adjusted volume, transfers, mint and burn, and the parts that came through CCTP and Circle Gateway. coverage states how much history backs the 24h figures.`,
+    `Supply of every tracked stablecoin on ${NETWORK}, per token (supply) and per currency (byDenomination), and the last 24 hours per token in summary24h.byToken: raw, real and adjusted volume, transfers, mint and burn, and the parts that came through CCTP and Circle Gateway. Real and adjusted volume per currency are in summary24h.byDenomination; totalSupply and the top-level summary24h totals add face values across currencies. coverage is the span of indexed minute history (up to 7 days); the 24h figures cover its last day, or all of it while less than a day is held.`,
     {}, [], () => ['/v1/stablecoins']),
 
   tool('stablecoin_detail', 'One stablecoin in detail',
-    'One token: supply and velocity, its 24h summary, net issuance and organic net issuance (cross-chain routes removed), CCTP and Gateway mint/burn, and the transfer-size distribution.',
+    'One token: its supply and velocity, its last-24h summary, net issuance and organic net issuance, the CCTP and Circle Gateway mint and burn, and the transfer-size distribution over the retained raw-transfer window (at most 24 hours, capped by row count; the span is in distribution.window). The cross-chain routes are measured for USDC; another token\'s cross-chain arrivals still count in its organic issuance.',
     { token: { type: 'string', description: 'Token symbol.', enum: tokens() } }, ['token'],
     (a) => [`/v1/stablecoins/${a.token}`],
     (a) => (a.token == null ? `token is required: one of ${tokens().join(', ')}.` : oneOf('token', tokens(), a.token))),
 
   tool('stablecoin_history', 'Volume, mint and burn over time',
-    'A time series of volume (raw: volume, real: rvolume, adjusted: avolume), transfers, mint and burn, with the CCTP part (cmint/cburn) and the Gateway part (bmint/bburn). Bucket size follows the range: 1h → 1 minute, 24h → 15 minutes, 7d → 1 hour, 30d and longer → 1 UTC day. Daily buckets are closed days that can be fetched again and give the same answer. windowEnd states the instant the series ends at. series comes as { columns, rows }: the /v1 values, with the field names listed once; t is the bucket start in Unix seconds. The 30d default is the smallest answer; 7d is the largest.',
+    'A time series of volume (raw: volume, real: rvolume, adjusted: avolume), transfer counts (cnt, rcnt, acnt), mint and burn, with the CCTP part (cmint, cburn) and the Circle Gateway part (bmint, bburn, bvolume, bcnt). Buckets follow the range: 1h in 1-minute buckets, 24h in 15-minute buckets, 7d in hourly buckets, 30d and longer in UTC days. A bucket with no activity has no row; the bucket containing windowEnd is incomplete, and has a row only if it had activity. Token ALL adds every token at face value, across currencies. The range is counted back from windowEnd (Unix milliseconds), the newest minute holding an indexed transfer as of the last snapshot; buckets indexed after that snapshot can follow it, and range all starts at the beginning of the record. series is { columns, rows } with t the bucket start in Unix seconds, or [] when empty.',
     {
-      token: { type: 'string', description: 'Token symbol, or ALL for every token.', enum: ['ALL', ...tokens()], default: 'ALL' },
-      range: { type: 'string', description: 'How far back the series reaches.', enum: ranges, default: '30d' },
+      token: { type: 'string', description: 'Token symbol, or ALL for every token added at face value, across currencies.', enum: ['ALL', ...tokens()], default: 'ALL' },
+      range: { type: 'string', description: 'How far back the series is asked to reach; recordBegan in the response is where the record starts.', enum: ranges, default: '30d' },
     }, [],
     (a) => ['/v1/stablecoins/history', { token: a.token ?? 'ALL', range: a.range ?? '30d' }],
     (a) => oneOf('token', ['ALL', ...tokens()], a.token) || oneOf('range', ranges, a.range)),
 
   tool('cctp_flows', 'Cross-chain flows through CCTP',
-    `USDC and EURC arriving on ${NETWORK} from, and leaving it for, other chains through Circle CCTP V2 — per token, with the chain on the other side. A CCTP mint is not issuance and a CCTP burn is not a redemption.`,
+    `USDC arriving on ${NETWORK} from, and leaving it for, other chains through Circle CCTP V2 (TokenMessengerV2), reported per token with the chain on the other side. EURC crosses through CrossChainTokenService, which is not measured yet. mint is what arrived on Arc (amount plus relayer fee), burn is what left it.`,
     { range: { type: 'string', description: 'Rolling window.', enum: ['24h', '7d'], default: '24h' } }, [],
     (a) => ['/v1/cctp', { range: a.range ?? '24h' }],
     (a) => oneOf('range', ['24h', '7d'], a.range)),
 
   tool('ecosystem_tvl', 'Total value locked, chain-wide',
-    `Stablecoin TVL on ${NETWORK}, measured as balances held by contracts, in the base denomination with other currencies beside it, plus every protocol holding a balance (with the ids protocol_detail and tvl_history accept). coverage says whether the scan reached every known contract.`,
+    `Stablecoin TVL on ${NETWORK}, measured as balances held by contracts, excluding the smart-contract wallets the registry identifies (reported in smartWallets): per currency in byDenomination, with the base denomination named, while the top-level tvl, attributed and unattributed add face values across currencies. Also every protocol holding a balance, with its id and its TVL per currency. coverage describes the scan: contracts read per pass, the rotation cycle and the oldest reading counted.`,
     {}, [], () => ['/v1/tvl']),
 
   tool('protocol_detail', 'One protocol',
-    'One protocol from the registry: its contracts, measured TVL per token and per currency, recent volume, category and where its address list comes from. Ids come from ecosystem_tvl.',
-    { id: { type: 'string', description: 'Protocol id, e.g. aave-v4.', pattern: '^[a-z0-9-]{1,40}$' } }, ['id'],
+    'One protocol from the registry, by its id (for example circle-gateway or circle-cctp): its contracts and where their list comes from, its balances per token and per currency (the top-level tvl adds face values across currencies; for a registry entry marked wallets, these are wallet holdings kept out of TVL), its gross flow over the window stated in moved, summed contract by contract: every transfer of a tracked stablecoin into or out of each of its contracts, mints and burns excluded, so a transfer between two of its own contracts counts twice (windowVolume adds currencies, windowVolumeByDenomination does not), and its category.',
+    { id: { type: 'string', description: 'Protocol id, e.g. circle-gateway.', pattern: '^[a-z0-9-]{1,40}$' } }, ['id'],
     (a) => [`/v1/protocols/${a.id}`],
-    (a) => (typeof a.id === 'string' && /^[a-z0-9-]{1,40}$/.test(a.id) ? null : 'id must be a protocol id such as "aave-v4" — lowercase letters, digits and hyphens; ecosystem_tvl lists them.')),
+    (a) => (a.id === 'unnamed' ? 'id must be a protocol id; unnamed is not a protocol.' : typeof a.id === 'string' && /^[a-z0-9-]{1,40}$/.test(a.id) ? null : 'id must be a protocol id such as "circle-gateway": lowercase letters, digits and hyphens.')),
 
   tool('tvl_history', 'TVL over time',
-    'Daily TVL, chain-wide or for one protocol, in one currency (the base denomination, stated in the response), as { columns, rows }. The series starts on 28 September 2026, when TVL stopped adding euros to dollars and stopped counting smart-contract wallets.',
+    'Daily TVL, chain-wide or for one protocol, in the base denomination (stated in the response), as { columns, rows }, or [] when empty. There is no data before 28 September 2026, when TVL stopped adding euros to dollars and began excluding the smart-contract wallets the registry identifies (Circle modular accounts from 28 September, Safe multisigs from 20 October 2026); history is kept for 180 days.',
     {
       protocol: { type: 'string', description: 'Protocol id, or * for the chain total.', default: '*' },
       days: { type: 'integer', description: 'Days of history, 1 to 180.', minimum: 1, maximum: 180, default: 30 },
     }, [],
     (a) => ['/v1/tvl/history', { protocol: a.protocol ?? '*', days: a.days ?? 30 }],
-    (a) => intIn('days', 1, 180, a.days) || (a.protocol == null || a.protocol === '*' || /^[a-z0-9-]{1,40}$/.test(a.protocol) ? null : 'protocol must be * or a protocol id from ecosystem_tvl.')),
+    (a) => intIn('days', 1, 180, a.days) || (a.protocol == null || a.protocol === '*' || /^[a-z0-9-]{1,40}$/.test(a.protocol) ? null : 'protocol must be * or a protocol id such as "circle-gateway".')),
 
   tool('network_fees', 'Fee economics, in dollars',
-    `What it costs to use ${NETWORK}. Gas is paid in USDC, so fees are dollar amounts read from transaction receipts with no price feed: per transaction (mean and median), per block, per day, and the cost to move $1M of value.`,
+    `Network fees on ${NETWORK}. Gas is paid in USDC, so fees are dollar amounts with no price feed, exact for the sampled blocks: the per-transaction mean and the per-block figure; the per-transaction median is interpolated from logarithmic buckets of the same transactions. Extrapolated from them: per day, inWindow over windowSec, and perMillionMoved, the network's fees in the window per $1M of real volume in the base denomination. sample gives the sample size.`,
     {}, [], () => ['/v1/network/fees']),
 
   tool('largest_transfers', 'Largest transfers',
-    'The largest stablecoin transfers over the last N days, from the retained per-day set, with the window stated.',
+    'The largest stablecoin transfers over the last N days, from the retained per-day set (the top transfers per day per token), ranked by face value across tokens with no currency conversion, with the window stated.',
     {
       days: { type: 'integer', description: 'Window in days, 1 to 180.', minimum: 1, maximum: 180, default: 7 },
       limit: { type: 'integer', description: 'How many transfers, 1 to 50.', minimum: 1, maximum: 50, default: 20 },
@@ -142,7 +149,7 @@ export const TOOLS = [
     (a) => intIn('days', 1, 180, a.days) || intIn('limit', 1, 50, a.limit)),
 
   tool('chain_uptime', 'Chain availability record',
-    `How available ${NETWORK} has been, from Stabledesk's log of observed state changes. Read coveragePct before uptimePct: uptime is a share of the time Stabledesk was actually watching, and hours it was not are reported as unobserved rather than as up or down.`,
+    `How available ${NETWORK} has been, from Stabledesk's log of observed state changes. uptimePct is a share of the time Stabledesk was actually watching, which coveragePct gives; hours it was not watching are reported as unobserved rather than as up or down.`,
     { days: { type: 'integer', description: 'Window in days, 1 to 365.', minimum: 1, maximum: 365, default: 30 } }, [],
     (a) => ['/v1/chain/uptime', { days: a.days ?? 30 }],
     (a) => intIn('days', 1, 365, a.days)),
@@ -182,7 +189,7 @@ export async function callTool(name, args = {}) {
   if (code !== 200) {
     // The /v1 error already carries a hint ("Data warming up, retry shortly.", "See /v1/protocols
     // for the list of ids."); passed through rather than flattened into "request failed".
-    const hint = data?.hint || data?.error || `HTTP ${code}`;
+    const hint = name === 'protocol_detail' && code === 404 ? 'no protocol with that id' : data?.hint || data?.error || `HTTP ${code}`;
     return { content: [{ type: 'text', text: `${name} could not answer: ${hint}` }], isError: true };
   }
   const structured = {

@@ -859,13 +859,14 @@ test('the Arc mainnet registry loads, with every address claimed once', async ()
   const out = JSON.parse(execFileSync(process.execPath, ['-e',
     "import('./protocols.js').then(m=>console.log(JSON.stringify({ids:m.PROTOCOLS.map(p=>p.id),f:[...m.attributionRules().factories.keys()],i:[...m.attributionRules().implementations.keys()],s:[...m.attributionRules().singletons.keys()],hub:m.protocolForAddress('0x17288dfc86205301064577b98b02b81017e6f79c')?.id,morpho:m.protocolForAddress('0x34cd04070dd72b14e241112f6d83812df5af7fcd')?.id,pm:m.protocolForAddress('0x8366a39cc670b4001a1121b8f6a443a643e40951')?.id})))"],
     { env, cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' }).toString());
-  for (const id of ['uniswap', 'aero', 'extended', 'aave-v4', 'morpho', 'circle-stablefx', 'usyc-teller', 'circle-msca-accounts', 'safe', 'arc-memo', 'multicall3from', 'circle-cctp', 'circle-gateway']) {
+  for (const id of ['uniswap', 'aero', 'extended', 'synthra', 'aave-v4', 'morpho', 'circle-stablefx', 'usyc-teller', 'circle-msca-accounts', 'safe', 'arc-memo', 'multicall3from', 'circle-cctp', 'circle-gateway']) {
     assert.ok(out.ids.includes(id), `${id} is on mainnet`);
   }
   assert.equal(out.hub, 'aave-v4');
   assert.equal(out.morpho, 'morpho');
   assert.equal(out.pm, 'uniswap');
-  assert.equal(out.f.length, 5, 'Uniswap v2 and v3 factories, Morpho vault factory, Aero CL factories (Lite and full launch)');
+  assert.equal(out.f.length, 7, 'Uniswap v2 and v3 factories, Morpho vault factory, Aero CL factories (Lite and full launch), Synthra v3 factories (V3.1 and legacy)');
+  assert.ok(out.f.includes('0x84169f9adf4f5f0e483bfc350498a85b1d7ec638'), 'Synthra V3.1 factory, from Synthra\'s address page');
   assert.ok(out.f.includes('0x7f83235643181e440433400a027618cd50879751'), 'Aero full-launch CL factory, from cl-arc.json');
   assert.ok(out.f.includes('0xb89df768af2cfe637ceb352c587fe8edaf491d03'), 'Aero CL factory, from Aero\'s deployment file');
   assert.equal(out.s.length, 8, 'Safe singletons 1.3.0, 1.4.1 and 1.5.0, L1 and L2');
@@ -2676,7 +2677,7 @@ test('MCP: a legacy client gets the initialize handshake, at a version it asked 
   assert.deepEqual(old.body.result.capabilities, { tools: { listChanged: false } });
   assert.equal(old.body.result.serverInfo.name, 'stabledesk');
   assert.match(old.body.result.instructions, /methodology/);
-  assert.match(old.body.result.instructions, /raw overstates/, 'the one convention an assistant must know before quoting volume');
+  assert.match(old.body.result.instructions, /raw \(every Transfer event the tracked stablecoin contracts emit, mints and burns included, so a payment routed through several contracts counts once per hop\)/, 'the one convention an assistant must know before quoting volume');
 
   assert.deepEqual(await handleMessage({ jsonrpc: '2.0', method: 'notifications/initialized' }), { status: 202, body: null });
   assert.deepEqual((await handleMessage({ jsonrpc: '2.0', id: 3, method: 'ping' })).body.result, {});
@@ -2698,6 +2699,21 @@ test('MCP: every tool is read-only, titled and annotated the way Claude\'s direc
   }
   // No address-level tool: counterparties' profiles stay out of a prompt's reach (see mcp.js).
   assert.ok(![...names].some((n) => /address/.test(n)));
+
+  // The directory's rule: tool descriptions carry no instruction about the model's behaviour and none
+  // about other tools. So no description, parameter included, names another tool, and no sentence
+  // opens with an order. The server's instructions are held to the same line.
+  const { INSTRUCTIONS } = await import('../mcp.js');
+  const order = /(^|[.:;!?]\s+)(call|use|read(?!-only)|ignore|always|never|prefer|try|make sure|do not|don't|you must|you should)\b/i;
+  for (const t of tools) {
+    const text = `${t.description} ${JSON.stringify(t.inputSchema)}`;
+    for (const other of names) {
+      if (other !== t.name) assert.ok(!text.includes(other), `${t.name} mentions another tool, ${other}`);
+    }
+    assert.doesNotMatch(t.description, order, `${t.name}: describes, does not instruct`);
+  }
+  for (const n of names) assert.ok(!INSTRUCTIONS.includes(n), `the server instructions mention the tool ${n}`);
+  assert.doesNotMatch(INSTRUCTIONS, order, 'the server instructions state facts, not orders');
 });
 
 test('MCP 2026-07-28: no handshake, metadata on every request, and headers that must agree', async () => {
@@ -2761,7 +2777,17 @@ test('MCP: errors an assistant can act on', async () => {
   assert.match((await call('largest_transfers', { limit: 500 })).content[0].text, /1 to 50/);
   assert.match((await call('largest_transfers', { days: '7' })).content[0].text, /integer/);
   assert.equal((await call('protocol_detail', { id: 'Not An Id!' })).isError, true);
+  assert.equal((await call('protocol_detail', { id: 'unnamed' })).isError, true, '/v1/protocols/unnamed is a list of unclaimed contracts, not a protocol');
   assert.equal((await call('stablecoin_detail', {})).isError, true);
+
+  // An argument error says what the accepted form is, without pointing at another tool: the same
+  // line the descriptions hold.
+  const { TOOLS } = await import('../mcp.js');
+  const names = TOOLS.map((t) => t.def.name);
+  for (const [name, args] of [['protocol_detail', { id: 'Not An Id!' }], ['tvl_history', { protocol: 'Bad!' }], ['stablecoin_detail', {}]]) {
+    const text = (await call(name, args)).content[0].text;
+    for (const other of names) if (other !== name) assert.ok(!text.includes(other), `${name}'s error names ${other}`);
+  }
 });
 
 test('MCP: tools read /v1 in-process, and only its read-only routes', async () => {

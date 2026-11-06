@@ -435,12 +435,13 @@ export async function handleV1(req, res, u, { internal = false } = {}) {
     const snap = tvl.snapshot();
     return json(res, {
       ...snap.totals, method: snap.method, series: snap.series,
-      // How many contracts were measured, out of how many are known. Past the cap this total covers
-      // the highest-balance contracts and not the whole chain — which is a caveat on the headline
-      // number, so it travels with it.
+      // How many contracts were measured, out of how many are known. Past the cap one pass reads the
+      // top of the list plus a rotating slice, so the total is every contract's latest reading, some
+      // older than others — a caveat on the headline number, so it travels with it. It used to say
+      // "lower bound", which was true before the rotation and stopped being true with it.
       coverage: snap.coverage,
       ...(snap.coverage?.atCap ? {
-        warning: `Coverage is truncated: ${snap.coverage.knownContracts} contracts are known and the top ${snap.coverage.cap} by ${snap.coverage.order} were scanned. Chain TVL is therefore a lower bound.`,
+        warning: `One pass reads ${snap.coverage.scanned} of the ${snap.coverage.knownContracts} known contracts (${snap.coverage.order}); the rest are re-read in rotation, over up to ${snap.coverage.cycleLength} passes, and the total uses each contract's latest reading. The oldest reading counted is coverage.oldestReadingMs.`,
       } : {}),
       protocols: snap.protocols.filter((p) => p.tvl > 0).map((p) => ({ id: p.id, name: p.name, tvl: p.tvl, tvlByDenomination: p.tvlByDenomination })),
       updatedAt: snap.lastRun?.at ?? null,
