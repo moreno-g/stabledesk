@@ -93,6 +93,20 @@ export const TOKEN_SYMBOLS = new Set(Object.values(CHAIN.tokens).map((t) => t.sy
 export const TOKEN_LIST = [...TOKEN_SYMBOLS].join(', ');
 export const ADDR_RE = /^0x[0-9a-f]{40}$/;
 
+// The tracked tokens denominated in `d`. None for a null denomination: a token whose currency is
+// undeclared belongs to no currency's total.
+export const denominationTokens = (d) => (d ? [...TOKEN_SYMBOLS].filter((s) => denominationOf(s) === d) : []);
+
+// What a volume series adds up, given the `token` it was asked for. One symbol is itself. `ALL`, the
+// default, is every tracked token denominated in the base currency — not every tracked token: that
+// series added euros and pounds to dollars at face value, on the terminal's main chart and on
+// /v1/stablecoins/history (+23.7% on real volume, Arc mainnet, 29 October 2026). The denomination and
+// the tokens travel with the series, so a line always says what it is a quantity of.
+export function seriesScope(token) {
+  if (!token || token === 'ALL') return { token: 'ALL', denomination: BASE_DENOMINATION, tokens: denominationTokens(BASE_DENOMINATION) };
+  return { token, denomination: denominationOf(token), tokens: [token] };
+}
+
 // Bounds a caller-supplied row limit.
 //
 // The naive form — Math.min(max, Number(raw) || dflt) — has no floor, and SQLite reads a negative

@@ -20,7 +20,7 @@ import { rpcSoft, TOKENS, toUnits } from './rpc.js';
 import * as db from './db.js';
 import { PROTOCOLS, protocolForAddress, publicShape, registryStats, isRegistered, attributionRules, setDerivedAttributions, derivedAddresses, attributionBasis, walletAddresses } from './protocols.js';
 import { getLabel } from './labels.js';
-import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_STALEST_SWEEP, TVL_ROTATE_SLICE, TVL_FAST_SLICE, TVL_SLOW_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS, BASE_DENOMINATION, sumByDenomination, isContractCode, isDelegatedEoa } from './constants.js';
+import { TVL_REFRESH_MS, TVL_WARMUP_MS, TVL_CHUNK, TVL_DELAY, TVL_MAX_TARGETS, TVL_ALWAYS_TOP, TVL_STALEST_SWEEP, TVL_ROTATE_SLICE, TVL_FAST_SLICE, TVL_SLOW_SLICE, TVL_CANDIDATE_MIN, IDENTITY_PER_PASS, BASE_DENOMINATION, sumByDenomination, denominationTokens, isContractCode, isDelegatedEoa } from './constants.js';
 
 // A balance in the base denomination — the headline currency — from a per-token breakdown.
 const inBase = (byToken) => (BASE_DENOMINATION ? sumByDenomination(byToken)[BASE_DENOMINATION] || 0 : 0);
@@ -30,13 +30,24 @@ const inBase = (byToken) => (BASE_DENOMINATION ? sumByDenomination(byToken)[BASE
 // inactivity, so for a busy contract it covered everything since first seen. Daily counting began on
 // 27 October 2026; until it reaches back a full week the window starts at that day, and `moved.since`
 // and `moved.complete` say so rather than letting a shorter span pass for a week.
+//
+// "Today" is the day of the newest indexed minute, as for every rolling window (see windowEndSec in
+// indexer.js), not the wall clock's: the per-day rows are keyed by chain time, and while the chain cannot
+// be read a wall-clock week slides past the data — published as seven days over fewer, then over none.
+// And the window is complete only once counting covers its first day whole: it began during 27 October,
+// so a week starting that day is still short of seven full days.
 const MOVED_DAYS = 7;
 export function movedWindow(now = Date.now()) {
-  const today = Math.floor(now / 86400000);
-  const startDay = today - (MOVED_DAYS - 1);
+  const newest = db.getCoverage().b;
+  const to = newest ? Math.min(now, newest * 1000) : now;
+  const endDay = Math.floor(to / 86400000);
+  const startDay = endDay - (MOVED_DAYS - 1);
   const s = db.addrTokenSince();
-  const sinceDay = s ? Math.max(startDay, Math.floor(s / 86400000)) : startDay;
-  return { sinceDay, since: sinceDay * 86400000, complete: sinceDay === startDay, days: MOVED_DAYS };
+  // Never past the newest indexed day: a database created today replays yesterday's blocks, and counts
+  // them, while its counting start says today — a window from today to yesterday would cover nothing.
+  const sinceDay = s ? Math.min(endDay, Math.max(startDay, Math.floor(s / 86400000))) : startDay;
+  // `began`: when counting began, by our clock — which after that clamp is later than `since`.
+  return { sinceDay, endDay, since: sinceDay * 86400000, to, began: s, complete: !s || s <= startDay * 86400000, days: MOVED_DAYS };
 }
 // { windowVolume (face value, every currency added — kept for existing consumers),
 //   windowVolumeByDenomination, windowTransfers } for a set of addresses.
@@ -48,7 +59,42 @@ function moved(addrs, w = movedWindow()) {
     windowTransfers: m.transfers,
   };
 }
-const movedMeta = (w = movedWindow()) => ({ since: w.since, complete: w.complete, days: w.days });
+const movedMeta = (w = movedWindow()) => ({ since: w.since, to: w.to, began: w.began, complete: w.complete, days: w.days });
+
+// The addresses that moved the most over the same window, ranked in the base denomination; their other
+// currencies ride along on each row, unranked. /v1/addresses/top used to rank addr_stats under
+// "windowDays: 7": a running total since each address was first seen — up to 44 days on mainnet in
+// October 2026 — with every token's face value added. Ranking reads every row of the window, so the
+// answer is kept for TOP_MOVED_TTL_MS and recomputed when it expires or the window moves, never per
+// request; `computedAt` says how old it is.
+const TOP_MOVED_MAX = 100;              // the longest list any route serves
+const TOP_MOVED_TTL_MS = 5 * 60 * 1000;
+let topCache = { at: 0, sinceDay: null, rows: null };
+export function topMoved(limit = 20, now = Date.now()) {
+  const w = movedWindow(now);
+  if (!topCache.rows || topCache.sinceDay !== w.sinceDay || now - topCache.at >= TOP_MOVED_TTL_MS) {
+    const ranked = db.topMovedSince(w.sinceDay, denominationTokens(BASE_DENOMINATION), TOP_MOVED_MAX);
+    const per = new Map(ranked.map((r) => [r.address, { byToken: {}, transfers: 0 }]));
+    for (const r of db.movedByAddressToken([...per.keys()], w.sinceDay)) {
+      const x = per.get(r.address);
+      x.byToken[r.token] = (x.byToken[r.token] || 0) + (r.volume || 0);
+      x.transfers += r.transfers || 0;
+    }
+    const rows = ranked.map((r) => ({
+      address: r.address,
+      label: getLabel(r.address)?.name || null,
+      contract: !!db.addressMeta(r.address)?.is_contract,
+      volume: r.volume,
+      volumeByDenomination: sumByDenomination(per.get(r.address).byToken),
+      // Every token's transfers: a count is not a currency, and is summed as on the protocol pages.
+      transfers: per.get(r.address).transfers,
+    }));
+    topCache = { at: now, sinceDay: w.sinceDay, rows };
+  }
+  // `windowDays`: the UTC days the ranking covers, the last one ending at `to`.
+  return { ...movedMeta(w), windowDays: w.endDay - w.sinceDay + 1, denomination: BASE_DENOMINATION,
+    computedAt: topCache.at, top: topCache.rows.slice(0, limit) };
+}
 
 // The key a TVL history row is stored under. Per denomination since 28 Sept 2026: the rows before
 // that date, under the bare protocol id, summed euros into dollars and counted smart-contract wallets,
@@ -436,12 +482,7 @@ export async function refresh() {
     if (byRule) invalidateAggregate();
 
     // Persist today's level so tomorrow has something to diff against.
-    const agg = aggregate();
-    db.recordTvlSnapshot(today(), [
-      ...Object.entries(agg.totals.byDenomination).map(([d, g]) => ({ protocol: historyKey('*', d), tvl: g.tvl })),
-      ...agg.protocols.flatMap((p) => Object.entries(p.tvlByDenomination)
-        .filter(([, v]) => v > 0).map(([d, v]) => ({ protocol: historyKey(p.id, d), tvl: v }))),
-    ]);
+    persistLevels(aggregate());
 
     lastRun = {
       at: Date.now(), scanned: targets.length, contractsFound, error: null,
@@ -457,6 +498,17 @@ export async function refresh() {
     lastRun = { ...lastRun, at: Date.now(), error: String(e.message || e) };
     console.error('[tvl]', e.message || e);
   }
+}
+
+// Today's levels as the last scan saw them: per currency, for the chain and for every protocol holding
+// something in it. Zero levels are not stored, and the day's rows are replaced rather than updated, so a
+// protocol emptied since an earlier scan of the day has no row instead of that scan's figure.
+export function persistLevels(agg, day = today()) {
+  db.recordTvlSnapshot(day, [
+    ...Object.entries(agg.totals.byDenomination).map(([d, g]) => ({ protocol: historyKey('*', d), tvl: g.tvl })),
+    ...agg.protocols.flatMap((p) => Object.entries(p.tvlByDenomination)
+      .filter(([, v]) => v > 0).map(([d, v]) => ({ protocol: historyKey(p.id, d), tvl: v }))),
+  ], { replace: true });
 }
 
 // Memoised aggregate. The underlying balances only change when refresh() runs, which is every five
@@ -479,6 +531,8 @@ export function aggregate() {
 // API can serve a snapshot without waiting on a scan.
 export function computeAggregate() {
   const rows = db.balanceRows();
+  // One window for the whole pass: every protocol and candidate below covers the same days.
+  const w = movedWindow();
 
   // Smart-contract wallets are wallets. They pass the bytecode test that separates a contract from a
   // wallet, so they were counted as locked value: on 28 Sept 2026 two Circle modular accounts held
@@ -519,7 +573,7 @@ export function computeAggregate() {
       for (const [t, v] of Object.entries(e.byToken)) tokens[t] = (tokens[t] || 0) + v;
     }
     const flow = db.volumeForAddresses(all);
-    const mv = moved(all);
+    const mv = moved(all, w);
     return {
       ...publicShape(p),
       // Face values summed across tokens, kept for existing consumers. `tvlByDenomination` is the
@@ -589,7 +643,7 @@ export function computeAggregate() {
       codeSize: id?.code_size ?? null,
       ...(({ windowVolume, windowVolumeByDenomination, windowTransfers }) => ({
         volume: windowVolume, volumeByDenomination: windowVolumeByDenomination, transfers: windowTransfers,
-      }))(moved([address])),
+      }))(moved([address], w)),
       addressesSeen: db.volumeForAddresses([address]).addressesSeen,
     };
   });
@@ -611,7 +665,7 @@ export function computeAggregate() {
       // Held by smart-contract wallets (registry entries marked `wallets`), outside every figure above.
       smartWallets: { ...inWallets, byDenomination: sumByDenomination(inWallets.byToken) },
       // The span every "moved" figure covers: the last 7 UTC days, or less while daily counting is young.
-      moved: movedMeta(),
+      moved: movedMeta(w),
     },
     protocols,
     candidates,
@@ -634,18 +688,31 @@ export function totalByDenomination() {
   return out;
 }
 
-// TVL movers — today's level against `daysBack` ago, per protocol. Drives the daily rankings.
+// TVL movers — today's level against `daysBack` ago, per protocol, in the base denomination. Drives
+// the daily rankings. TVL_CANDIDATE_MIN, the balance this project counts as worth naming, is also the
+// floor for a move: a smaller change is not one, and a percentage is only taken on a base at least that
+// large. The digest of 29 October 2026 published "Circle StableFX +43665838.9% (2.29 → 1000.0K)" and
+// "Multicall3 -32.8% (0.00 → 0.00)". A base under the floor is marked `isNew` and carries no percentage.
+// A protocol without a stored level on one of the two days is not compared: zero levels are not stored,
+// so a missing row is a protocol that held nothing that day — emptied, or not funded yet — or one listed
+// since, and the two cannot be told apart. `compared` counts the protocols that were, and `read` says
+// whether each day's levels exist at all, so the digest can say which empty list it is printing.
 export function movers(daysBack = 1) {
   const now = today();
   const then = now - daysBack * DAY;
-  const out = [];
+  const moves = [];
+  let compared = 0;
   for (const p of PROTOCOLS) {
     const a = db.tvlOn(historyKey(p.id), then);
     const b = db.tvlOn(historyKey(p.id), now);
     if (a == null || b == null) continue;         // no baseline yet — not a 0% change
-    out.push({ id: p.id, name: p.name, from: a, to: b, delta: b - a, pct: a > 0 ? (b - a) / a : null });
+    compared += 1;
+    if (Math.abs(b - a) < TVL_CANDIDATE_MIN) continue;
+    const isNew = a < TVL_CANDIDATE_MIN;
+    moves.push({ id: p.id, name: p.name, denomination: BASE_DENOMINATION, from: a, to: b, delta: b - a, pct: isNew ? null : (b - a) / a, isNew });
   }
-  return out.sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta));
+  const read = { then: db.tvlOn(historyKey('*'), then) != null, now: db.tvlOn(historyKey('*'), now) != null };
+  return { compared, read, moves: moves.sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta)) };
 }
 
 export const history = (protocol = '*', days = 30) => db.tvlSeries(historyKey(protocol), today() - days * DAY);
@@ -655,8 +722,9 @@ export const history = (protocol = '*', days = 30) => db.tvlSeries(historyKey(pr
 // to the addresses it came from, otherwise the number is unauditable.
 export function detail(id, opts = {}) {
   const agg = aggregate();
+  const w = movedWindow();
   const p = agg.protocols.find((x) => x.id === id);
-  if (!p) return walletDetail(id, agg, opts);
+  if (!p) return walletDetail(id, agg, opts, w);
   const contracts = [...p.contracts, ...derivedAddresses(p.id)].map((address) => {
     const balances = db.balancesForAddress(address);
     const stats = db.addressStats(address);
@@ -668,7 +736,7 @@ export function detail(id, opts = {}) {
       tvl: balances.reduce((a, b) => a + b.balance, 0),
       byToken: Object.fromEntries(balances.map((b) => [b.token, b.balance])),
       byDenomination: sumByDenomination(Object.fromEntries(balances.map((b) => [b.token, b.balance]))),
-      ...moved([address]),
+      ...moved([address], w),
       lastBlock: stats?.last_block || null,
     };
   }).sort((a, b) => inBase(b.byToken) - inBase(a.byToken) || b.tvl - a.tvl);
@@ -683,7 +751,7 @@ export function detail(id, opts = {}) {
   return {
     ...p,
     baseDenomination: BASE_DENOMINATION,
-    moved: movedMeta(),
+    moved: movedMeta(w),
     share: chainBase ? (p.tvlByDenomination?.[BASE_DENOMINATION] || 0) / chainBase : 0,
     contractDetail: contracts,
     recent,
@@ -696,7 +764,7 @@ export function detail(id, opts = {}) {
 // An entry naming smart-contract wallets is kept out of the protocol ranking, so detail() above does
 // not find it — and every link to one of its accounts (search, labels, the ecosystem tile) answered
 // "not found", for an account holding $86M. The page exists; it just says what the accounts are.
-function walletDetail(id, agg, opts = {}) {
+function walletDetail(id, agg, opts = {}, w = movedWindow()) {
   const entry = PROTOCOLS.find((x) => x.id === id && x.wallets);
   if (!entry) return null;
   const addrs = [...entry.contracts, ...derivedAddresses(entry.id)];
@@ -707,19 +775,24 @@ function walletDetail(id, agg, opts = {}) {
     return {
       address, label: getLabel(address)?.name || null, basis: attributionBasis(address),
       tvl: balances.reduce((a, b) => a + b.balance, 0), byToken, byDenomination: sumByDenomination(byToken),
-      ...moved([address]), lastBlock: stats?.last_block || null,
+      ...moved([address], w), lastBlock: stats?.last_block || null,
     };
   }).sort((a, b) => inBase(b.byToken) - inBase(a.byToken) || b.tvl - a.tvl);
-  const w = agg.totals.smartWallets || { tvl: 0, byToken: {}, accounts: 0 };
+  // This entry's accounts only: the sum of the table below. It used to be agg.totals.smartWallets, the
+  // balance of every `wallets` entry together — on 29 October 2026 /protocol/safe published 261.9M USD
+  // where its own accounts held 362.8k, the rest being Circle MSCA accounts, whose page showed the same.
+  const byToken = {};
+  for (const c of contracts) for (const [t, v] of Object.entries(c.byToken)) byToken[t] = (byToken[t] || 0) + v;
+  const accounts = contracts.filter((c) => c.tvl > 0).length;
   return {
     ...publicShape(entry),
     wallets: true,
     baseDenomination: BASE_DENOMINATION,
-    tvl: w.tvl, tvlByToken: w.byToken, tvlByDenomination: sumByDenomination(w.byToken),
-    contractsWithBalance: w.accounts,
-    observed: w.accounts > 0,
-    ...moved(addrs),
-    moved: movedMeta(),
+    tvl: Object.values(byToken).reduce((a, b) => a + b, 0), tvlByToken: byToken, tvlByDenomination: sumByDenomination(byToken),
+    contractsWithBalance: accounts,
+    observed: accounts > 0,
+    ...moved(addrs, w),
+    moved: movedMeta(w),
     share: null,                     // not a share of TVL: these balances are excluded from it
     contractDetail: contracts,
     recent: addrs.flatMap((c) => db.addressRecent(c, opts.recent || 8)).sort((a, b) => b.block - a.block).slice(0, opts.recent || 8),
@@ -741,6 +814,7 @@ export function addressDetail(address) {
   const meta = db.addressMeta(a);
   if (!balances.length && !stats && !meta) return null;
   const agg = aggregate();
+  const w = movedWindow();
   return {
     unnamed: true,
     address: a,
@@ -752,8 +826,8 @@ export function addressDetail(address) {
     isContract: !!meta?.is_contract,
     kind: meta?.kind || null,
     codeSize: meta?.code_size || null,
-    ...moved([a]),
-    moved: movedMeta(),
+    ...moved([a], w),
+    moved: movedMeta(w),
     lastBlock: stats?.last_block || null,
     recent: db.addressRecent(a, 12),
     largest: db.addressLargest(a, 8),
