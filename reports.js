@@ -23,15 +23,15 @@ export const NETWORK_LABELS = { 5042: 'Arc mainnet', 5042002: 'Arc testnet' };
 // is never chosen for how it reads.
 export const REPORTS = [
   {
-    slug: '2026-10-29',
-    from: '2026-10-23',
-    to: '2026-10-29',
-    published: '2026-10-30',
+    slug: '2026-11-05',
+    from: '2026-10-30',
+    to: '2026-11-05',
+    published: '2026-11-06',
     chainId: 5042,
-    title: 'USDC on Arc closed above $1B for the first time',
-    summary: 'USDC supply on Arc mainnet closed above $1B on 27 October and more than doubled since 30 September. '
-      + 'Cross-chain routes pulled both ways; organic issuance was 74% of the week\'s growth. '
-      + 'Raw volume rose 40%, real volume 7%, adjusted volume fell 39%.',
+    title: 'Raw USDC volume on Arc had its biggest week since launch; real volume fell 10%',
+    summary: 'Raw USDC volume on Arc mainnet reached 5,428.3M, the most in any seven complete UTC days since launch, while real volume fell 10%. '
+      + 'Mints and burns, which raw volume counts and real volume leaves out, account for 94% of raw volume\'s rise. '
+      + 'Supply ended the week at 1,187.2M, up 113.9M, less than half the previous week\'s growth; its highest close was 1,194.2M on 4 November.',
   },
 ];
 

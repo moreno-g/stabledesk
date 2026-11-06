@@ -19,6 +19,7 @@ import * as whalewatch from './whalewatch.js';
 import { search } from './search.js';
 import { CATEGORIES, PROTOCOLS, protocolById } from './protocols.js';
 import { REPORTS, reportBySlug, reportBody, networkLabel, windowLabel, publishedLabel, indexBody, jsonLd } from './reports.js';
+import { fillTemplate } from './template.js';
 import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
@@ -149,13 +150,7 @@ async function serveFile(req, res, name, type = 'text/html; charset=utf-8', code
 const TEMPLATE_TTL_MS = 60000;
 const pageCache = new Map();
 
-const escAttr = (s) => String(s == null ? '' : s)
-  .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
-  .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
-
-// `raw` is markup the repo itself ships (a report body), inserted unescaped and after `vars`, so
-// nothing inside it can be read as a placeholder. Replacements are functions, not strings: a string
-// replacement gives "$&" and "$$" special meaning, and a report is full of dollar amounts.
+// `vars` are escaped, `raw` is inserted as written; see template.js.
 async function serveTemplated(req, res, name, key, vars, raw = {}) {
   const ck = name + '|' + key;
   let p = pageCache.get(ck);
@@ -163,9 +158,7 @@ async function serveTemplated(req, res, name, key, vars, raw = {}) {
     try {
       // loadAsset has already applied the network profile, so {{NET}} etc. are resolved.
       const base = await loadAsset(name, 'text/html; charset=utf-8');
-      let html = base.buf.toString('utf8');
-      for (const [k, v] of Object.entries(vars)) html = html.replaceAll('{{' + k + '}}', () => escAttr(v));
-      for (const [k, v] of Object.entries(raw)) html = html.replaceAll('{{' + k + '}}', () => v);
+      const html = fillTemplate(base.buf.toString('utf8'), vars, raw);
       const buf = Buffer.from(html, 'utf8');
       p = {
         buf,
@@ -597,11 +590,11 @@ async function handle(req, res) {
     return serveTemplated(req, res, 'report.html', 'index', {
       TITLE: 'Weekly reports — USDC on Arc, measured · Stabledesk',
       DESCRIPTION: 'One dated report a week on stablecoins on Arc: supply checked on-chain, cross-chain flows, '
-        + 'and volume under three published measures. Every figure reproducible from the public API.',
+        + 'and volume under three published measures. Volumes and flows reproducible from the public API, supply from the chain.',
       CANONICAL: 'https://stabledesk.xyz/reports',
       OG_TYPE: 'website',
       OG_TITLE: 'Weekly reports · Stabledesk',
-      OG_DESC: 'Stablecoins on Arc, one dated week at a time — every figure reproducible.',
+      OG_DESC: 'Stablecoins on Arc, one dated week at a time — every figure dated and sourced.',
       ROBOTS: 'index, follow',
       H1: 'Weekly reports',
     }, {
@@ -619,7 +612,7 @@ async function handle(req, res) {
     if (!body) return serveFile(req, res, '404.html', 'text/html; charset=utf-8', 404);
     const net = networkLabel(r);
     return serveTemplated(req, res, 'report.html', r.slug, {
-      TITLE: `${r.title} — ${windowLabel(r)} · Stabledesk`,
+      TITLE: `${r.title} — ${net}, ${windowLabel(r)} · Stabledesk`,
       DESCRIPTION: r.summary,
       CANONICAL: `https://stabledesk.xyz/reports/${r.slug}`,
       OG_TYPE: 'article',

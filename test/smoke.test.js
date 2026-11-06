@@ -2962,7 +2962,9 @@ test('every weekly report is a complete seven-day UTC window on a known network,
     for (const k of ['from', 'to', 'published']) assert.match(r[k], ISO, `${r.slug}.${k}`);
     assert.equal(r.slug, r.to, 'the slug is the last day of the window');
     assert.equal(Date.parse(r.to) - Date.parse(r.from), 6 * 86400e3, `${r.slug}: seven days, both ends inclusive`);
-    assert.ok(r.published > r.to, `${r.slug}: published after the window closed, never during it`);
+    // The rule that keeps a week from being picked for how it reads: the last seven complete UTC days
+    // before publication, so a report published later is a different week, not the same one redated.
+    assert.equal(Date.parse(r.published) - Date.parse(r.to), 86400e3, `${r.slug}: the window is the last seven complete UTC days before publication`);
     assert.ok(!slugs.has(r.slug), `${r.slug} listed twice`); slugs.add(r.slug);
     if (previous) assert.ok(r.to < previous, 'newest first');
     previous = r.to;
@@ -3001,7 +3003,7 @@ test('/reports serves each report under its own network, with dollar amounts int
   const { rmSync } = await import('node:fs');
   const http = await import('node:http');
   const net = await import('node:net');
-  const { REPORTS } = await import('../reports.js');
+  const { REPORTS, networkLabel } = await import('../reports.js');
 
   const port = await new Promise((resolve) => {
     const probe = net.createServer().listen(0, '127.0.0.1', () => {
@@ -3038,24 +3040,28 @@ test('/reports serves each report under its own network, with dollar amounts int
     for (let i = 0; i < 200 && !out.includes('Stabledesk →'); i++) await new Promise((r) => setTimeout(r, 50));
     assert.ok(out.includes('Stabledesk →'), `the server did not start:\n${out}`);
 
-    const r = REPORTS.find((x) => x.slug === '2026-10-29');
     const index = await get('/reports');
     assert.equal(index.status, 200);
-    assert.ok(index.body.includes(`href="/reports/${r.slug}"`), 'the index links every report');
+    const sitemap = (await get('/sitemap.xml')).body;
+    for (const r of REPORTS) {
+      assert.ok(index.body.includes(`href="/reports/${r.slug}"`), 'the index links every report');
+      assert.ok(sitemap.includes(`/reports/${r.slug}</loc>`), 'listed for crawlers');
 
-    const page = await get(`/reports/${r.slug}`);
-    assert.equal(page.status, 200);
-    assert.ok(!page.body.includes('{{'), 'every placeholder is resolved');
-    assert.match(page.body, /Arc mainnet · chain 5042/, 'labelled with the network it was measured on, not the server\'s');
-    assert.ok(!/Arc testnet/.test(page.body), 'and nothing on it borrows the active testnet profile');
-    // String replacement gives "$&" and "$$" meaning; the title and body are full of dollar amounts.
-    assert.ok(page.body.includes('closed above $1B for the first time'), 'dollar amounts reach the page as written');
-    assert.ok(page.body.includes('1,009.8M'));
-    assert.match(page.body, /<link rel="canonical" href="https:\/\/stabledesk\.xyz\/reports\/2026-10-29">/);
+      const page = await get(`/reports/${r.slug}`);
+      assert.equal(page.status, 200);
+      assert.ok(!page.body.includes('{{'), 'every placeholder is resolved');
+      // Closed on the badge's end tag: "chain 5042" is also how "chain 5042002", the testnet profile's id, begins.
+      assert.ok(page.body.includes(`${networkLabel(r)} · chain ${r.chainId}</span>`), 'labelled with the network it was measured on, not the server\'s');
+      if (r.chainId === 5042) assert.ok(!/Arc testnet/.test(page.body), 'and nothing on it borrows the active testnet profile');
+      // String replacement gives "$&", "$'" and "$$" meaning, and a report is full of dollar amounts:
+      // the body has to reach the page byte for byte.
+      const body = readFileSync(join(import.meta.dirname, '..', 'reports', `${r.slug}.html`), 'utf8');
+      assert.ok(page.body.includes(body), `${r.slug}: the body reaches the page as written`);
+      assert.ok(page.body.includes(`<link rel="canonical" href="https://stabledesk.xyz/reports/${r.slug}">`));
+    }
 
-    assert.equal((await get('/reports/2026-10-30')).status, 404, 'an unlisted week is a real 404');
+    assert.equal((await get('/reports/2000-01-01')).status, 404, 'an unlisted week is a real 404');
     assert.equal((await get('/reports/../server.js')).status, 404);
-    assert.ok((await get('/sitemap.xml')).body.includes(`/reports/${r.slug}</loc>`), 'listed for crawlers');
   } finally {
     child.kill('SIGTERM');
     const stuck = setTimeout(() => child.kill('SIGKILL'), 5000);
@@ -3063,4 +3069,16 @@ test('/reports serves each report under its own network, with dollar amounts int
     clearTimeout(stuck);
     for (const ext of ['', '-wal', '-shm']) rmSync(dbPath + ext, { force: true });
   }
+});
+
+// The byte-for-byte check above only bites when a body happens to contain one of these patterns, and
+// "$10M" is not one: given a string, replaceAll reads "$&", "$'", "$`" and "$$" in it. So the filling
+// is tested on them directly, through both the escaped and the raw path.
+test('page placeholders take dollar signs literally, escaped or raw', async () => {
+  const { fillTemplate, escAttr } = await import('../template.js');
+  const tricky = "$& $' $` $$ $1 $<x> \"USDC\"";
+  const out = fillTemplate('<h1>{{A}}</h1><main>{{B}}</main><p>{{A}}</p>', { A: tricky }, { B: tricky });
+  assert.equal(out, `<h1>${escAttr(tricky)}</h1><main>${tricky}</main><p>${escAttr(tricky)}</p>`);
+  // The double quote matters most: vars end up in content="…" attributes.
+  assert.equal(escAttr(tricky), '$&amp; $&#39; $` $$ $1 $&lt;x&gt; &quot;USDC&quot;');
 });
