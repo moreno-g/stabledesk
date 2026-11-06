@@ -8,7 +8,7 @@ Public, MIT, `moreno-g/stabledesk` → [stabledesk.xyz](https://stabledesk.xyz)
 ## Commandes
 
 ```
-npm test     # node --test → test/smoke.test.js (102 tests, aucun réseau)
+npm test     # node --test → test/smoke.test.js + test/noise-clock.test.js (104 tests, aucun réseau)
 npm start    # node server.js, port 4317
 ```
 
