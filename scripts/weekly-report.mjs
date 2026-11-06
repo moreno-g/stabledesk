@@ -28,7 +28,7 @@ import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { REPORTS } from '../reports.js';
-import { chainReader, dayCloser, makeRpc, recordingFetch, replayFetch } from './weekly-chain.mjs';
+import { chainReader, dayCloser, makeRpc, recordingFetch, replayFetch, retryingFetch } from './weekly-chain.mjs';
 import {
   assertSeriesCovers, buildReport, candidates, closesFrom, gapText, isoDay, parseHistory, priorHigh, renderBody, renderNotes,
   reportWindow, supplyReadDays, thread, X_LIMIT,
@@ -41,6 +41,8 @@ const PROTOCOL = '2026-07-28';
 // assumed: an unknown chain needs --rpc, and the RPC's own chain id is checked against the series.
 const RPC_BY_CHAIN = { 5042: 'https://rpc.mainnet.arc.io', 5042002: 'https://rpc.testnet.arc.io' };
 const UA = 'stabledesk-weekly-report';
+// Every request to the site goes through this: a redeploy's 502 or a 429 is waited out (weekly-chain.mjs).
+const http = retryingFetch(globalThis.fetch, { log: (msg) => console.error(`  ${msg}`) });
 
 function parseArgs(argv) {
   const out = {};
@@ -59,7 +61,7 @@ function parseArgs(argv) {
 const exists = (p) => access(p).then(() => true, () => false);
 
 async function getJson(url, headers = {}) {
-  const res = await fetch(url, { headers: { 'user-agent': UA, ...headers }, signal: AbortSignal.timeout(30000) });
+  const res = await http(url, { headers: { 'user-agent': UA, ...headers } });
   if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
   return res.json();
 }
@@ -80,7 +82,7 @@ async function readSeries(key) {
     // /v1 bodies carry no chain id; /v1/status, from the same server, says which chain it indexes.
     return { series: { chainId: status.chainId, data }, filtered, source: `${SITE}/v1/stablecoins/history?token=USDC&range=all, with an API key` };
   }
-  const res = await fetch(`${SITE}/mcp`, {
+  const res = await http(`${SITE}/mcp`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -98,7 +100,6 @@ async function readSeries(key) {
         _meta: { 'io.modelcontextprotocol/protocolVersion': PROTOCOL, 'io.modelcontextprotocol/clientCapabilities': {} },
       },
     }),
-    signal: AbortSignal.timeout(30000),
   });
   if (!res.ok) throw new Error(`${SITE}/mcp: HTTP ${res.status}`);
   const text = await res.text();
