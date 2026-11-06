@@ -267,6 +267,53 @@ const REGISTRY = [
     verified: true,
     added: '2026-10-20',
   },
+  // Synthra publishes its Arc deployments in its own docs, and its team pointed us there when asked.
+  // Checked on Arc mainnet on 3 Nov 2026: every address has bytecode, both factories answer
+  // feeAmountTickSpacing like Uniswap v3's, and pools found through each position manager answer
+  // factory() and come back from getPool. Shared contracts its list repeats (Permit2, USDC) stay
+  // with their own entries, and the fee recipient is left out: its balance is Synthra's revenue, not deposits.
+  {
+    id: 'synthra',
+    name: 'Synthra',
+    vendor: 'Synthra',
+    category: 'dex',
+    desc: 'Spot exchange built on Uniswap v3, with a token launchpad. Pools are separate contracts, attributed when '
+      + 'Synthra\'s factory confirms it created them; launched tokens trade against USDC in the launchpad until they move to a pool.',
+    links: { site: 'https://synthra.org', docs: 'https://docs.synthra.org/docs/contract-addresses' },
+    contracts: [
+      '0x84169f9adf4f5f0e483bfc350498a85b1d7ec638',   // V3.1 Factory
+      '0x800ffd3d737bf069d5ac62297b1f718776a18929',   // V3.1 Universal Router
+      '0x0abd8a8f8c6188c55f7e817273fcb7d9c3699962',   // V3.1 SwapRouter02
+      '0x849557f9b979013fd31c0c61e3d1edaa7ea59a8b',   // V3.1 QuoterV2
+      '0x41509704163f11406debe9c69da1eefab235f1f8',   // V3.1 NonfungiblePositionManager
+      '0xd485c22cf20063532a0234d57f92a341c0a0e5e0',   // V3.1 TickLens
+      '0x2619d7c51b74b271a657e7174f9283dc95852a46',   // Multicall2
+      '0xd8e1943a7de8d52bf1ad0f3f83c697b4634897a2',   // LaunchPadV2 — holds launched tokens' USDC
+      '0xd617bcf7787ef979a205e06f7154d3546e904fd8',   // TickerRegistryV2
+      '0x69c1e5ed0f8f24fad6a31473cd9ec7cadd2ab8a2',   // LaunchTokenFactoryV2
+      '0xc7d35a3d61bc1fedbadda7dc962d7ae2dc35969d',   // V3MigratorV2
+      '0x74a3a7a16ef9305314f372c077b3c212e577e4af',   // LpLockerV2
+      '0x6307fc239c7964942c1bffe51930e55606619c74',   // V3 Factory (legacy)
+      '0xe4c51d643a7d6d94be2646e482c59cf681b7aceb',   // V3 Universal Router (legacy)
+      '0xa50ede66a573ee5bb37e28af5789b76ae5feb828',   // V3 SwapRouter02 (legacy)
+      '0x9c179a7335b3fc841f59aa6a62daf6d5c61b65d7',   // V3 QuoterV2 (legacy)
+      '0x2743b771659fd9ce13970d7367e7e84af6a31049',   // V3 NonfungiblePositionManager (legacy)
+      '0x4a43bd076160779f8120b48fb99ce8adb5a25c8d',   // V3 TickLens (legacy)
+      '0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f',   // UnsupportedProtocol — stand-in WETH address for tooling
+      '0x18d33de5eefb2f91b09385f35f6a1317659cc1f9',   // LaunchPad V1 (legacy) — holds launched tokens' USDC
+      '0x73977148805efb2bf7abf0c6fe58b01c3d25fcbb',   // LaunchPadLens V1
+      '0x27414ac278111c7f02aec2b82afdd8575e53964f',   // V3Migrator V1 (pool seeder)
+      '0xce8e6ec91d39b5a0b36920da5d69f82c253e05f2',   // LpLocker V1
+    ],
+    factories: [
+      { address: '0x84169f9adf4f5f0e483bfc350498a85b1d7ec638', type: 'uniswap-v3' },   // V3.1
+      { address: '0x6307fc239c7964942c1bffe51930e55606619c74', type: 'uniswap-v3' },   // V3 (legacy)
+    ],
+    networks: ['mainnet'],
+    source: 'team',
+    verified: true,
+    added: '2026-11-03',
+  },
   {
     id: 'aave-v4',
     name: 'Aave v4',

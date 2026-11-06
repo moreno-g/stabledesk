@@ -859,13 +859,14 @@ test('the Arc mainnet registry loads, with every address claimed once', async ()
   const out = JSON.parse(execFileSync(process.execPath, ['-e',
     "import('./protocols.js').then(m=>console.log(JSON.stringify({ids:m.PROTOCOLS.map(p=>p.id),f:[...m.attributionRules().factories.keys()],i:[...m.attributionRules().implementations.keys()],s:[...m.attributionRules().singletons.keys()],hub:m.protocolForAddress('0x17288dfc86205301064577b98b02b81017e6f79c')?.id,morpho:m.protocolForAddress('0x34cd04070dd72b14e241112f6d83812df5af7fcd')?.id,pm:m.protocolForAddress('0x8366a39cc670b4001a1121b8f6a443a643e40951')?.id})))"],
     { env, cwd: new URL('..', import.meta.url).pathname, stdio: 'pipe' }).toString());
-  for (const id of ['uniswap', 'aero', 'extended', 'aave-v4', 'morpho', 'circle-stablefx', 'usyc-teller', 'circle-msca-accounts', 'safe', 'arc-memo', 'multicall3from', 'circle-cctp', 'circle-gateway']) {
+  for (const id of ['uniswap', 'aero', 'extended', 'synthra', 'aave-v4', 'morpho', 'circle-stablefx', 'usyc-teller', 'circle-msca-accounts', 'safe', 'arc-memo', 'multicall3from', 'circle-cctp', 'circle-gateway']) {
     assert.ok(out.ids.includes(id), `${id} is on mainnet`);
   }
   assert.equal(out.hub, 'aave-v4');
   assert.equal(out.morpho, 'morpho');
   assert.equal(out.pm, 'uniswap');
-  assert.equal(out.f.length, 5, 'Uniswap v2 and v3 factories, Morpho vault factory, Aero CL factories (Lite and full launch)');
+  assert.equal(out.f.length, 7, 'Uniswap v2 and v3 factories, Morpho vault factory, Aero CL factories (Lite and full launch), Synthra v3 factories (V3.1 and legacy)');
+  assert.ok(out.f.includes('0x84169f9adf4f5f0e483bfc350498a85b1d7ec638'), 'Synthra V3.1 factory, from Synthra\'s address page');
   assert.ok(out.f.includes('0x7f83235643181e440433400a027618cd50879751'), 'Aero full-launch CL factory, from cl-arc.json');
   assert.ok(out.f.includes('0xb89df768af2cfe637ceb352c587fe8edaf491d03'), 'Aero CL factory, from Aero\'s deployment file');
   assert.equal(out.s.length, 8, 'Safe singletons 1.3.0, 1.4.1 and 1.5.0, L1 and L2');
@@ -1973,7 +1974,7 @@ test('the logo is served as files: a real ICO and PNGs of the stated sizes, decl
   assert.deepEqual(png(file('apple-touch-icon.png')), { png: true, w: 180, h: 180 });
 
   // Declared beside the inline SVG in every page, so whatever reads the HTML finds a real URL.
-  for (const p of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy', '404']) {
+  for (const p of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy', '404', 'report']) {
     const html = readFileSync(join(root, 'public', `${p}.html`), 'utf8');
     assert.match(html, /<link rel="icon" href="\/favicon\.ico"/, `${p}.html declares /favicon.ico`);
     assert.match(html, /<link rel="apple-touch-icon" href="\/apple-touch-icon\.png">/, `${p}.html declares the touch icon`);
@@ -2924,7 +2925,7 @@ test('the privacy page is served, linked from every footer, and its storage clai
   const server = read('server.js');
   assert.match(server, /path === '\/privacy'/, 'routed');
   assert.match(server, /url\('\/privacy'/, 'listed in the sitemap');
-  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities']) {
+  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'report']) {
     assert.match(read('public', `${f}.html`), /href="\/privacy"/, `${f}.html links the privacy page from its footer`);
   }
   assert.match(page, /mailto:/, 'a way to reach the operator');
@@ -2941,7 +2942,143 @@ test('the privacy page is served, linked from every footer, and its storage clai
 
   // "Sets no cookies": nothing in the server writes one, and no page script does.
   for (const f of ['server.js', 'api.js']) assert.doesNotMatch(read(f), /set-cookie/i, `${f} sets no cookie`);
-  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy']) {
+  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy', 'report']) {
     assert.doesNotMatch(read('public', `${f}.html`), /document\.cookie/, `${f}.html writes no cookie`);
   }
+});
+
+// ---- weekly reports (reports.js, /reports) ----
+// A report is a dated record, not a live page: its figures are frozen in its file and its network is
+// the one it was measured on. These pin what makes it checkable — a fixed seven-day window that had
+// ended before publication, a network label derived from a known chain id and written next to the
+// figures, and a body that actually ships in the image.
+test('every weekly report is a complete seven-day UTC window on a known network, and its body ships', async () => {
+  const { REPORTS, networkLabel, windowLabel, jsonLd } = await import('../reports.js');
+  assert.ok(REPORTS.length > 0);
+  const ISO = /^\d{4}-\d{2}-\d{2}$/;
+  const slugs = new Set();
+  let previous = null;
+  for (const r of REPORTS) {
+    for (const k of ['from', 'to', 'published']) assert.match(r[k], ISO, `${r.slug}.${k}`);
+    assert.equal(r.slug, r.to, 'the slug is the last day of the window');
+    assert.equal(Date.parse(r.to) - Date.parse(r.from), 6 * 86400e3, `${r.slug}: seven days, both ends inclusive`);
+    // The rule that keeps a week from being picked for how it reads: the last seven complete UTC days
+    // before publication, so a report published later is a different week, not the same one redated.
+    assert.equal(Date.parse(r.published) - Date.parse(r.to), 86400e3, `${r.slug}: the window is the last seven complete UTC days before publication`);
+    assert.ok(!slugs.has(r.slug), `${r.slug} listed twice`); slugs.add(r.slug);
+    if (previous) assert.ok(r.to < previous, 'newest first');
+    previous = r.to;
+
+    const net = networkLabel(r);
+    assert.ok(net, `${r.slug}: chain id ${r.chainId} has no network label`);
+    const body = readFileSync(join(import.meta.dirname, '..', 'reports', `${r.slug}.html`), 'utf8');
+    // The body is served as written. A placeholder in it would reach readers as "{{NET}}" — or, worse,
+    // be resolved against whichever profile the server happens to run.
+    assert.ok(!body.includes('{{'), `${r.slug}: the body is frozen, it carries no placeholders`);
+    assert.ok(!body.includes('testnet-only'), `${r.slug}: no network directives in a frozen body`);
+    assert.ok(body.includes(net), `${r.slug}: the network label is written next to the figures`);
+  }
+
+  // Every page links the reports from its footer, including pages added after them.
+  for (const f of ['index', 'docs', 'methodology', 'ecosystem', 'protocol', 'status', 'token', 'entities', 'privacy', 'report']) {
+    assert.match(readFileSync(join(import.meta.dirname, '..', 'public', `${f}.html`), 'utf8'), /href="\/reports"/, `${f}.html links /reports from its footer`);
+  }
+
+  // The image copies *.js and public/ only; a report body anywhere else has to be named.
+  assert.match(readFileSync(join(import.meta.dirname, '..', 'Dockerfile'), 'utf8'), /^COPY reports \.\/reports$/m);
+
+  assert.equal(windowLabel({ from: '2026-10-23', to: '2026-10-29' }), '23–29 Oct 2026');
+  assert.equal(windowLabel({ from: '2026-09-28', to: '2026-10-04' }), '28 Sept – 4 Oct 2026');
+  assert.equal(windowLabel({ from: '2026-12-28', to: '2027-01-03' }), '28 Dec 2026 – 3 Jan 2027');
+
+  // JSON-LD sits inside <script>, where HTML escaping does not apply: "<" must not survive raw.
+  const ld = jsonLd('https://stabledesk.xyz', { ...REPORTS[0], title: '</script><script>alert(1)</script>' });
+  assert.ok(!ld.includes('</script'), 'a value cannot close the script element');
+  assert.equal(JSON.parse(ld)['@graph'][1].headline, '</script><script>alert(1)</script>', 'and the JSON still says what it said');
+});
+
+test('/reports serves each report under its own network, with dollar amounts intact', async () => {
+  const { spawn } = await import('node:child_process');
+  const { once } = await import('node:events');
+  const { rmSync } = await import('node:fs');
+  const http = await import('node:http');
+  const net = await import('node:net');
+  const { REPORTS, networkLabel } = await import('../reports.js');
+
+  const port = await new Promise((resolve) => {
+    const probe = net.createServer().listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+  const dbPath = join(tmpdir(), `stabledesk-test-reports-${process.pid}-${Date.now()}.db`);
+  // ARC_NETWORK is empty, so this server runs the testnet profile while serving a mainnet report.
+  const child = spawn(process.execPath, ['--import', OFFLINE, 'server.js'], {
+    cwd: join(import.meta.dirname, '..'),
+    env: {
+      ...process.env, PORT: String(port), DB_PATH: dbPath, ARC_NETWORK: '', ADMIN_TOKEN: '',
+      TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '',
+      TVL_ENABLED: 'false', ENTITIES_ENABLED: 'false', WATCH_ENABLED: 'false', WHALEWATCH_ENABLED: 'false', BILLING_ENABLED: 'false',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const closed = once(child, 'close');
+  let out = '';
+  child.stdout.on('data', (c) => { out += c; });
+  child.stderr.on('data', (c) => { out += c; });
+
+  const get = (path) => new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    }).on('error', reject);
+  });
+
+  try {
+    for (let i = 0; i < 200 && !out.includes('Stabledesk →'); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(out.includes('Stabledesk →'), `the server did not start:\n${out}`);
+
+    const index = await get('/reports');
+    assert.equal(index.status, 200);
+    const sitemap = (await get('/sitemap.xml')).body;
+    for (const r of REPORTS) {
+      assert.ok(index.body.includes(`href="/reports/${r.slug}"`), 'the index links every report');
+      assert.ok(sitemap.includes(`/reports/${r.slug}</loc>`), 'listed for crawlers');
+
+      const page = await get(`/reports/${r.slug}`);
+      assert.equal(page.status, 200);
+      assert.ok(!page.body.includes('{{'), 'every placeholder is resolved');
+      // Closed on the badge's end tag: "chain 5042" is also how "chain 5042002", the testnet profile's id, begins.
+      assert.ok(page.body.includes(`${networkLabel(r)} · chain ${r.chainId}</span>`), 'labelled with the network it was measured on, not the server\'s');
+      if (r.chainId === 5042) assert.ok(!/Arc testnet/.test(page.body), 'and nothing on it borrows the active testnet profile');
+      // String replacement gives "$&", "$'" and "$$" meaning, and a report is full of dollar amounts:
+      // the body has to reach the page byte for byte.
+      const body = readFileSync(join(import.meta.dirname, '..', 'reports', `${r.slug}.html`), 'utf8');
+      assert.ok(page.body.includes(body), `${r.slug}: the body reaches the page as written`);
+      assert.ok(page.body.includes(`<link rel="canonical" href="https://stabledesk.xyz/reports/${r.slug}">`));
+    }
+
+    assert.equal((await get('/reports/2000-01-01')).status, 404, 'an unlisted week is a real 404');
+    assert.equal((await get('/reports/../server.js')).status, 404);
+  } finally {
+    child.kill('SIGTERM');
+    const stuck = setTimeout(() => child.kill('SIGKILL'), 5000);
+    await closed;
+    clearTimeout(stuck);
+    for (const ext of ['', '-wal', '-shm']) rmSync(dbPath + ext, { force: true });
+  }
+});
+
+// The byte-for-byte check above only bites when a body happens to contain one of these patterns, and
+// "$10M" is not one: given a string, replaceAll reads "$&", "$'", "$`" and "$$" in it. So the filling
+// is tested on them directly, through both the escaped and the raw path.
+test('page placeholders take dollar signs literally, escaped or raw', async () => {
+  const { fillTemplate, escAttr } = await import('../template.js');
+  const tricky = "$& $' $` $$ $1 $<x> \"USDC\"";
+  const out = fillTemplate('<h1>{{A}}</h1><main>{{B}}</main><p>{{A}}</p>', { A: tricky }, { B: tricky });
+  assert.equal(out, `<h1>${escAttr(tricky)}</h1><main>${tricky}</main><p>${escAttr(tricky)}</p>`);
+  // The double quote matters most: vars end up in content="…" attributes.
+  assert.equal(escAttr(tricky), '$&amp; $&#39; $` $$ $1 $&lt;x&gt; &quot;USDC&quot;');
 });

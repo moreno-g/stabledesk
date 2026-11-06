@@ -604,7 +604,7 @@ test('the method says real volume leaves out mints and burns, and dates every co
   const flat = (s) => s.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ');
 
   assert.match(flat(section('Three volume measures')), /mints and burns[^.]*not counted in real or adjusted volume/i);
-  assert.match(page.match(/<tr><td>Real volume<\/td><td>(.*?)<\/td><\/tr>/)[1], /[Mm]ints and burns are left out/);
+  assert.match(page.match(/<tr><td>Real volume<\/td><td>(.*?)<\/td><\/tr>/)[1], /[Mm]ints and burns are (left out|set aside)/);
   assert.match(page.match(/<tr><td>Raw volume<\/td><td>(.*?)<\/td><\/tr>/)[1], /mints and burns included/);
 
   // Every figure that changed on 30 October carries a dated line saying what it was (CLAUDE.md).

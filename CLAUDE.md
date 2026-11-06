@@ -8,7 +8,7 @@ Public, MIT, `moreno-g/stabledesk` → [stabledesk.xyz](https://stabledesk.xyz)
 ## Commandes
 
 ```
-npm test     # node --test → test/smoke.test.js + test/figures.test.js (113 tests, aucun réseau)
+npm test     # node --test → test/smoke.test.js + test/figures.test.js (116 tests, aucun réseau)
 npm start    # node server.js, port 4317
 ```
 
@@ -26,9 +26,10 @@ Node **≥ 22.5.0** (obligatoire : `node:sqlite`). Zéro dépendance npm, ESM, `
 | `api.js` | API publique `/v1` : clés, tiers, rate limiting. |
 | `mcp.js` | Endpoint MCP `/mcp` pour les assistants IA : outils en lecture seule, sans clé. **Lit `/v1` en interne** (`handleV1(..., { internal: true })`) : aucun chiffre n'y est recalculé. Sert MCP 2026-07-28 et les révisions antérieures (`initialize`). Pas d'outil par adresse, volontairement. |
 | `rankings.js` `tvl.js` `entities.js` `protocols.js` | Métriques et registres. `entities.js` est **expérimental**. |
+| `reports.js` + `reports/` | Rapports hebdo `/reports` : registre, fenêtre de 7 jours UTC, corps HTML figés (copiés dans l'image par le Dockerfile). |
 | `whalewatch.js` `chainalert.js` `chainuptime.js` `telegram.js` | Alertes et disponibilité. `whalewatch` est en réserve jusqu'au mainnet. |
 | `payments.js` | Facturation crypto : surveille l'USDC sur **Base mainnet**, pas sur Arc. |
-| `csv.js` `openapi.js` `validate.js` `constants.js` `search.js` `labels.js` | Surface API et helpers. |
+| `csv.js` `openapi.js` `validate.js` `constants.js` `search.js` `labels.js` `template.js` | Surface API et helpers. `template.js` remplit les pages (`{{KEY}}`) : remplacements par fonctions, à cause des `$`. |
 
 ## Règles propres à ce repo
 
