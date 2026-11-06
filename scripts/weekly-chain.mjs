@@ -25,6 +25,32 @@ export const isRateLimit = (e) => e?.code === -32005 || e?.code === 429
 // backoff below is a fine answer to the rare server that sends one.
 const retryAfterMs = (h) => (h != null && /^\d+$/.test(h.trim()) ? Math.min(60000, Number(h) * 1000) : null);
 
+// For the site the series comes from. It answers its own redeploys with a 502 for a few seconds (the
+// first run of the Friday workflow met one, 6 November 2026), and any public endpoint can answer a
+// burst with 429: a draft should wait those out, not fail. Any other status is an answer and comes back
+// as it came. Each attempt gets its own timeout, so a slow first try cannot cut the next one short.
+export function retryingFetch(inner = globalThis.fetch, { sleep = sleepFor, retries = 6, baseMs = 1000, timeoutMs = 30000, log = () => {} } = {}) {
+  return async (url, init = {}) => {
+    for (let attempt = 0; ; attempt++) {
+      let res = null, why;
+      try {
+        res = await inner(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      } catch (e) {
+        why = `${e.name}: ${e.message}`;
+      }
+      if (res && !RETRY_STATUS.has(res.status)) return res;
+      if (res) why = `HTTP ${res.status}`;
+      if (attempt >= retries) {
+        if (res) return res; // the caller reports the status it got
+        throw new Error(`${url}: gave up after ${attempt + 1} attempts (${why})`);
+      }
+      const ms = (res && retryAfterMs(res.headers?.get?.('retry-after'))) ?? baseMs * 2 ** attempt;
+      log(`${url}: ${why}, retrying in ${ms} ms`);
+      await sleep(ms);
+    }
+  };
+}
+
 export function makeRpc(url, { fetch = globalThis.fetch, sleep = sleepFor, retries = 6, baseMs = 500, log = () => {} } = {}) {
   let id = 0;
   return async function call(method, params = []) {
