@@ -38,6 +38,8 @@ const PRUNE_EVERY = 120;    // prune roughly every N ticks
 // is not the problem.
 const MAX_SPLIT_DEPTH = 9;
 
+// The live sample: HEADER_WINDOW headers behind the head, re-measured every tick. Their timestamps are
+// whole seconds, so it moves in steps of about 70 ms. Not what the flag set converts at (spanClock).
 let avgBlockMs = 500;
 let anchor = { block: 0, ts: 0 };          // (block -> timestamp) reference
 let tickCount = 0;
@@ -48,6 +50,16 @@ let noisyRows = [];
 let noisy = new Set();
 let noisyAt = 0;
 const NOISY_TTL = 60000;
+
+// The block time each address's sent span is turned into days at: measured from the first block of sent
+// history to the head (see blockTimeBetween). `noisyClock` is the measure the current set was computed
+// at, which is the one the snapshot publishes — the clock itself moves on at every tick.
+let spanClock = null;                      // { ms, from: { block, ts }, to: { block, ts } }
+let clockRef = null;                       // { block, ts }: its far end
+let clockCheckedAt = 0;
+let noisyClock = null;
+const CLOCK_META = 'noise_block_clock';    // the last measure, so a restart recomputes the set it left
+const CLOCK_RECHECK_MS = 10 * 60000;       // how often the far end is checked for a move, or retried
 
 export const live = { snapshot: { ok: false, booting: true } };
 
@@ -232,6 +244,23 @@ export function noiseLimitsFor(days) {
 export function noiseWindowDays(firstBlock, lastBlock, blockMs) {
   const span = Math.max(0, (Number(lastBlock) || 0) - (Number(firstBlock ?? lastBlock) || 0));
   return Math.max(NOISE_FILTER.windowDays, (span * Math.max(1, blockMs)) / 86400000);
+}
+
+// Pure: the average block time between two headers, in ms, or null when they are too close together for
+// whole-second timestamps to measure it.
+//
+// The flag set converts at this, from the first block of sent history to the head. It used to convert at
+// avgBlockMs, the live strip's fifteen headers: fourteen intervals of whole seconds read 6, 7 or 8 s, so
+// that sample can only be 428.6, 500 or 571.4 ms, on a chain whose block time was 507.7 ms from 29 Oct to
+// 5 Nov 2026. Past 30 days an address's limits scale with its span in days, so every address with more
+// than a month of sent history had them move by up to 14% from one refresh to the next, and the set with
+// them: 229, 242 or 256 addresses on Arc mainnet within the same hour of 6 Nov 2026. Over the 6.8M blocks
+// of sent history held that day, the same one-second resolution is worth under 0.0002 ms.
+export function blockTimeBetween(from, to, minSpan = HEADER_SPAN) {
+  if (!from || !to) return null;
+  const span = to.block - from.block, secs = to.ts - from.ts;
+  if (!(span >= minSpan) || !(secs > 0)) return null;
+  return (secs / span) * 1000;
 }
 
 // A transfer counts as noise only when *both* ends are flagged infrastructure — bot talking to
@@ -441,13 +470,65 @@ function refreshNoisy() {
   // address active for two months was measured over two months and judged against seven days, and
   // the same behaviour was flagged or not depending on how long this process had been up — adjusted
   // volume drifting downwards over a deployment's lifetime, with nothing saying so.
-  noisyRows = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, avgBlockMs, NOISE_FILTER.windowDays);
+  //
+  // Spans are converted at the long-range clock, never at the live sample. Before anything has been
+  // measured or persisted — a database's first boot with this code, until the chain answers — the
+  // live sample, or its 500 ms default before the first poll, is all there is, and the snapshot says
+  // so: `blockMsMeasured` is null.
+  const clock = spanClock || { ms: avgBlockMs, from: null, to: null };
+  noisyRows = db.noisyAddresses(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, clock.ms, NOISE_FILTER.windowDays);
   // How many addresses the published thresholds select, before the cap is applied. When the two
   // numbers differ the flag set is no longer the set the method describes, and saying so is the
   // difference between a documented limitation and an undocumented one.
-  noisyQualifying = db.noisyAddressCount(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, avgBlockMs, NOISE_FILTER.windowDays);
+  noisyQualifying = db.noisyAddressCount(NOISE_FILTER.txPerDay, NOISE_FILTER.volumePerDay, clock.ms, NOISE_FILTER.windowDays);
   noisy = new Set(noisyRows.map((r) => r.address));
   noisyAt = Date.now();
+  noisyClock = clock;
+  if (spanClock) { try { db.setMetaValue(CLOCK_META, JSON.stringify(spanClock)); } catch { /* best-effort, like supplies */ } }
+}
+
+// The first block of sent history: as far down as the seed has re-read, or, on a database that counted
+// sends from the first block it indexed, that block. Null while neither is known.
+function sentHistoryFrom() {
+  if (db.getMetaValue(SENT_META.liveFrom) === '0') return Number(db.getMetaValue(INDEX_FROM)) || db.firstIndexedBlock() || null;
+  const hi = db.getMetaValue(SENT_META.hi);
+  return hi != null && Number.isFinite(Number(hi)) ? Number(hi) + 1 : null;
+}
+
+// Re-measure the flag set's clock up to `head` ({ block, ts }, a header already read). The far end is the
+// first block of sent history, read once and then only when it moves, which it does while the seed is
+// running; `fallback`, a header read at boot, stands in when that one cannot be read. Never throws: a
+// clock that cannot be measured keeps its last value, and a tick is never failed over it.
+async function measureClock(head, fallback = null) {
+  try {
+    if (Date.now() - clockCheckedAt >= CLOCK_RECHECK_MS) {
+      clockCheckedAt = Date.now();
+      const want = sentHistoryFrom();
+      if (want != null && want < head.block && want !== clockRef?.block) {
+        try {
+          const { out } = await rpc([{ method: 'eth_getBlockByNumber', params: [hex(want), false] }]);
+          const ts = out[0]?.timestamp != null ? parseInt(out[0].timestamp, 16) : NaN;
+          if (Number.isFinite(ts)) clockRef = { block: want, ts };
+        } catch (e) {
+          console.error(`[clock] header ${want}:`, e.message || e);
+        }
+      }
+    }
+    if (!clockRef && fallback) clockRef = fallback;
+    const ms = blockTimeBetween(clockRef, head);
+    if (ms != null) spanClock = { ms, from: clockRef, to: { block: head.block, ts: head.ts } };
+  } catch (e) {
+    console.error('[clock]', e.message || e);
+  }
+}
+
+// The last measure, read back at boot so the set computed before the chain answers is the one the
+// previous run published, not one converted at the boot default.
+function loadClock() {
+  try {
+    const c = JSON.parse(db.getMetaValue(CLOCK_META) || 'null');
+    if (c?.ms > 0 && c.from && c.to) { spanClock = c; clockRef = c.from; }
+  } catch { /* unreadable: measured again at the first header read */ }
 }
 
 // Fee distribution — a median beside the mean.
@@ -1483,8 +1564,11 @@ function dbDerived({ frozen = false } = {}) {
       // The thresholds are rates, and each address is judged over its own observed span. There is
       // therefore no single window to publish — the limits an address was actually measured against
       // ride on its own row below. `blockMs` is how a block span becomes days, and it is the one
-      // input to that conversion, so it is published too.
-      blockMs: avgBlockMs,
+      // input to that conversion, so it is published too: the value the set above was computed at,
+      // with the two blocks it was measured between, so it can be redone from their headers. It used
+      // to be the newest live sample, not necessarily the one the set had been computed at.
+      blockMsMeasured: noisyClock?.from && noisyClock?.to ? { fromBlock: noisyClock.from.block, toBlock: noisyClock.to.block } : null,
+      blockMs: noisyClock?.ms ?? avgBlockMs,
       minWindowDays: NOISE_FILTER.windowDays,
       // What the filter took out of real volume, per currency; the two headline fields are the base
       // currency's. They were computed on the all-token totals until 30 October 2026, so euros and
@@ -1710,6 +1794,8 @@ async function tickOnce() {
     const l = parseInt(headers.at(-1).timestamp, 16);
     avgBlockMs = Math.max(200, ((l - f) / (headers.length - 1)) * 1000);
     anchor = { block: parseInt(headers.at(-1).number, 16), ts: l };
+    // The flag set's clock, carried to the same head.
+    await measureClock(anchor);
 
     // Refresh the high-frequency address set before indexing, so incoming transfers are
     // classified against current flags rather than a stale set.
@@ -1777,6 +1863,7 @@ export async function start() {
   initReroute();
 
   loadPersistedSupplies();
+  loadClock();
   refreshNoisy();
   snapshotFromDb();
 
@@ -1801,6 +1888,13 @@ export async function start() {
     if (backTs != null && span > 0 && headTs > backTs) {
       avgBlockMs = Math.max(200, ((headTs - backTs) / span) * 1000);
       console.log(`[start] measured block time ${Math.round(avgBlockMs)}ms over ${span} blocks`);
+    }
+    // The flag set's clock, before the backfill classifies a single transfer against the set: from the
+    // first block of sent history, or from the header just read when that one is not served.
+    await measureClock(anchor, backTs != null ? { block: latest - span, ts: backTs } : null);
+    refreshNoisy();
+    if (spanClock) {
+      console.log(`[start] flag-set block time ${spanClock.ms.toFixed(3)}ms over ${spanClock.to.block - spanClock.from.block} blocks`);
     }
     noteHead(latest);
     // Before the seed, not after it. backfill() runs ahead of the first tick, so on a database with a

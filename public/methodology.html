@@ -152,9 +152,9 @@
     <p style="margin-top:0"><strong>How flags are applied.</strong> What counts is what an address <em>sent</em>: transfers out of it,
     at face value across the tracked tokens. Receiving is not activity in this sense — an exchange deposit address is sent money all day
     and is not a bot for it. Each address's sent total is compared with the monthly limits over the sent history we hold: under 30 days
-    of history, with the limits whole; past 30 days, with its average monthly rate (the span, converted to days at the measured block
-    time). On a chain younger than a month that is exactly the published rule, and it is what Visa's 30-day window does on a young
-    chain too. The flag set is recomputed every minute, and the <a href="/">terminal</a> lists the flagged addresses with how much sent
+    of history, with the limits whole; past 30 days, with its average monthly rate (the span, converted to days at the chain's average
+    block time since the first block of sent history). On a chain younger than a month that is exactly the published rule, and it is
+    what Visa's 30-day window does on a young chain too. The flag set is recomputed every minute, and the <a href="/">terminal</a> lists the flagged addresses with how much sent
     history each was judged on, so the arithmetic can be redone rather than trusted.</p>
     <p><strong>What this corrected, on 28&nbsp;September&nbsp;2026.</strong> The limits used to be divided into a daily rate and applied
     over each address's observed span with a one-day floor, to what it moved in <em>both</em> directions. On history shorter than a month
@@ -169,6 +169,18 @@
     how far back sent history reaches (<code>sentHistorySince</code>). Minutes indexed before the correction were scored under the old
     rule and are not restated — the logs they came from are no longer served — so the adjusted series changes rule at
     <code>ruleSince</code>, and the 24-hour figure mixes the two for one day after it. Raw and real volume are unaffected.</p>
+    <p><strong>Corrected on 6&nbsp;November&nbsp;2026: the block time a span is converted at.</strong> Sent history is counted in blocks.
+    It was converted to days at a block time re-sampled at every poll from the 15 newest block headers. Their timestamps are whole
+    seconds, so that sample could only read 428.6, 500 or 571.4&nbsp;ms, on a chain whose block time was 507.7&nbsp;ms from 29&nbsp;October
+    to 5&nbsp;November. The set is recomputed every minute, so every address with more than about a month of sent history had its limits
+    move by up to 14% from one minute to the next, and the flag set moved with them: <strong>229, 242 or 256</strong> addresses
+    qualified on Arc mainnet between 08:50 and 10:10 UTC on 6&nbsp;November. Spans are now converted at the average block time between
+    the first block of sent history and the head, read off those two headers: 507.5&nbsp;ms that day, over the 6.8 million blocks since
+    27&nbsp;September rather than the week quoted above, and over that span a second of rounding is worth under 0.0002&nbsp;ms. The set now moves with what addresses send, not with the rounding. <code>blockMs</code>, published
+    beside the set, was the newest sample, not necessarily the one the set had been computed at; it is now the value the set was computed at,
+    and <code>blockMsMeasured</code> names the two blocks it was measured between, so it can be recomputed from their headers. Adjusted
+    volume is classified against the set in force as each minute is indexed: minutes indexed before the correction keep the set of their
+    minute and are not recomputed. Raw and real volume are unaffected.</p>
     <p>Flags are derived from the same history they filter, so on a <em>cold</em> start the initial backfill
     is indexed before any address has been flagged. Rather than ship a figure we know is wrong, the indexer re-reads that range once
     the first pass has revealed the flagged senders and rewrites the adjusted numbers.</p>
@@ -452,9 +464,18 @@
     chain is. So the span is measured and published rather than assumed. It was previously capped at 1,200 rows, which at the ~954k
     transfers a day Arc testnet was doing in July 2026 is <strong>114 seconds</strong> — every one of those surfaces was describing the last two
     minutes while being labelled as something broader.</p>
-    <p style="margin-bottom:0"><strong>Largest transfers — top 100 per day per token, kept 180 days.</strong> Recorded separately for the
+    <p><strong>Largest transfers — top 100 per day per token, kept 180 days.</strong> Recorded separately for the
     same reason: "the largest transfer" read out of a row-capped table only ever means "the largest of the last few minutes".
     <code>/v1/transfers/largest</code> takes an explicit <code>days</code> and states the window it answered over.</p>
+    <p style="margin-bottom:0"><strong>Which clock the retentions use.</strong> The windows' clock: each retention is counted back from
+    the newest indexed minute, never from later than now, because that minute is where the windows reading these tables end. On a
+    healthy chain the two are seconds apart. TVL history, kept 180 days, is the exception: a balance is recorded on the day it is read,
+    so it follows the wall clock. <strong>Corrected on 30&nbsp;October&nbsp;2026:</strong> the retentions followed the wall clock. Through
+    a halt — the RPC answering, the head not moving — every prune cut further into data that no new block replaced: the individual
+    transfers were gone after a day, the per-day counts behind the 7-day windows lost their first days from the third, and after a
+    week the per-minute aggregates were gone, so every 24-hour figure read 0. On Arc mainnet no published figure was affected: the
+    only halt in its availability record (<code>/v1/chain/uptime</code>), kept since 16&nbsp;September, lasted 14 seconds, on
+    19&nbsp;October.</p>
   </div>
 
   <h2>Caveats</h2>
