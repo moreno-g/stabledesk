@@ -13,6 +13,8 @@
 //   tvl_history    daily TVL levels. A level is a reading taken at an instant; balanceOf today cannot
 //                  tell you last Tuesday's balance.
 //   api_keys/orders  issued keys and paid subscriptions. Losing them revokes access people paid for.
+//   x402_payments  settled pay-per-call payments. The transfers are on-chain; which route each one
+//                  bought is only here, and it is the usage record grant applications cite.
 //
 // `cp` is not a backup of a live SQLite database: with WAL enabled the file on disk is not a complete
 // database on its own, and a copy taken mid-write is a torn one. node:sqlite's backup() drives
@@ -42,7 +44,7 @@ function resolveDbPath() {
 // Tables whose contents cannot be reconstructed from the chain. Counted after the snapshot, because a
 // backup nobody verified is a file, not a backup — and the failure mode that matters is a snapshot
 // that is technically valid and missing the one table it was taken for.
-const IRREPLACEABLE = ['chain_events', 'buckets_daily', 'tvl_history', 'api_keys', 'orders'];
+const IRREPLACEABLE = ['chain_events', 'buckets_daily', 'tvl_history', 'api_keys', 'orders', 'x402_payments'];
 
 const src = resolveDbPath();
 const stamp = new Date().toISOString().slice(0, 10);

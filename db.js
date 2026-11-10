@@ -218,6 +218,15 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
   CREATE INDEX IF NOT EXISTS idx_orders_amount ON orders(amount) WHERE status = 'pending';
 
+  -- One row per x402 payment settled on-chain (see x402.js). Keyed by the settlement transaction, so
+  -- the same settlement can never be counted twice. The payer is an address already public in that
+  -- transaction; it is kept because "how many distinct buyers" is the question this table answers.
+  CREATE TABLE IF NOT EXISTS x402_payments (
+    tx TEXT PRIMARY KEY, network TEXT NOT NULL, payer TEXT, amount TEXT NOT NULL,
+    route TEXT NOT NULL, at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_x402_at ON x402_payments(at);
+
   -- Draft social posts for notable ("whale") transfers — held in reserve until Arc
   -- mainnet (see whalewatch.js). Nothing delivers these anywhere yet; they just
   -- accumulate here so the detection logic can be built and proven ahead of time.
@@ -886,6 +895,22 @@ export const pendingOrders = () => ostmt.pending.all();
 export const latestOrderByKey = (key) => ostmt.latestByKey.get(key);
 export const markOrderPaid = (id, txHash) => ostmt.markPaid.run(Date.now(), txHash, id).changes > 0;
 export const expireStaleOrders = (beforeTs) => ostmt.expireStale.run(beforeTs);
+
+// ---- x402 settlements (see x402.js) ----
+const xstmt = {
+  ins: db.prepare('INSERT OR IGNORE INTO x402_payments(tx, network, payer, amount, route, at) VALUES(?, ?, ?, ?, ?, ?)'),
+  since: db.prepare(`SELECT COUNT(*) AS settled, COUNT(DISTINCT payer) AS payers, SUM(CAST(amount AS INTEGER)) AS amount
+    FROM x402_payments WHERE at >= ?`),
+  byRoute: db.prepare('SELECT route, COUNT(*) AS settled FROM x402_payments WHERE at >= ? GROUP BY route ORDER BY settled DESC'),
+};
+// `amount` is in the asset's base units, kept as text so no float ever touches money. Returns false
+// when the transaction was already recorded.
+export const recordX402Payment = ({ tx, network, payer, amount, route, at = Date.now() }) =>
+  xstmt.ins.run(String(tx).toLowerCase(), network, payer ? String(payer).toLowerCase() : null, String(amount), route, at).changes > 0;
+export function x402Summary(sinceMs) {
+  const r = xstmt.since.get(sinceMs);
+  return { settled: r.settled, payers: r.payers, amount: String(r.amount ?? 0), byRoute: xstmt.byRoute.all(sinceMs) };
+}
 
 // generic meta get/set, used by payments.js for its own block checkpoint
 export const getMetaValue = (k) => stmt.getMeta.get(k)?.v ?? null;

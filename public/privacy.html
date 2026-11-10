@@ -69,7 +69,7 @@
 <body>
 <div class="wrap">
   <div class="top"><div class="logo"></div><h1>Privacy</h1><button class="iconbtn" id="themeBtn" type="button" style="margin-left:auto" aria-label="Theme"></button></div>
-  <p class="sub">Last updated 31 October 2026</p>
+  <p class="sub">Last updated 6 November 2026</p>
 
   <p class="lead">Stabledesk has no accounts and sets no cookies. It measures public blockchain data, and it keeps as little as it can about the people who read it: no name, no email address, and no IP address written to disk.</p>
 
@@ -86,6 +86,7 @@
     <p><strong>API keys.</strong> A free key is created without an account. Stored with it: the key, a label if you choose one (up to 60 characters), its tier, when it was created, when it was last used, and how many calls it made, in total and per day. When a key is created, the operator receives a Telegram notification with its label and the first characters of the key — never the full key.</p>
     <p><strong>Webhook alerts.</strong> An alert stores the webhook URL you give it, its filters (token, address, minimum amount), and when it last fired. Delete it at any time with <code>DELETE /v1/alerts/{id}</code>.</p>
     <p><strong>Pro billing</strong>, if you pay for it: the order (key, amount, status, dates) and, once paid, the transaction hash of the USDC payment on Base, which is public on that chain anyway.</p>
+    <p><strong>Pay per call</strong> (<code>/x402</code>), if you pay for an answer instead of using a key: for each settled payment, the transaction hash, the paying address, the amount, the route and the date. All of it except the route is public on-chain in the settlement transaction anyway. A request that is not paid for leaves nothing.</p>
     <p><strong>The MCP endpoint</strong> (<code>/mcp</code>), used by AI assistants: the questions and the answers are not stored. Only a daily count per tool name is kept, like the route counts above.</p>
     <p><strong>Rate limits.</strong> To enforce limits, a client's IP address is held in memory for the current minute (an hour for creating keys), then discarded. It is never written to disk.</p>
     <p><strong>Errors.</strong> When a request fails, the server logs the method and the error, never the URL, which can carry a key.</p>
@@ -102,6 +103,7 @@
       <li><strong>Railway</strong> hosts the service; its infrastructure may keep standard connection logs under <a href="https://railway.com/legal/privacy">its own policy</a>.</li>
       <li><strong>Umami Cloud</strong> processes page views, as above.</li>
       <li><strong>Telegram</strong> carries the operator's notifications: the key label and prefix when a key is created, and a daily count of calls per route and per key.</li>
+      <li><strong>The x402 facilitator</strong> (Circle's, for payments on Arc) receives a pay-per-call payment's signed authorization — paying address, amount, recipient — to check it and put it on-chain.</li>
     </ul>
     <p>Nothing is sold, and nothing is shared beyond these.</p>
   </div>
@@ -111,7 +113,7 @@
     <ul>
       <li>Route counts, keys and their call counters: for as long as the service runs, or until you ask for a key to be deleted.</li>
       <li>Webhook alerts: until you delete them.</li>
-      <li>Billing orders: kept as accounting records.</li>
+      <li>Billing orders and pay-per-call settlements: kept as accounting records.</li>
       <li>IP addresses: one minute in memory, an hour for key creation — never on disk.</li>
     </ul>
   </div>

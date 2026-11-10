@@ -192,6 +192,27 @@ interpolation step for anything published, and this is on the measurement side o
 
 ---
 
+## Pay per call — x402 (optional)
+
+`/x402/<route>` sells each read-only `/v1/<route>` answer for a fixed USDC price, to an agent with no
+key: x402 v2, scheme `exact`, settled by a facilitator (see `x402.js`). Off unless configured. Set all
+of these, or none — a partial set refuses to boot:
+
+| Variable | Value |
+|---|---|
+| `X402_PAY_TO` | The address that receives the USDC. Must be one you hold the key to **on Arc**. |
+| `X402_PRICE_USDC` | Price per call, e.g. `0.01`. At most 6 decimals. |
+| `X402_FACILITATOR_URL` | The facilitator's base URL; `/verify` and `/settle` are appended. Circle: `https://api.circle.com/v1/facilitator/x402` (same URL for testnet and mainnet — the key decides). |
+| `X402_ASSET_NAME`, `X402_ASSET_VERSION` | The EIP-712 domain of USDC on this network. **Arc: `USDC` and `2`** (read from the contract on 6 Nov 2026, and what Circle's `/supported` lists for `eip155:5042`). `USD Coin` is Base's and Polygon's. A wrong value fails every payment at `/verify`; it cannot move money wrongly. |
+| `X402_FACILITATOR_KEY` | Sent as `Authorization: Bearer …`. Circle's is the whole `LIVE_API_KEY:<id>:<secret>` string, created in console.circle.com; a `TEST_API_KEY` only works on testnet. Circle's keyless trial needs the seller to sign each request, which this server does not do. |
+| `X402_RPM` | Optional, default 120. Requests per minute per client address. |
+
+Network and asset are not configurable: they come from the network profile, so a testnet deployment
+can only ask for testnet USDC. Circle's facilitator answers a slow settlement "pending" rather than
+failing it; `x402.js` asks again with the same authorization and never has the buyer sign twice. Check it live with `curl -i https://stabledesk.xyz/x402/stablecoins`
+(expect `402` and a `payment-required` header) and `curl https://stabledesk.xyz/x402` (the catalogue).
+Settled payments show under `x402` in `/api/admin/usage`.
+
 ## Backups — what cannot be re-indexed
 
 Most of the database can be rebuilt by pointing the indexer at the chain again. Four tables cannot,
@@ -203,6 +224,7 @@ and losing the volume loses them permanently:
 | `buckets_daily` | Per-day history, kept indefinitely. Re-indexable in principle, but only for as long as the RPC still serves those blocks' logs, and never for a range the provider has pruned. |
 | `tvl_history` | Daily TVL levels. A level is a reading taken at a moment; `balanceOf` today cannot tell you last Tuesday's balance. |
 | `api_keys` / `orders` | Issued keys and paid subscriptions. Losing these revokes access people paid for. |
+| `x402_payments` | Settled pay-per-call payments. The transfers are on-chain, but which route each one bought is only here. |
 
 `top_transfers` and `fee_samples` are re-derivable; `buckets`, `addr_stats` and `recent` are rolling
 windows and will refill on their own.

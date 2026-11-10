@@ -22,6 +22,7 @@ import { csvResponse, PROTOCOL_COLUMNS, CANDIDATE_COLUMNS } from './csv.js';
 import { getLabel } from './labels.js';
 import { handleV1, clientIp } from './api.js';
 import { handleMcp, MCP_RPM } from './mcp.js';
+import { handleX402 } from './x402.js';
 import { normalizePath, dayOf, countable, keyPrefix, buildDigest, QUIET_DAYS_BEFORE_HEARTBEAT } from './usage.js';
 import { sendTelegram, configured as tgConfigured } from './telegram.js';
 import { specJson, llmsTxt } from './openapi.js';
@@ -318,6 +319,10 @@ async function handle(req, res) {
   // MCP endpoint for AI assistants: the /v1 figures as read-only tools, no key (see mcp.js)
   if (path === '/mcp') return handleMcp(req, res);
 
+  // Pay per call: the /v1 figures without a key, settled in USDC through x402 (see x402.js). 404
+  // unless the X402_* variables are set.
+  if (path === '/x402' || path.startsWith('/x402/')) return handleX402(req, res, u);
+
   // public data API (keys + tiers + rate limiting)
   if (path.startsWith('/v1')) return handleV1(req, res, u);
 
@@ -353,7 +358,10 @@ async function handle(req, res) {
           created: k.created, requests: k.requests, lastUsed: k.last_used,
         })),
       },
-      note: 'Counts calls to /v1, /openapi.json and /llms.txt. Human page views are in Umami; these are the surfaces it cannot see.',
+      // Settled payments, from the settlement record rather than a hit counter: each row is a
+      // transaction on-chain, so this is the one usage figure here anyone can check independently.
+      x402: db.x402Summary(sinceDay * 1000),
+      note: 'Counts calls to /v1, /openapi.json and /llms.txt. Human page views are in Umami; these are the surfaces it cannot see. x402 counts settled payments.',
     });
   }
   // TVL is merged in here rather than computed by the indexer: it comes from a separate scan loop on

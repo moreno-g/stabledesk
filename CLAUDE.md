@@ -8,7 +8,7 @@ Public, MIT, `moreno-g/stabledesk` → [stabledesk.xyz](https://stabledesk.xyz)
 ## Commandes
 
 ```
-npm test     # node --test → test/smoke.test.js (99 tests, aucun réseau)
+npm test     # node --test → test/smoke.test.js (102 tests, aucun réseau)
 npm start    # node server.js, port 4317
 ```
 
@@ -28,6 +28,7 @@ Node **≥ 22.5.0** (obligatoire : `node:sqlite`). Zéro dépendance npm, ESM, `
 | `rankings.js` `tvl.js` `entities.js` `protocols.js` | Métriques et registres. `entities.js` est **expérimental**. |
 | `whalewatch.js` `chainalert.js` `chainuptime.js` `telegram.js` | Alertes et disponibilité. `whalewatch` est en réserve jusqu'au mainnet. |
 | `payments.js` | Facturation crypto : surveille l'USDC sur **Base mainnet**, pas sur Arc. |
+| `x402.js` | Paiement à l'appel `/x402/<route>` : miroir payant des routes `/v1` en lecture, x402 v2 `exact`, USDC du réseau actif via un facilitateur. **Off** sans les variables `X402_*` (toutes ou aucune, voir `DEPLOY.md`). Ne facture qu'un 200 ; règle avant de répondre. |
 | `csv.js` `openapi.js` `validate.js` `constants.js` `search.js` `labels.js` | Surface API et helpers. |
 
 ## Règles propres à ce repo

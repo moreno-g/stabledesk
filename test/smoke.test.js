@@ -2446,6 +2446,223 @@ test('fee median: a re-sampled block is not counted twice', async () => {
     'the block row is INSERT OR IGNORE, so its buckets must be too — otherwise median and mean come from different samples');
 });
 
+// ---- pay per call (/x402) ----
+// No network: the facilitator is a function standing in for fetch, which records what it was sent.
+const X402_ENV = {
+  X402_PAY_TO: '0x06ed94D5Fd3392989C8A3dEE30196e1D1beabb05',
+  X402_PRICE_USDC: '0.01',
+  X402_FACILITATOR_URL: 'https://facilitator.example/x402/',
+  X402_ASSET_NAME: 'USDC',
+  X402_ASSET_VERSION: '2',
+};
+const X402_ARC = { label: 'Arc', chainId: 5042, tokens: { '0x3600000000000000000000000000000000000000': { symbol: 'USDC', decimals: 6 } } };
+const X402_PAYER = '0x1111111111111111111111111111111111111111';
+
+function x402Payload(terms, authorization = {}) {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    x402Version: 2,
+    resource: { url: 'https://stabledesk.xyz/x402/status' },
+    accepted: terms,
+    payload: {
+      signature: '0x' + 'ab'.repeat(65),
+      authorization: {
+        from: X402_PAYER, to: terms.payTo, value: terms.amount,
+        validAfter: String(now - 10), validBefore: String(now + 60), nonce: '0x' + '22'.repeat(32),
+        ...authorization,
+      },
+    },
+  };
+}
+
+test('x402 terms: off unless configured, all or nothing, the price exact, network and asset from the profile', async () => {
+  const { x402Config, toBaseUnits, fromBaseUnits } = await import('../x402.js');
+  assert.equal(x402Config({}, X402_ARC), null, 'nothing set: the feature is off');
+  assert.throws(() => x402Config({ X402_PAY_TO: X402_ENV.X402_PAY_TO }, X402_ARC), /partly configured/, 'half a payment rail refuses to start');
+  assert.throws(() => x402Config({ ...X402_ENV, X402_PAY_TO: '0x123' }, X402_ARC), /X402_PAY_TO/);
+  assert.throws(() => x402Config({ ...X402_ENV, X402_FACILITATOR_URL: 'http://facilitator.example' }, X402_ARC), /https/);
+  assert.throws(() => x402Config({ ...X402_ENV, X402_PRICE_USDC: '0.0000001' }, X402_ARC), /X402_PRICE_USDC/, 'more decimals than USDC has is refused, not rounded');
+  assert.throws(() => x402Config({ ...X402_ENV, X402_PRICE_USDC: '0' }, X402_ARC), /X402_PRICE_USDC/);
+  assert.throws(() => x402Config(X402_ENV, { ...X402_ARC, tokens: {} }), /exactly one USDC/);
+
+  const c = x402Config(X402_ENV, X402_ARC);
+  assert.equal(c.network, 'eip155:5042', 'CAIP-2, from the chain id of the profile');
+  assert.equal(c.asset, '0x3600000000000000000000000000000000000000', 'the USDC the profile tracks');
+  assert.equal(c.amount, '10000', '0.01 USDC in base units');
+  assert.equal(c.facilitator, 'https://facilitator.example/x402', 'a trailing slash is dropped');
+  assert.equal(toBaseUnits('1.5', 6), 1500000n);
+  assert.equal(toBaseUnits('-1', 6), null);
+  assert.equal(toBaseUnits('1e3', 6), null);
+  assert.equal(fromBaseUnits('10000', 6), '0.01');
+  assert.equal(fromBaseUnits('1000000', 6), '1');
+});
+
+test('x402: a payment is checked against our own terms before the facilitator sees it', async () => {
+  const { x402Config, requirements, checkPayment } = await import('../x402.js');
+  const terms = requirements(x402Config(X402_ENV, X402_ARC));
+  assert.equal(checkPayment(x402Payload(terms), terms), null, 'the terms as offered pass');
+  assert.equal(checkPayment(null, terms), 'invalid_payload');
+  assert.equal(checkPayment({ ...x402Payload(terms), x402Version: 1 }, terms), 'invalid_x402_version');
+  assert.equal(checkPayment(x402Payload({ ...terms, amount: '1' }), terms), 'payment_terms_mismatch', 'terms the buyer rewrote');
+  assert.equal(checkPayment(x402Payload(terms, { value: '9999' }), terms), 'invalid_exact_evm_payload_authorization_value_mismatch', 'signed for less');
+  assert.equal(checkPayment(x402Payload(terms, { to: X402_PAYER }), terms), 'invalid_exact_evm_payload_recipient_mismatch', 'signed to someone else');
+  const now = Math.floor(Date.now() / 1000);
+  assert.equal(checkPayment(x402Payload(terms, { validBefore: String(now + 2) }), terms), 'invalid_exact_evm_payload_authorization_valid_before', 'about to expire');
+  assert.equal(checkPayment(x402Payload(terms, { validAfter: String(now + 600) }), terms), 'invalid_exact_evm_payload_authorization_valid_after', 'not valid yet');
+  const upper = { ...terms, payTo: terms.payTo.toUpperCase().replace('0X', '0x') };
+  assert.equal(checkPayment(x402Payload(upper), terms), null, 'addresses compare without regard to case');
+});
+
+test('x402: unpaid gets the terms, paid is verified then settled then recorded, and only a 200 is charged', async () => {
+  const { x402Config, handleX402, requirements, decode } = await import('../x402.js');
+  const db = await import('../db.js');
+  const cfg = { ...x402Config(X402_ENV, X402_ARC), apiKey: 'LIVE_API_KEY:id:secret' };
+  const terms = requirements(cfg);
+  const TX = (n) => '0x' + n.repeat(64);
+
+  // Each answer is { status, body }, an Error to throw, or a list consumed one call at a time.
+  const ok = (body) => ({ status: 200, body });
+  const calls = [];
+  let answers;
+  const reset = (verify, settle) => {
+    calls.length = 0;
+    answers = {
+      verify: verify ?? ok({ isValid: true, payer: X402_PAYER }),
+      settle: settle ?? ok({ success: true, transaction: TX('c'), network: 'eip155:5042', payer: X402_PAYER, amount: '10000' }),
+    };
+  };
+  const fetchImpl = async (url, init) => {
+    const op = url.split('/').pop();
+    calls.push({ url, op, body: JSON.parse(init.body), auth: init.headers.authorization });
+    const a = Array.isArray(answers[op]) ? answers[op].shift() : answers[op];
+    if (a instanceof Error) throw a;
+    return new Response(JSON.stringify(a.body), { status: a.status, headers: { 'content-type': 'application/json' } });
+  };
+  const call = (path, headers = {}, method = 'GET', config = cfg) => new Promise((resolve) => {
+    const res = { writeHead(code, h = {}) { this.code = code; this.h = h; return this; }, end(s = '') { resolve({ code: this.code, headers: this.h, body: s }); } };
+    handleX402({ method, headers, socket: { remoteAddress: '203.0.113.7' } }, res, new URL(path, 'http://localhost'), { config, fetchImpl, retryMs: 0 });
+  });
+  const nonce = (n) => ({ nonce: '0x' + n.repeat(64) });
+  const pay = (p) => ({ 'payment-signature': Buffer.from(JSON.stringify(p)).toString('base64') });
+  const errorOf = (r) => JSON.parse(r.body).error;
+
+  reset();
+  assert.equal((await call('/x402/status', {}, 'GET', null)).code, 404, 'unconfigured: the route does not exist');
+  assert.equal((await call('/x402/status', {}, 'POST')).code, 405);
+  assert.equal((await call('/x402/status', {}, 'OPTIONS')).code, 204);
+
+  const cat = await call('/x402');
+  assert.equal(cat.code, 200, 'the catalogue is free');
+  const listed = JSON.parse(cat.body);
+  assert.equal(listed.price, '0.01');
+  const paths = listed.routes.map((r) => r.path);
+  assert.ok(paths.includes('/x402/stablecoins') && paths.includes('/x402/tvl'), 'read-only routes are sold');
+  assert.ok(!paths.some((p) => /\/(keys|billing|alerts)/.test(p)), 'keys, billing and alerts are not');
+
+  // The test process has no live snapshot, so a data route answers 503 "warming up" — the very error
+  // nobody should pay for. A keyed route is refused before that check, which gives the 404.
+  const warming = await call('/x402/no-such-route');
+  assert.equal(warming.code, 503, 'an error from /v1 is answered as it is');
+  assert.equal(warming.headers['payment-required'], undefined, 'and nobody is asked to pay for it');
+  const keyed = await call('/x402/billing/order');
+  assert.equal(keyed.code, 404, 'billing is never reachable through /x402');
+  assert.equal(keyed.headers['payment-required'], undefined);
+  assert.equal(calls.length, 0);
+
+  const unpaid = await call('/x402/status');
+  assert.equal(unpaid.code, 402);
+  const pr = decode(unpaid.headers['payment-required']);
+  assert.match(unpaid.headers['payment-required'], /^[A-Za-z0-9+/]*={0,2}$/, 'standard base64, as the reference client validates it');
+  assert.equal(pr.x402Version, 2);
+  assert.deepEqual(pr.accepts, [terms], 'the terms travel in the header');
+  assert.deepEqual(pr.accepts[0].extra, { name: 'USDC', version: '2', assetTransferMethod: 'eip3009' });
+  assert.equal(pr.resource.url, 'https://stabledesk.xyz/x402/status');
+  assert.deepEqual(JSON.parse(unpaid.body), pr, 'and, readable, in the body');
+
+  const short = await call('/x402/status', pay(x402Payload(terms, { value: '1' })));
+  assert.equal(short.code, 402);
+  assert.equal(errorOf(short), 'invalid_exact_evm_payload_authorization_value_mismatch');
+  assert.equal(calls.length, 0, 'a payment that breaks our terms never reaches the facilitator');
+
+  const paid = await call('/x402/status', pay(x402Payload(terms, nonce('1'))));
+  assert.equal(paid.code, 200);
+  assert.deepEqual(calls.map((c) => c.op), ['verify', 'settle'], 'verified, then settled, before answering');
+  for (const c of calls) {
+    assert.equal(c.url, `https://facilitator.example/x402/${c.op}`);
+    assert.equal(c.auth, 'Bearer LIVE_API_KEY:id:secret', 'the key is sent whole');
+    assert.equal(c.body.x402Version, 2);
+    assert.deepEqual(c.body.paymentRequirements, terms);
+    assert.equal(c.body.paymentPayload.payload.authorization.from, X402_PAYER);
+  }
+  assert.deepEqual(decode(paid.headers['payment-response']), answers.settle.body, 'the receipt comes back with the answer');
+  const { CHAIN } = await import('../chains.js');
+  assert.equal(JSON.parse(paid.body).chainId, CHAIN.chainId, 'the answer is the /v1/status answer');
+  assert.match(paid.headers['content-type'], /application\/json/);
+
+  // The same authorization again: its nonce is spent, the facilitator hands back the same transaction,
+  // and that transaction has been answered already.
+  reset(ok({ isValid: false, invalidReason: 'invalid_transaction_state', payer: X402_PAYER }));
+  const replay = await call('/x402/status', pay(x402Payload(terms, nonce('1'))));
+  assert.equal(replay.code, 402);
+  assert.equal(errorOf(replay), 'payment_already_used', 'one settlement, one answer');
+
+  // Pending, then settled, inside the same request: asked again with the same body, never re-signed.
+  reset(undefined, [
+    ok({ success: false, errorReason: 'settlement_pending', transaction: '', network: 'eip155:5042', payer: X402_PAYER }),
+    ok({ success: true, transaction: TX('d'), network: 'eip155:5042', payer: X402_PAYER }),
+  ]);
+  const slow = await call('/x402/status', pay(x402Payload(terms, nonce('2'))));
+  assert.equal(slow.code, 200);
+  assert.deepEqual(calls.map((c) => c.op), ['verify', 'settle', 'settle']);
+  assert.deepEqual(calls[1].body, calls[2].body, 'the retry is the same authorization');
+
+  // Still pending after every attempt: no answer, and the buyer is told to retry with the same signature.
+  const stillPending = ok({ success: false, errorReason: 'settlement_pending', transaction: '', network: 'eip155:5042', payer: X402_PAYER });
+  reset(undefined, [stillPending, stillPending, stillPending]);
+  const stuck = await call('/x402/status', pay(x402Payload(terms, nonce('3'))));
+  assert.equal(stuck.code, 402);
+  assert.equal(errorOf(stuck), 'settlement_pending');
+  assert.match(JSON.parse(stuck.body).hint, /same PAYMENT-SIGNATURE/);
+  assert.equal(decode(stuck.headers['payment-response']).errorReason, 'settlement_pending');
+  // …and when it retries, the spent nonce settles to its transaction and is answered, once.
+  reset(ok({ isValid: false, invalidReason: 'invalid_transaction_state', payer: X402_PAYER }),
+    ok({ success: true, transaction: TX('e'), network: 'eip155:5042', payer: X402_PAYER }));
+  assert.equal((await call('/x402/status', pay(x402Payload(terms, nonce('3'))))).code, 200, 'the retry after pending is served');
+
+  reset(ok({ isValid: false, invalidReason: 'insufficient_funds', payer: X402_PAYER }));
+  const broke = await call('/x402/status', pay(x402Payload(terms, nonce('4'))));
+  assert.equal(broke.code, 402);
+  assert.equal(errorOf(broke), 'insufficient_funds', "the facilitator's reason is passed on");
+  assert.deepEqual(calls.map((c) => c.op), ['verify'], 'an invalid payment is never settled');
+
+  reset(undefined, { status: 409, body: { code: 'conflict', message: 'reused', errors: [{ reason: 'authorization_reused' }] } });
+  const reused = await call('/x402/status', pay(x402Payload(terms, nonce('5'))));
+  assert.equal(reused.code, 402, "a settlement refused for the buyer's reasons is a 402");
+  assert.equal(errorOf(reused), 'authorization_reused', "Circle's error body is read too");
+
+  reset(undefined, ok({ success: false, errorReason: 'insufficient_funds', transaction: '', network: 'eip155:5042' }));
+  const failed = await call('/x402/status', pay(x402Payload(terms, nonce('6'))));
+  assert.equal(failed.code, 402, 'a failed settlement is a 402, not a free answer');
+  assert.equal(decode(failed.headers['payment-response']).success, false, 'with the failed settlement attached');
+
+  // Our side, not the buyer's: a refused key, an exhausted trial, a facilitator that is down.
+  reset({ status: 401, body: { code: 'unauthorized', message: 'bad key', errors: [] } });
+  assert.equal((await call('/x402/status', pay(x402Payload(terms, nonce('7'))))).code, 502, 'a refused key is our fault');
+  reset(undefined, { status: 403, body: { code: 'forbidden', message: 'trial over', errors: [{ reason: 'registration_required' }] } });
+  assert.equal((await call('/x402/status', pay(x402Payload(terms, nonce('7'))))).code, 502, 'an exhausted trial is ours too');
+  reset(new Error('connect ECONNREFUSED'));
+  assert.equal((await call('/x402/status', pay(x402Payload(terms, nonce('7'))))).code, 502, 'facilitator down: nothing served');
+  reset(undefined, new Error('The operation was aborted due to timeout'));
+  assert.equal((await call('/x402/status', pay(x402Payload(terms, nonce('7'))))).code, 502, 'an unconfirmed settlement withholds the answer');
+
+  const sum = db.x402Summary(0);
+  assert.equal(sum.settled, 3, 'three settlements served: the first, the slow one, the one retried after pending');
+  assert.equal(sum.payers, 1);
+  assert.equal(sum.amount, '30000');
+  assert.deepEqual(sum.byRoute.map((r) => ({ ...r })), [{ route: '/v1/status', settled: 3 }], 'recorded by route label');
+  assert.equal(db.recordX402Payment({ tx: TX('C'), network: 'eip155:5042', payer: X402_PAYER, amount: '10000', route: '/v1/status' }), false, 'a transaction is recorded once, whatever its case');
+});
+
 test('whalewatch: threshold filtering, drafting, and dedupe', async () => {
   const db = await import('../db.js');
   const { evaluate, draftText, TWEET_WORTHY_MIN } = await import('../whalewatch.js');
@@ -2934,7 +3151,7 @@ test('the privacy page is served, linked from every footer, and its storage clai
   // "No IP address written to disk": none of the tables about usage, keys, alerts or orders has a
   // column that could hold one, or a user agent, or an email address.
   const db = read('db.js');
-  for (const t of ['hits', 'key_daily', 'api_keys', 'alerts', 'orders']) {
+  for (const t of ['hits', 'key_daily', 'api_keys', 'alerts', 'orders', 'x402_payments']) {
     const ddl = db.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${t} \\(([\\s\\S]*?)\\);`))?.[1];
     assert.ok(ddl, `${t}: schema found`);
     assert.doesNotMatch(ddl, /\b(ip|ip_addr|remote_addr|user_agent|ua|email)\b/i, `${t} has no column for an IP, a user agent or an email`);
