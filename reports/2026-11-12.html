@@ -1,0 +1,73 @@
+  <p class="lead">{{LEAD}}</p>
+
+  <h2>Volume: one measure up, two down</h2>
+  <div class="card">
+    <div class="tbl"><table>
+      <thead><tr><th>USDC</th><th class="num">30 Oct – 5 Nov</th><th class="num">6–12 Nov</th><th class="num">Change</th></tr></thead>
+      <tbody>
+        <tr><td>Raw</td><td class="num">5,428.3M</td><td class="num">6,104.7M</td><td class="num">+12.5%</td></tr>
+        <tr><td>Mints and burns, in raw</td><td class="num">3,830.0M</td><td class="num">4,781.8M</td><td class="num">+24.9%</td></tr>
+        <tr><td>Raw, without mints and burns</td><td class="num">1,598.3M</td><td class="num">1,322.8M</td><td class="num">−17.2%</td></tr>
+        <tr><td>Real</td><td class="num">1,213.6M</td><td class="num">946.1M</td><td class="num">−22.0%</td></tr>
+        <tr><td>Adjusted</td><td class="num">266.8M</td><td class="num">122.8M</td><td class="num">−54.0%</td></tr>
+        <tr><td>Transfer events</td><td class="num">823,656</td><td class="num">710,815</td><td class="num">−13.7%</td></tr>
+      </tbody>
+    </table></div>
+    <p><strong>Raw</strong> counts every Transfer event the token contract emits, mints and burns included. <strong>Real</strong> keeps the largest transfer per transaction, per token, so routing hops and contract internals are not counted twice, and leaves mints and burns out. <strong>Adjusted</strong> is real volume minus transfers where both ends are infrastructure. Without mints and burns, raw volume fell 17.2%, and real volume fell.</p>
+    <p>An address that sent more than 1,000 transfers or $10M in 30 days, or more than that monthly rate over a longer sent history, is infrastructure. The flag set is recomputed every minute, and each minute's adjusted volume uses the set of that minute. Definitions and thresholds: <a href="/methodology">methodology</a>.</p>
+  </div>
+
+  <h2>Where the mints and burns came from</h2>
+  <div class="card">
+    <div class="tbl"><table>
+      <thead><tr><th>Route</th><th class="num">In</th><th class="num">Out</th><th class="num">Net</th></tr></thead>
+      <tbody>
+        <tr><td>CCTP</td><td class="num">419.7M</td><td class="num">42.8M</td><td class="num">+376.9M</td></tr>
+        <tr><td>Circle Gateway</td><td class="num">14.0M</td><td class="num">322.5M</td><td class="num">−308.5M</td></tr>
+        <tr><td>Organic issuance</td><td class="num">2,075.0M</td><td class="num">1,907.9M</td><td class="num">+167.1M</td></tr>
+        <tr><td>Total</td><td class="num"></td><td class="num"></td><td class="num"><strong>+235.5M</strong></td></tr>
+      </tbody>
+    </table></div>
+    <p>A CCTP or Gateway mint is not issuance: the same dollars changed chains. The two cross-chain routes pulled in opposite directions, as the week before (CCTP +486.2M, Gateway −406.1M), and netted <strong>+68.5M</strong>.</p>
+    <p>Organic issuance — USDC created or destroyed on Arc itself, once both routes are taken out — netted <strong>+167.1M</strong>: 71% of the week's growth, against 30% (+33.9M) the week before. Gross, 2,075.0M was created and 1,907.9M destroyed, 83% of the week's mints and burns. How each mint and burn is attributed to a route: <a href="/methodology">methodology</a>, under Bridged liquidity vs. issuance and Cross-chain transfers (CCTP).</p>
+  </div>
+
+  <h2>Supply</h2>
+  <div class="card">
+    <p>Over the week, supply went from 1,187.2M to 1,422.7M: <strong>+235.5M</strong>, more than twice the previous week's +113.9M. Its highest close was <strong>1,422.7M</strong>, on 12 November: the highest end-of-day supply since launch, above the 1,194.2M of 4 November.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>End of day (UTC)</th><th class="num">USDC supply</th><th class="num">Block</th></tr></thead>
+      <tbody>
+        <tr><td>29 Oct</td><td class="num">1,073.2M</td><td class="num">28,558,018</td></tr>
+        <tr><td>4 Nov</td><td class="num">1,194.2M</td><td class="num">29,579,500</td></tr>
+        <tr><td>5 Nov</td><td class="num">1,187.2M</td><td class="num">29,749,315</td></tr>
+        <tr><td>6 Nov</td><td class="num">1,285.8M</td><td class="num">29,919,185</td></tr>
+        <tr><td>7 Nov</td><td class="num">1,284.0M</td><td class="num">30,089,644</td></tr>
+        <tr><td>8 Nov</td><td class="num">1,297.9M</td><td class="num">30,260,106</td></tr>
+        <tr><td>9 Nov</td><td class="num">1,304.4M</td><td class="num">30,430,568</td></tr>
+        <tr><td>10 Nov</td><td class="num">1,315.0M</td><td class="num">30,601,022</td></tr>
+        <tr><td>11 Nov</td><td class="num">1,353.2M</td><td class="num">30,771,272</td></tr>
+        <tr><td>12 Nov</td><td class="num">1,422.7M</td><td class="num">30,941,231</td></tr>
+      </tbody>
+    </table></div>
+    <p>Each figure is <code>totalSupply()</code> on the USDC contract <code>0x3600000000000000000000000000000000000000</code>, read at the stated block on Arc mainnet: the last block before midnight UTC. On each day of the two weeks, the change in <code>totalSupply()</code> equals the index's mints minus burns, to the cent.</p>
+  </div>
+
+  <h2>Reproduce</h2>
+  <div class="card">
+    <p>Flows and volumes, in daily UTC buckets (free key on <a href="/docs">/docs</a>):</p>
+    <p><code>GET /v1/stablecoins/history?token=USDC&amp;range=all</code></p>
+    <p>Each bucket carries <code>volume</code>, <code>rvolume</code>, <code>avolume</code>, <code>cnt</code>, <code>mint</code> and <code>burn</code>; the CCTP and Gateway parts are <code>cmint</code>/<code>cburn</code> and <code>bmint</code>/<code>bburn</code>. Organic issuance is <code>mint − cmint − bmint</code> against <code>burn − cburn − bburn</code>; raw volume without mints and burns is <code>volume − mint − burn</code>. The same series is served without a key by the <code>stablecoin_history</code> tool of the MCP connector at <code>https://stabledesk.xyz/mcp</code>, with <code>token</code> USDC and <code>range</code> all.</p>
+    <p>Supply needs no key: call <code>totalSupply()</code> on the USDC contract at the blocks above, on an Arc mainnet RPC that keeps historical state. End-of-day supply on any other day since launch follows from one of those reads and the same series: subtract each later day's <code>mint − burn</code>.</p>
+  </div>
+
+  <h2>Limits</h2>
+  <div class="note">
+    Volumes and flows come from Stabledesk's index. Supply is read from the chain and the index's daily net issuance matches it; transfers are not re-read independently for this report, and who minted and burned is not attributed.
+    “Since launch” means since the index's record began, on 15 September 2026: eight weeks of history. A record over “seven complete UTC days” compares windows that start at midnight UTC; a seven-day window starting at another hour can hold more.
+    The flag set moves from minute to minute because the rule converts sent history into days at a block time sampled over the last 15 blocks, from whole-second timestamps: 428.6, 500 or 571.4 ms, against 507.4 ms on average over the week. Adjusted volume carries that noise.
+    CCTP by counterparty chain is not shown: <code>/v1/cctp</code> serves rolling 24h and 7d windows only, so a fixed week could not be reproduced later.
+    EURC, GBPA and USYC are not covered. Each figure is rounded to 0.1M on its own, so a sum or a difference of rounded figures can be off by 0.1M.
+    Figures were read on 13 November 2026, from the index as it stood at 13:07 UTC. If the index is corrected later, the correction is dated on the methodology page; this report stays as published.
+    Not investment advice.
+  </div>
